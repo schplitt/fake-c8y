@@ -309,6 +309,64 @@ export interface C8ySeed {
   tenant?: string
 }
 
+/**
+ * What `world.seed()` created: the ids per seeded list, in input order, one
+ * entry per input item. A list is here when the seed has it (also when it is
+ * empty). The ids are the ones the API uses for the document, so they work in
+ * `GET .../{id}` and `world.db.<collection>.get(id)`.
+ *
+ * Lists that create nothing addressable have no entry: `serviceState`,
+ * `usageStatistics`, and `trustedCertificates` (keyed by the fingerprint you
+ * give).
+ */
+export interface C8ySeedResult {
+  /**
+   * The role names, as given (a role that existed already stays as it is).
+   */
+  roles?: string[]
+  inventoryRoles?: string[]
+  groups?: string[]
+  /**
+   * The user names, as given.
+   */
+  users?: string[]
+  measurements?: string[]
+  /**
+   * One entry per generator: the ids reserved for its grid points. Grid
+   * point `i` has the `i`-th id of the world's measurement id sequence from
+   * `firstId` on, and ids sort like that sequence, so `firstId` and
+   * `lastId` bound the generator's ids. `firstId` is the document at `from`
+   * unless a gap covers it. A live generator (no `to`) also reserves ids for
+   * points after the clock, so its `lastId` is a point in the future.
+   */
+  measurementGenerators?: Array<{ firstId: string, lastId: string }>
+  events?: string[]
+  alarms?: string[]
+  operations?: string[]
+  /**
+   * The request ids, as given (the device's external id).
+   */
+  newDeviceRequests?: string[]
+  retentionRules?: string[]
+  auditRecords?: string[]
+  /**
+   * The id of each input's application: a new one, the given `id`, or the
+   * id of the application it replaced (same `id`, else same `name` and
+   * owner). Two inputs that replace the same application have the same id.
+   */
+  applications?: string[]
+}
+
+/**
+ * What `seed()` returns for a given seed: every list the seed passes (and
+ * does not leave possibly undefined) comes back as a required array, so
+ * `const { alarms: [overheat] } = world.seed({ alarms: [...] })` typechecks.
+ * Lists the seed leaves out stay optional.
+ */
+export type C8ySeedResultFor<S extends C8ySeed> = C8ySeedResult & {
+  [K in keyof S as K extends keyof C8ySeedResult ? (undefined extends S[K] ? never : K) : never]-?: NonNullable<C8ySeedResult[K & keyof C8ySeedResult]>
+}
+
 const RESERVED = ['children', 'assets', 'additions', 'externalIds', 'tenant']
 
 /**
@@ -396,7 +454,7 @@ function toContent(content: { name: string, contentType: string, bytes: Uint8Arr
   return content && { ...content, text: () => new TextDecoder().decode(content.bytes) }
 }
 
-function seedInto(data: TenantData, collection: Exclude<DocumentCollection, 'managedObjects'>, input: Record<string, unknown>): void {
+function seedInto(data: TenantData, collection: Exclude<DocumentCollection, 'managedObjects'>, input: Record<string, unknown>): string {
   const resource = Object.values(RESOURCES).find((item) => item.collection === collection)!
   const now = data.world.now()
   const body: Record<string, unknown> = { time: now, ...input }
@@ -426,9 +484,10 @@ function seedInto(data: TenantData, collection: Exclude<DocumentCollection, 'man
       throw new TypeError(`seed(): invalid operation: ${(updated as Response & { message?: string }).message ?? updated.status}`)
     }
   }
+  return result.id
 }
 
-function seedUsers(data: TenantData, seed: C8ySeed): void {
+function seedUsers(data: TenantData, seed: C8ySeed, result: C8ySeedResult): void {
   const attempt = <T>(what: string, write: () => T): T => {
     try {
       return write()
@@ -436,14 +495,20 @@ function seedUsers(data: TenantData, seed: C8ySeed): void {
       throw new TypeError(`seed(): invalid ${what}: ${error instanceof UserApiError || error instanceof TypeError ? error.message : String(error)}`)
     }
   }
-  for (const role of seed.roles ?? []) {
-    data.roles.set(role, role)
+  if (seed.roles) {
+    result.roles = seed.roles.map((role) => {
+      data.roles.set(role, role)
+      return role
+    })
   }
-  for (const role of seed.inventoryRoles ?? []) {
-    attempt(`inventory role ${role.name}`, () => createInventoryRole(data, { ...role }))
+  if (seed.inventoryRoles) {
+    result.inventoryRoles = seed.inventoryRoles.map((role) => attempt(`inventory role ${role.name}`, () => createInventoryRole(data, { ...role })).id)
   }
-  for (const group of seed.groups ?? []) {
-    attempt(`group ${group.name}`, () => createGroup(data, { ...group }))
+  if (seed.groups) {
+    result.groups = seed.groups.map((group) => attempt(`group ${group.name}`, () => createGroup(data, { ...group })).id)
+  }
+  if (seed.users) {
+    result.users = seed.users.map((input) => input.userName)
   }
   for (const input of seed.users ?? []) {
     const { roles = [], groups = [], inventoryAssignments = [], ...fields } = input
@@ -467,13 +532,15 @@ function seedUsers(data: TenantData, seed: C8ySeed): void {
  * @param data - Tenant to seed
  * @param seed - Data to seed
  * @param user - User of seeded audit records and new device requests that name none
+ * @returns The ids per seeded list, in input order
  */
-export function applySeed(data: TenantData, seed: C8ySeed, user: string): void {
-  seedUsers(data, seed)
-  for (const measurement of seed.measurements ?? []) {
-    seedInto(data, 'measurements', measurement)
+export function applySeed(data: TenantData, seed: C8ySeed, user: string): C8ySeedResult {
+  const result: C8ySeedResult = {}
+  seedUsers(data, seed, result)
+  if (seed.measurements) {
+    result.measurements = seed.measurements.map((measurement) => seedInto(data, 'measurements', measurement))
   }
-  if (seed.measurementGenerators?.length) {
+  if (seed.measurementGenerators) {
     const generators = seed.measurementGenerators.map((generator) => {
       const source = resolveId(generator.source)
       if (!data.managedObjects.has(source)) {
@@ -481,38 +548,45 @@ export function applySeed(data: TenantData, seed: C8ySeed, user: string): void {
       }
       return { ...generator, source }
     })
-    seedGenerators(data.measurementGenerators, generators, data.world.reserveIds, Date.parse(data.world.now()))
+    const blocks = seedGenerators(data.measurementGenerators, generators, data.world.reserveIds, Date.parse(data.world.now()))
     for (const generator of generators) {
       // generated data keeps a monitored device available
       scheduleAvailability(data, generator.source)
     }
+    result.measurementGenerators = blocks.map(({ idStart, block }) => ({ firstId: data.world.measurementId(idStart), lastId: data.world.measurementId(idStart + block - 1) }))
   }
-  for (const event of seed.events ?? []) {
-    seedInto(data, 'events', event)
+  if (seed.events) {
+    result.events = seed.events.map((event) => seedInto(data, 'events', event))
   }
-  for (const alarm of seed.alarms ?? []) {
-    seedInto(data, 'alarms', alarm)
+  if (seed.alarms) {
+    result.alarms = seed.alarms.map((alarm) => seedInto(data, 'alarms', alarm))
   }
-  for (const operation of seed.operations ?? []) {
-    seedInto(data, 'operations', operation as Record<string, unknown>)
+  if (seed.operations) {
+    result.operations = seed.operations.map((operation) => seedInto(data, 'operations', operation as Record<string, unknown>))
   }
-  for (const { status, owner: requestOwner, groupId, ...input } of seed.newDeviceRequests ?? []) {
-    const result = createNewDeviceRequest(data, { ...input, ...(groupId !== undefined ? { groupId: resolveId(groupId) } : {}) }, requestOwner ?? user)
-    if (result instanceof Response) {
-      throw new TypeError(`seed(): invalid new device request: ${(result as Response & { message?: string }).message ?? result.status}`)
-    }
-    if (status !== undefined) {
-      data.newDeviceRequests.set(result.id, { ...result, status })
-    }
+  if (seed.newDeviceRequests) {
+    result.newDeviceRequests = seed.newDeviceRequests.map(({ status, owner: requestOwner, groupId, ...input }) => {
+      const created = createNewDeviceRequest(data, { ...input, ...(groupId !== undefined ? { groupId: resolveId(groupId) } : {}) }, requestOwner ?? user)
+      if (created instanceof Response) {
+        throw new TypeError(`seed(): invalid new device request: ${(created as Response & { message?: string }).message ?? created.status}`)
+      }
+      if (status !== undefined) {
+        data.newDeviceRequests.set(created.id, { ...created, status })
+      }
+      return created.id
+    })
   }
-  for (const rule of seed.retentionRules ?? []) {
-    const result = createRetentionRule(data, { ...rule })
-    if (result instanceof Response) {
-      throw new TypeError(`seed(): invalid retention rule: ${(result as Response & { message?: string }).message ?? result.status}`)
-    }
+  if (seed.retentionRules) {
+    result.retentionRules = seed.retentionRules.map((rule) => {
+      const created = createRetentionRule(data, { ...rule })
+      if (created instanceof Response) {
+        throw new TypeError(`seed(): invalid retention rule: ${(created as Response & { message?: string }).message ?? created.status}`)
+      }
+      return created.id
+    })
   }
-  for (const { type, activity, text, source, time, user: recordUser, application, severity, changes, ...fragments } of seed.auditRecords ?? []) {
-    recordAudit(data, {
+  if (seed.auditRecords) {
+    result.auditRecords = seed.auditRecords.map(({ type, activity, text, source, time, user: recordUser, application, severity, changes, ...fragments }) => recordAudit(data, {
       type,
       activity,
       text,
@@ -523,16 +597,20 @@ export function applySeed(data: TenantData, seed: C8ySeed, user: string): void {
       ...(application !== undefined ? { application } : {}),
       ...(severity !== undefined ? { severity } : {}),
       ...(changes !== undefined ? { changes } : {}),
-    })
+    })!.id)
   }
   for (const { service, store = 'default', key, value } of seed.serviceState ?? []) {
     data.serviceState.set(serviceStateKey(service, store, key), toJson(value))
   }
   if (seed.defaultApplications === false || seed.applications) {
-    seedApplications(data, seed.applications ?? [], seed.defaultApplications === false)
+    const ids = seedApplications(data, seed.applications ?? [], seed.defaultApplications === false)
+    if (seed.applications) {
+      result.applications = ids
+    }
   }
   seedUsageStatistics(data, seed.usageStatistics ?? [])
   seedTrustedCertificates(data, seed.trustedCertificates ?? [])
+  return result
 }
 
 /**

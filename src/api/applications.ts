@@ -330,8 +330,10 @@ export interface C8yApplicationInput {
  * @param data - Tenant data
  * @param inputs - Applications to add or replace
  * @param withoutDefaults - Remove the default applications first
+ * @returns The id of each input's application, in input order
  */
-export function seedApplications(data: TenantData, inputs: readonly C8yApplicationInput[], withoutDefaults: boolean): void {
+export function seedApplications(data: TenantData, inputs: readonly C8yApplicationInput[], withoutDefaults: boolean): string[] {
+  const ids: string[] = []
   if (withoutDefaults) {
     for (const [id, application] of data.applications) {
       if (application.owner === 'management') {
@@ -367,7 +369,9 @@ export function seedApplications(data: TenantData, inputs: readonly C8yApplicati
     if (subscribed) {
       subscribe(data, application)
     }
+    ids.push(application.id)
   }
+  return ids
 }
 
 /**

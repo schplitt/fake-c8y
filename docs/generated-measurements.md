@@ -3,7 +3,7 @@
 Stored measurements cost about 580 bytes each, so a month of history for a large world does not fit in memory. A measurement generator describes the history instead, and the world computes the documents when a request reads them:
 
 ```ts
-world.seed({
+const { measurementGenerators: [temperature] } = world.seed({
   measurementGenerators: [{
     source: pump,
     type: 'c8y_Temperature',
@@ -19,6 +19,8 @@ world.seed({
 ```
 
 A generator makes one document per grid point (`from` inclusive, `to` exclusive, every `interval`) with a value for each series. `gaps` on the generator or on a series leave grid points without a value; a grid point where no series has a value has no document. Every request sees the generated documents as if they were stored: lists with all filters, paging and totals, `revert`, `series` with aggregation, `supportedSeries` and `supportedMeasurements`, deletes, and `world.db.measurements`.
+
+`seed()` returns `{ firstId, lastId }` per generator: the ids reserved for its grid points, in grid order (see [Model](#model)). `temperature.firstId` is the document at `from`, unless a gap covers it.
 
 The rest of this page covers how it works inside the fake, which behavior it promises, and what it costs. The code is `src/generators.ts`; the request handlers in `src/api/data.ts` and `src/api/inventory.ts` use it when a tenant has generators, and keep their stored-only path otherwise.
 

@@ -41,9 +41,38 @@ const world = createWorld({
 
 ## Seeding
 
+Things other data points to are created one at a time, and each call returns the id. Everything else goes through `seed()`, which returns the ids it created per list, in input order.
+
 - `world.device(input)` and `world.managedObject(input)` create a managed object and return its id. The input takes fragments plus `children`, `assets`, `additions`, `externalIds`, and `tenant`. `device()` adds `c8y_IsDevice`.
 - `world.binary({ name, content, contentType?, tenant? })` creates an inventory binary and returns its id.
 - `world.seed({ ... })` adds `measurements`, `measurementGenerators`, `events`, `alarms`, `operations`, `newDeviceRequests`, `retentionRules`, `auditRecords`, `roles`, `groups`, `users`, `inventoryRoles`, `applications`, `serviceState` (of a registered service), `usageStatistics`, and `trustedCertificates`, validated like API writes. `defaultApplications: false` removes the default applications. `tenant` picks the tenant (default: the deployed one).
+
+```ts
+const pump = world.device({ name: 'Pump 7' })
+const { alarms: [overheat] } = world.seed({
+  alarms: [{ source: pump, type: 'overheat' }],
+  events: [{ source: pump, type: 'door_open' }],
+})
+world.db.alarms.get(overheat!) // the seeded alarm
+```
+
+### What `seed()` returns
+
+`seed()` returns a `C8ySeedResult`. It has an array for every list the seed has (also an empty one), with one entry per input item, in input order. Each entry is the id the API uses for that item:
+
+| List                                                                                                                                | Entry                                                                                                                         |
+| ----------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `measurements`, `events`, `alarms`, `operations`, `auditRecords`, `retentionRules`, `groups`, `inventoryRoles`, `newDeviceRequests` | The platform id. A new device request's id is the one you give.                                                               |
+| `applications`                                                                                                                      | The application's id. An input that replaces an application (same `id`, else same name and owner) gets the replaced one's id. |
+| `users`                                                                                                                             | The `userName`.                                                                                                               |
+| `roles`                                                                                                                             | The role name.                                                                                                                |
+| `measurementGenerators`                                                                                                             | `{ firstId, lastId }`: the first and last id reserved for the generator's grid points, see below.                             |
+
+`serviceState`, `usageStatistics`, and `trustedCertificates` have no entry: the first two create nothing with an id, and a certificate's key is the fingerprint you give. A seed that throws returns nothing; what it stored before the error stays.
+
+A generator reserves a block of the world's id sequence, one id per grid point in grid order, from `firstId` to `lastId`. No other document gets an id inside the block. `firstId` is the document at `from`, unless a gap covers it. A live generator (no `to`) also reserves ids for points the clock has not reached, so its `lastId` belongs to a point in the future. The id of each document is in [Generated measurements](generated-measurements.md#model). Like the platform, `GET /measurement/measurements/{id}` answers 405; use `world.db.measurements.get(id)` or a list request.
+
+Seeding writes like any other write: on a fork it goes to the fork, and on a frozen base it throws. Forks of the same base that get the same seed get the same ids.
 
 The helpers store what you give them. Only API requests write audit records or derive fragments such as `c8y_Availability`, so a seeded world starts without audit history unless you seed `auditRecords`.
 

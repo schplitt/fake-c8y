@@ -11,14 +11,14 @@ A request to one of these microservices (`/service/smartrule/**`) is not emulate
 ## Seeding
 
 ```ts
-world.seed({
+const { applications: [myApp] } = world.seed({
   defaultApplications: false, // remove the defaults first
   applications: [{ name: 'my-app', type: 'HOSTED', contextPath: 'my-app' }],
 })
-world.db.applications.find() // [{ name: 'my-app', subscribed: true, ... }]
+world.db.applications.find() // [{ id: myApp, name: 'my-app', subscribed: true, ... }]
 ```
 
-- `applications` adds or replaces applications, by `id`, else by name and owner. `owner` defaults to the seeded tenant, `key` to `<name>-key`, and `availability` to `MARKET` for `management`, else `PRIVATE`.
+- `applications` adds or replaces applications, by `id`, else by name and owner. `seed()` returns their ids in input order; a replacement keeps the replaced application's id. `owner` defaults to the seeded tenant, `key` to `<name>-key`, and `availability` to `MARKET` for `management`, else `PRIVATE`.
 - `subscribed` defaults to `true`. A subscribed microservice gets its service user and roles.
 - `defaultApplications: false` removes the default applications and the subscriptions to them.
 - `world.db.applications` lists what the tenant owns or is subscribed to, each with `subscribed`.

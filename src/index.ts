@@ -3,7 +3,7 @@ import type { CompiledRoute } from './router'
 import type { StoredDocument, TenantCollection, TenantData, WorldContext } from './store'
 import type { Collection } from './collection'
 import type { RealtimeApi } from './realtime'
-import type { C8yBinaryInput, C8yDb, C8yManagedObjectInput, C8ySeed } from './data'
+import type { C8yBinaryInput, C8yDb, C8yManagedObjectInput, C8ySeed, C8ySeedResultFor } from './data'
 import type { WorldDiff, WorldSnapshot } from './snapshot'
 import type { Clock } from './clock'
 import type { C8yService, C8yServiceContext, C8yServiceDefinition, C8yServiceHandler, C8yServiceOptions } from './services'
@@ -404,7 +404,9 @@ export interface World {
    */
   readonly services: ReadonlyMap<string, C8yService>
   /**
-   * Creates a managed object.
+   * Creates a managed object. Things other data points to (managed
+   * objects, devices, binaries) are created one at a time and return their
+   * id; everything else goes through `seed()`.
    * @returns Its id
    */
   managedObject: (input?: C8yManagedObjectInput) => string
@@ -419,10 +421,18 @@ export interface World {
    */
   binary: (input: C8yBinaryInput) => string
   /**
-   * Seeds measurements, events, alarms, operations, new device requests,
-   * retention rules, and audit records.
+   * Seeds everything other data does not point to: measurements and
+   * generators, events, alarms, operations, new device requests, retention
+   * rules, audit records, users, groups, roles, inventory roles,
+   * applications, service state, usage statistics, and trusted
+   * certificates. Managed objects, devices, and binaries come from
+   * `managedObject()`, `device()`, and `binary()`, which return the id.
+   * @example
+   * const pump = world.device({ name: 'Pump 7' })
+   * const { alarms: [overheat] } = world.seed({ alarms: [{ source: pump, type: 'overheat' }], events: [{ source: pump, type: 'door_open' }] })
+   * @returns The ids it created per list, in input order (see `C8ySeedResult`)
    */
-  seed: (seed: C8ySeed) => void
+  seed: <S extends C8ySeed>(seed: S) => C8ySeedResultFor<S>
   /**
    * Runs the platform's time-based work that is due by the world's clock:
    * bulk operations create their operations, and availability monitoring
@@ -1661,7 +1671,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
           throw new TypeError(`fake-c8y: seed(): service ${service} is not registered (register it with world.service() first)`)
         }
       }
-      applySeed(tenantData(seed.tenant ?? tenant), seed, owner())
+      return applySeed(tenantData(seed.tenant ?? tenant), seed, owner()) as C8ySeedResultFor<typeof seed>
     },
 
     tick,
@@ -1828,7 +1838,7 @@ export { DEFAULTS } from './defaults'
 export { Realtime, SOCKET_STATE } from './realtime'
 export type { NotificationFrame, NotificationSocket, NotificationSubscription, NotificationToken, RealtimeApi, RealtimeOptions } from './realtime'
 export type * from './types'
-export type { C8yAlarmInput, C8yAuditRecordInput, C8yBinaryContent, C8yBinaryInput, C8yDb, C8yDbCollection, C8yDbFilter, C8yEventInput, C8yGroupInput, C8yIdInput, C8yInventoryRoleInput, C8yManagedObjectInput, C8yMeasurementInput, C8yNewDeviceRequestInput, C8yOperationInput, C8yRetentionRuleInput, C8ySeed, C8yUserInput } from './data'
+export type { C8yAlarmInput, C8yAuditRecordInput, C8yBinaryContent, C8yBinaryInput, C8yDb, C8yDbCollection, C8yDbFilter, C8yEventInput, C8yGroupInput, C8yIdInput, C8yInventoryRoleInput, C8yManagedObjectInput, C8yMeasurementInput, C8yNewDeviceRequestInput, C8yOperationInput, C8yRetentionRuleInput, C8ySeed, C8ySeedResult, C8ySeedResultFor, C8yUserInput } from './data'
 export { DEFAULT_ROLES } from './user-defaults'
 export { LIVE_CAPACITY } from './generators'
 export type { C8yGeneratedSeriesInput, C8yMeasurementGeneratorInput, C8yTimeRange, C8yWave, GeneratorSnapshot, MeasurementTombstone, PointTombstone, RangeTombstone } from './generators'

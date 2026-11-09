@@ -449,13 +449,15 @@ export function compileGenerator(generator: C8yMeasurementGeneratorInput<string>
  * @param inputs - Generators, their sources resolved to ids
  * @param reserve - Reserves `count` ids and returns the first
  * @param now - The world's clock (epoch milliseconds)
+ * @returns The first id number and the number of reserved ids, per input
  */
-export function seedGenerators(generators: Collection<MeasurementStream>, inputs: Array<C8yMeasurementGeneratorInput<string>>, reserve: (count: number) => number, now: number): void {
-  for (const input of inputs) {
+export function seedGenerators(generators: Collection<MeasurementStream>, inputs: Array<C8yMeasurementGeneratorInput<string>>, reserve: (count: number) => number, now: number): Array<{ idStart: number, block: number }> {
+  return inputs.map((input) => {
     const stream = compileGenerator(clone(input), 0, undefined, now)
     const idStart = reserve(stream.block)
     generators.set(String(idStart), { ...stream, idStart })
-  }
+    return { idStart, block: stream.block }
+  })
 }
 
 // ---------------------------------------------------------------- documents

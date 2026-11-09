@@ -15,11 +15,13 @@ import { createWorld } from 'fake-c8y'
 
 const world = createWorld()
 const pump = world.device({ name: 'Pump', externalIds: { c8y_Serial: 'SN-1' } })
-world.seed({ alarms: [{ source: pump, type: 'overheat' }] })
+const { alarms: [overheat] } = world.seed({ alarms: [{ source: pump, type: 'overheat' }] })
 
-const response = await world.fetch(new Request(`${world.baseUrl}/alarm/alarms?source=${pump}`))
-const { alarms } = await response.json()
+const response = await world.fetch(new Request(`${world.baseUrl}/alarm/alarms/${overheat}`))
+const alarm = await response.json()
 ```
+
+`device()`, `managedObject()`, and `binary()` return the id of what they create, since other data points to it. `seed()` creates everything else and returns the ids per list, in input order ([seeding](https://github.com/schplitt/fake-c8y/blob/main/docs/world.md#seeding)).
 
 `world.fetch()` takes a `Request` to the platform and returns a `Response`. Pass it as the `fetch` of your HTTP client to route the client's requests to the world.
 
