@@ -1,0 +1,32 @@
+catalogMode: prefer
+
+minimumReleaseAgeExclude:
+  - '@schplitt/eslint-config@1.5.4'
+shellEmulator: true
+
+trustPolicy: no-downgrade
+
+trustPolicyExclude:
+  - cached-factory@0.1.0
+  - ts-api-utils@2.2.0
+  - undici-types@6.21.0
+
+catalog:
+  '@c8y/client': ^1023.97.8
+  '@iso4/sandbox': 0.9.0
+  '@schplitt/eslint-config': ^1.5.4
+  '@types/node': ^24.19.2
+  '@types/ws': ^8.18.2
+  bumpp: ^12.3.0
+  c8y-realtime: ^0.2.2
+  changelogithub: ^15.0.5
+  consola: ^3.4.2
+  eslint: ^10.14.0
+  rolldown: ^1.2.16
+  tsdown: ^0.23.5
+  typescript: ^6.0.3
+  vitest: ^5.1.0
+  ws: ^8.22.1
+
+allowBuilds:
+  esbuild: true

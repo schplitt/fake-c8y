@@ -1,0 +1,77 @@
+{
+  "name": "fake-c8y",
+  "version": "0.0.0",
+  "type": "module",
+  "packageManager": "pnpm@12.18.0",
+  "description": "An in-memory Cumulocity platform for tests and evals: runs in Node, workers, and iso4 isolates",
+  "keywords": [
+    "cumulocity",
+    "c8y",
+    "fake",
+    "mock",
+    "testing",
+    "evals"
+  ],
+  "license": "MIT",
+  "author": "schplitt",
+  "homepage": "https://github.com/schplitt/fake-c8y#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/schplitt/fake-c8y.git"
+  },
+  "bugs": {
+    "url": "https://github.com/schplitt/fake-c8y/issues"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    },
+    "./realtime": {
+      "types": "./dist/realtime.d.mts",
+      "import": "./dist/realtime.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.mjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "files": [
+    "LICENSE",
+    "README.md",
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "lint": "eslint",
+    "lint:fix": "eslint --fix",
+    "typecheck": "tsc --noEmit",
+    "prerelease": "eslint && tsc --noEmit && tsdown && vitest run",
+    "release": "bumpp",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:contract": "vitest run --config vitest.contract.config.ts",
+    "gen:capabilities": "node scripts/generate-capabilities.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@c8y/client": "catalog:",
+    "@iso4/sandbox": "catalog:",
+    "@schplitt/eslint-config": "catalog:",
+    "@types/node": "catalog:",
+    "@types/ws": "catalog:",
+    "bumpp": "catalog:",
+    "c8y-realtime": "catalog:",
+    "changelogithub": "catalog:",
+    "consola": "catalog:",
+    "eslint": "catalog:",
+    "rolldown": "catalog:",
+    "tsdown": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:",
+    "ws": "catalog:"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

@@ -1,0 +1,121 @@
+import type { ContractScenario } from '../helpers'
+import { cleanup, runChecks } from '../admin-checks'
+import type { Check } from '../admin-checks'
+
+// Requests read from a real tenant (see admin-checks.ts). Every name starts
+// with the scenario's prefix and is deleted afterwards.
+
+function scenario(name: string, checks: Check[], verifies: string[] = []): ContractScenario {
+  return {
+    name,
+    verifies,
+    async run({ client, tenant, unique }) {
+      const prefix = `r1108admin${unique}`
+      try {
+        await runChecks(client, tenant, prefix, checks)
+      } finally {
+        await cleanup(client, tenant, prefix)
+      }
+    },
+  }
+}
+
+export const adminUserListScenarios: ContractScenario[] = [
+  scenario('admin users: list filters, owners, group members', [
+    { m: 'GET', p: '/user/currentUser', h: { accept: 'text/plain' }, status: 406, empty: true },
+    { m: 'POST', p: '/user/currentUser', b: {}, status: 405, empty: true },
+    { m: 'POST', p: '/user/{{tenant}}/users', b: { userName: '{{u}}o1', email: '{{u}}o1@example.com', password: 'Contract-Pass-2026!x' }, status: 201, match: { userName: '{{u}}o1', email: '{{u}}o1@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'POST', p: '/user/{{tenant}}/users', b: { userName: '{{u}}o2', email: '{{u}}o2@example.com', password: 'Contract-Pass-2026!x', owner: '{{u}}o1' }, status: 201, match: { userName: '{{u}}o2', owner: '{{u}}o1', email: '{{u}}o2@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'POST', p: '/user/{{tenant}}/users', b: { userName: '{{u}}o3', email: '{{u}}o3@example.com', password: 'Contract-Pass-2026!x', owner: '{{u}}o1' }, status: 201, match: { userName: '{{u}}o3', owner: '{{u}}o1', email: '{{u}}o3@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'POST', p: '/user/{{tenant}}/users', b: { userName: '{{u}}o4', email: '{{u}}o4@example.com', password: 'Contract-Pass-2026!x', owner: 'nosuchuser' }, status: 422, error: 'users/Invalid Data', message: 'User \'nosuchuser\' does not exist' },
+    { m: 'POST', p: '/user/{{tenant}}/users', b: { userName: '{{u}}o5', email: '{{u}}o5@example.com', password: 'Contract-Pass-2026!x', owner: '{{u}}o2' }, status: 201, match: { userName: '{{u}}o5', owner: '{{u}}o2', email: '{{u}}o5@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'POST', p: '/user/{{tenant}}/users', b: { userName: '{{u}}o6', email: '{{u}}o6@example.com', password: 'Contract-Pass-2026!x', owner: '' }, status: 201, match: { userName: '{{u}}o6', owner: '', email: '{{u}}o6@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'POST', p: '/user/{{tenant}}/users', b: { userName: '{{u}}o7', email: '{{u}}o7@example.com', password: 'Contract-Pass-2026!x', delegatedBy: '{{u}}o1' }, status: 201, match: { userName: '{{u}}o7', delegatedBy: '{{u}}o1', email: '{{u}}o7@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'GET', p: '/user/{{tenant}}/users/{{u}}o2', status: 200, match: { userName: '{{u}}o2', owner: '{{u}}o1', email: '{{u}}o2@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'GET', p: '/user/{{tenant}}/users?owner={{u}}o1', status: 200, count: 2 },
+    { m: 'GET', p: '/user/{{tenant}}/users?owner={{u}}O1', status: 200, count: 0 },
+    { m: 'GET', p: '/user/{{tenant}}/users?owner={{u}}o1&username={{u}}o3', status: 200, count: 1 },
+    { m: 'GET', p: '/user/{{tenant}}/users?owner={{u}}', status: 200, count: 0 },
+    { m: 'GET', p: '/user/{{tenant}}/users?username={{u}}o&withSubusersCount=true', status: 200, count: 5 },
+    { m: 'GET', p: '/user/{{tenant}}/users?username={{u}}o&withSubusersCount=false', status: 200, count: 5 },
+    { m: 'GET', p: '/user/{{tenant}}/users/{{u}}o1?withSubusersCount=true', status: 200, match: { userName: '{{u}}o1', email: '{{u}}o1@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'GET', p: '/user/{{tenant}}/users?usernameContains={{u}}O', status: 200, count: 5 },
+    { m: 'GET', p: '/user/{{tenant}}/users?username={{u}}o&withTotalElements=true&pageSize=2', status: 200, count: 2 },
+    { m: 'GET', p: '/user/{{tenant}}/users?username={{u}}o&withTotalPages=true&pageSize=2&currentPage=4', status: 200, count: 0 },
+    { m: 'GET', p: '/user/{{tenant}}/users?username={{u}}o&withTotalElements=true&withTotalPages=true&pageSize=2000', status: 200, count: 6 },
+    { m: 'GET', p: '/user/{{tenant}}/users?username={{u}}o&pageSize=2001', status: 200, count: 6 },
+    { m: 'POST', p: '/user/{{tenant}}/groups', b: { name: '{{u}}g1' }, keep: 'g1', status: 201, match: { name: '{{u}}g1' } },
+    { m: 'POST', p: '/user/{{tenant}}/groups', b: { name: '{{u}}g2' }, keep: 'g2', status: 201, match: { name: '{{u}}g2' } },
+    { m: 'POST', p: '/user/{{tenant}}/groups/{{g1}}/users', b: { user: { self: 'https://x/user/{{tenant}}/users/{{u}}o1' } }, status: 201 },
+    { m: 'POST', p: '/user/{{tenant}}/groups/{{g1}}/users', b: { user: { self: 'https://x/user/{{tenant}}/users/{{u}}o2' } }, status: 201 },
+    { m: 'POST', p: '/user/{{tenant}}/groups/{{g2}}/users', b: { user: { self: 'https://x/user/{{tenant}}/users/{{u}}o2' } }, status: 403, error: 'security/Forbidden', message: 'Access Denied' },
+    { m: 'POST', p: '/user/{{tenant}}/groups/{{g2}}/users', b: { user: { self: 'https://x/user/{{tenant}}/users/{{u}}o3' } }, status: 403, error: 'security/Forbidden', message: 'Access Denied' },
+    { m: 'GET', p: '/user/{{tenant}}/users?groups={{g1}}&username={{u}}', status: 200, count: 2 },
+    { m: 'GET', p: '/user/{{tenant}}/users?groups={{g2}}&username={{u}}', status: 200, count: 0 },
+    { m: 'GET', p: '/user/{{tenant}}/users?groups={{g1}},{{g2}}&username={{u}}', status: 200, count: 2 },
+    { m: 'GET', p: '/user/{{tenant}}/users?groups={{g1}}&groups={{g2}}&username={{u}}', status: 200, count: 2 },
+    { m: 'GET', p: '/user/{{tenant}}/users?groups=999999&username={{u}}', status: 200, count: 0 },
+    { m: 'GET', p: '/user/{{tenant}}/users?groups={{u}}g1&username={{u}}', status: 200, count: 0 },
+    { m: 'GET', p: '/user/{{tenant}}/users?groups=&username={{u}}', status: 200, count: 5 },
+    { m: 'GET', p: '/user/{{tenant}}/users?groups={{g1}}&owner={{u}}o1', status: 200, count: 1 },
+    { m: 'GET', p: '/user/{{tenant}}/users?username={{u}}o2&withGroups=true', status: 200, count: 1 },
+    { m: 'GET', p: '/user/{{tenant}}/users?username={{u}}o2&withRoles=true', status: 200, count: 1 },
+    { m: 'GET', p: '/user/{{tenant}}/users?username={{u}}o2&withApps=true', status: 200, count: 1 },
+    { m: 'GET', p: '/user/{{tenant}}/users?username={{u}}o2&withGroups=x', status: 200, count: 1 },
+    { m: 'GET', p: '/user/{{tenant}}/users?username={{u}}o2&withSubusersCount=x', status: 200, count: 1 },
+    { m: 'GET', p: '/user/{{tenant}}/users/{{u}}o2/groups', status: 200, count: 1 },
+    { m: 'GET', p: '/user/{{tenant}}/users/{{u}}nope/groups', status: 404, error: 'users/Not Found', message: 'User with username \'{{u}}nope\' does not exist! : Cannot find document with ID {{u}}nope' },
+    { m: 'GET', p: '/user/{{tenant}}/groups/{{g2}}/users?pageSize=1&withTotalElements=true&withTotalPages=true', status: 200, count: 0 },
+    { m: 'GET', p: '/user/{{tenant}}/groups/{{g2}}/users?currentPage=2&pageSize=1', status: 200, count: 0 },
+    { m: 'GET', p: '/user/{{tenant}}/groups/999999/users', status: 404, error: 'groups/Not Found', message: 'Error retrieving group with id <id>! : Cannot find document with ID <id>' },
+    { m: 'DELETE', p: '/user/{{tenant}}/users/{{u}}o1', status: 204, empty: true },
+    { m: 'GET', p: '/user/{{tenant}}/users/{{u}}o2', status: 200, match: { userName: '{{u}}o2', email: '{{u}}o2@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'GET', p: '/user/{{tenant}}/users?owner={{u}}o1', status: 200, count: 0 },
+    { m: 'GET', p: '/user/{{tenant}}/groups/{{g1}}/users', status: 200, count: 0 },
+    { m: 'DELETE', p: '/user/{{tenant}}/groups/{{g1}}', status: 204, empty: true },
+    { m: 'DELETE', p: '/user/{{tenant}}/groups/{{g2}}', status: 204, empty: true },
+    { m: 'DELETE', p: '/user/{{tenant}}/users/{{u}}o2', status: 204, empty: true },
+    { m: 'DELETE', p: '/user/{{tenant}}/users/{{u}}o3', status: 204, empty: true },
+    { m: 'DELETE', p: '/user/{{tenant}}/users/{{u}}o4', status: 404, error: 'users/Not Found', message: 'Error retrieving user {{u}}o4! : Cannot find document with ID {{u}}o4' },
+    { m: 'DELETE', p: '/user/{{tenant}}/users/{{u}}o5', status: 204, empty: true },
+    { m: 'DELETE', p: '/user/{{tenant}}/users/{{u}}o6', status: 204, empty: true },
+    { m: 'DELETE', p: '/user/{{tenant}}/users/{{u}}o7', status: 204, empty: true },
+  ], ['user-list-link-params']),
+  scenario('admin users: subusers and their owners', [
+    { m: 'POST', p: '/user/{{tenant}}/users', b: { userName: '{{u}}o1', email: '{{u}}o1@example.com', password: 'Contract-Pass-2026!x' }, status: 201, match: { userName: '{{u}}o1', email: '{{u}}o1@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'POST', p: '/user/{{tenant}}/users', b: { userName: '{{u}}o2', email: '{{u}}o2@example.com', password: 'Contract-Pass-2026!x', owner: '{{u}}o1' }, status: 201, match: { userName: '{{u}}o2', owner: '{{u}}o1', email: '{{u}}o2@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'POST', p: '/user/{{tenant}}/users', b: { userName: '{{u}}o4', email: '{{u}}o4@example.com', password: 'Contract-Pass-2026!x', owner: 'nosuchuser' }, status: 422, error: 'users/Invalid Data', message: 'User \'nosuchuser\' does not exist' },
+    { m: 'POST', p: '/user/{{tenant}}/users', b: { userName: '{{u}}o6', email: '{{u}}o6@example.com', password: 'Contract-Pass-2026!x', owner: '' }, status: 201, match: { userName: '{{u}}o6', owner: '', email: '{{u}}o6@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'POST', p: '/user/{{tenant}}/users', b: { userName: '{{u}}o7', email: '{{u}}o7@example.com', password: 'Contract-Pass-2026!x', delegatedBy: '{{u}}o1' }, status: 201, match: { userName: '{{u}}o7', delegatedBy: '{{u}}o1', email: '{{u}}o7@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'POST', p: '/user/{{tenant}}/users', b: { userName: '{{u}}o8', email: '{{u}}o8@example.com', password: 'Contract-Pass-2026!x', owner: '{{u}}o2' }, status: 201, match: { userName: '{{u}}o8', owner: '{{u}}o2', email: '{{u}}o8@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'GET', p: '/user/{{tenant}}/users/{{u}}o7', status: 200, match: { userName: '{{u}}o7', delegatedBy: '{{u}}o1', email: '{{u}}o7@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'GET', p: '/user/{{tenant}}/users/{{u}}o6', status: 200, match: { userName: '{{u}}o6', owner: '', email: '{{u}}o6@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'GET', p: '/user/{{tenant}}/users?owner={{u}}o1&withSubusersCount=true', status: 200, count: 1 },
+    { m: 'GET', p: '/user/{{tenant}}/users?username={{u}}o1&withSubusersCount=true', status: 200, count: 1 },
+    { m: 'POST', p: '/user/{{tenant}}/groups', b: { name: '{{u}}g1' }, keep: 'g1', status: 201, match: { name: '{{u}}g1' } },
+    { m: 'POST', p: '/user/{{tenant}}/groups', b: { name: '{{u}}g2' }, keep: 'g2', status: 201, match: { name: '{{u}}g2' } },
+    { m: 'POST', p: '/user/{{tenant}}/groups/{{g1}}/users', b: { user: { self: 'https://x/user/{{tenant}}/users/{{u}}o2' } }, status: 403, error: 'security/Forbidden', message: 'Access Denied' },
+    { m: 'POST', p: '/user/{{tenant}}/groups/{{g1}}/users', b: { user: { self: 'https://x/user/{{tenant}}/users/{{u}}o1' } }, status: 201 },
+    { m: 'POST', p: '/user/{{tenant}}/groups/{{g1}}/users', b: { user: { self: 'https://x/user/{{tenant}}/users/{{u}}o2' } }, status: 201 },
+    { m: 'POST', p: '/user/{{tenant}}/groups/{{g2}}/users', b: { user: { self: 'https://x/user/{{tenant}}/users/{{u}}o2' } }, status: 403, error: 'security/Forbidden', message: 'Access Denied' },
+    { m: 'POST', p: '/user/{{tenant}}/groups/{{g2}}/users', b: { user: { self: 'https://x/user/{{tenant}}/users/{{u}}o8' } }, status: 403, error: 'security/Forbidden', message: 'Access Denied' },
+    { m: 'POST', p: '/user/{{tenant}}/groups/{{g1}}/users', b: { user: { self: 'https://x/user/{{tenant}}/users/{{u}}o8' } }, status: 201 },
+    { m: 'POST', p: '/user/{{tenant}}/users/{{u}}o2/roles', b: { role: { self: 'https://x/user/roles/ROLE_ALARM_READ' } }, status: 403, error: 'security/Forbidden', message: 'Access Denied' },
+    { m: 'POST', p: '/user/{{tenant}}/users/{{u}}o1/roles', b: { role: { self: 'https://x/user/roles/ROLE_ALARM_READ' } }, status: 201 },
+    { m: 'POST', p: '/user/{{tenant}}/users/{{u}}o2/roles', b: { role: { self: 'https://x/user/roles/ROLE_ALARM_READ' } }, status: 201 },
+    { m: 'PUT', p: '/user/{{tenant}}/users/{{u}}o2', b: { owner: '{{u}}o6' }, status: 200, match: { userName: '{{u}}o2', owner: '{{u}}o1', email: '{{u}}o2@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'PUT', p: '/user/{{tenant}}/users/{{u}}o2', b: { owner: null }, status: 200, match: { userName: '{{u}}o2', owner: '{{u}}o1', email: '{{u}}o2@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'GET', p: '/user/{{tenant}}/users/{{u}}o2', status: 200, match: { userName: '{{u}}o2', owner: '{{u}}o1', email: '{{u}}o2@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'DELETE', p: '/user/{{tenant}}/users/{{u}}o1', status: 204, empty: true },
+    { m: 'GET', p: '/user/{{tenant}}/users/{{u}}o2', status: 200, match: { userName: '{{u}}o2', email: '{{u}}o2@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'GET', p: '/user/{{tenant}}/users/{{u}}o8', status: 200, match: { userName: '{{u}}o8', owner: '{{u}}o2', email: '{{u}}o8@example.com', passwordStrength: 'GREEN', shouldResetPassword: false, enabled: true } },
+    { m: 'GET', p: '/user/{{tenant}}/groups/{{g1}}/users', status: 200, count: 0 },
+    { m: 'DELETE', p: '/user/{{tenant}}/groups/{{g1}}', status: 204, empty: true },
+    { m: 'DELETE', p: '/user/{{tenant}}/groups/{{g2}}', status: 204, empty: true },
+    { m: 'DELETE', p: '/user/{{tenant}}/users/{{u}}o2', status: 204, empty: true },
+    { m: 'DELETE', p: '/user/{{tenant}}/users/{{u}}o4', status: 404, error: 'users/Not Found', message: 'Error retrieving user {{u}}o4! : Cannot find document with ID {{u}}o4' },
+    { m: 'DELETE', p: '/user/{{tenant}}/users/{{u}}o6', status: 204, empty: true },
+    { m: 'DELETE', p: '/user/{{tenant}}/users/{{u}}o7', status: 204, empty: true },
+    { m: 'DELETE', p: '/user/{{tenant}}/users/{{u}}o8', status: 204, empty: true },
+  ], ['subuser-owner-rules']),
+]
