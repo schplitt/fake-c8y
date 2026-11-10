@@ -47,7 +47,7 @@ interface FetchClientInternals {
 export function fakePlatform(options: { fork?: boolean } = {}): FakePlatform {
   let clockOffset = 0
   // every stored document is frozen, so a handler that changes one in place fails the run
-  const plain = createWorld({ now: () => Date.now() + clockOffset, freezeDocuments: true })
+  const plain = createWorld({ now: () => Date.now() + clockOffset, freezeDocuments: true, roles: 'enforce' })
   if (options.fork) {
     seedBase(plain)
   }

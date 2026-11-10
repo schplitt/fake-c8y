@@ -11,6 +11,7 @@
  * only written while answering a request; world helpers (`seed()`,
  * `device()`, `db.operations.update()`) write none.
  */
+import { listed, visible } from './access'
 import type { C8yRequest } from '../types'
 import type { StoredDocument, TenantData } from '../store'
 import { apiError, checkQuery, inRange, paged, parsePlatformDate, sourceId } from './http'
@@ -404,7 +405,10 @@ export function audit(call: C8yRequest, segments: string[], data: TenantData): R
   if (hasRange) {
     order.reverse()
   }
-  return paged(data, call, 'auditRecords', order, '/audit/auditRecords', { errorCode: 'REST API/Unprocessable Entity', render: ({ record }) => renderAuditRecord(data, record) })
+  const access = data.world.access()
+  // verified: without ROLE_AUDIT_READ the list answers the records the caller may read
+  const shown = visible(order, access && (({ record }: { record: StoredDocument }) => listed(data, access, 'AUDIT', record)))
+  return paged(data, call, 'auditRecords', shown, '/audit/auditRecords', { errorCode: 'REST API/Unprocessable Entity', render: ({ record }) => renderAuditRecord(data, record) })
 }
 
 /**

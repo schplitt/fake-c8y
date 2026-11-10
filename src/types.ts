@@ -123,6 +123,23 @@ export interface C8yRequest {
    * reached its handler.
    */
   service?: string
+  /**
+   * The documents the request wrote, in order: managed objects,
+   * measurements, events, alarms, and operations it created, updated, or
+   * deleted (audit records and the platform's own time-based work are left
+   * out). An eval reads who changed what from it, following `parent` up to
+   * the service that sent the request.
+   */
+  writes?: C8yWrite[]
+}
+
+/**
+ * A document a request wrote (`C8yRequest.writes`).
+ */
+export interface C8yWrite {
+  collection: 'managedObjects' | 'measurements' | 'events' | 'alarms' | 'operations'
+  id: string
+  action: 'created' | 'updated' | 'deleted'
 }
 
 /**

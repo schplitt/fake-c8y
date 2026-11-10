@@ -15,7 +15,7 @@ The endpoints and query parameters come from the Cumulocity OpenAPI spec (`src/c
 | Notification 2.0                         | Subscriptions and tokens through REST, consumers through `createFakeWebSocket()`. See [The world](world.md#notification-20).                                                                                    |
 | Auth                                     | Basic auth selects the tenant and the user. A tenant prefix the world does not have answers 401, and `targetTenant` is not read.                                                                                |
 
-There are no permission checks. <platform-behavior.md> lists every verified place where the platform differs from its API docs.
+Permission checks are off by default; `createWorld({ roles: 'enforce' })` turns them on ([Roles](roles.md)). <platform-behavior.md> lists every verified place where the platform differs from its API docs.
 
 ## Deletes
 

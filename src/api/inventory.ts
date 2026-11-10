@@ -12,6 +12,7 @@ import { applyOrderBy, parseQuery, QuerySyntaxError } from './query'
 import { deleteUser } from './users'
 import { matchesText, parseTextSearch } from './text-search'
 import { recordTraffic } from './data'
+import { listedManagedObject, visible } from './access'
 
 const SERVER_FIELDS = ['id', 'self', 'creationTime', 'lastUpdated', ...CHILD_KINDS, ...Object.values(PARENT_KIND)]
 
@@ -893,7 +894,9 @@ function inventoryRequest(call: C8yRequest, segments: string[], data: TenantData
       if (listOptions.withGroups) {
         listOptions.parents ??= parentIndex(data)
       }
-      return paged(data, call, 'managedObjects', items, '/inventory/managedObjects', { render: (document) => renderManagedObject(data, document, listOptions) })
+      const access = data.world.access()
+      const shown = visible(items, access && ((document: StoredDocument) => listedManagedObject(data, access, document)))
+      return paged(data, call, 'managedObjects', shown, '/inventory/managedObjects', { render: (document) => renderManagedObject(data, document, listOptions) })
     }
     if (method === 'PUT') {
       checkQuery('PUT /inventory/managedObjects', call, [])
@@ -917,7 +920,9 @@ function inventoryRequest(call: C8yRequest, segments: string[], data: TenantData
     // `type`, `fragmentType`, `text`, `owner`, and `ids` filter
     checkQuery('GET /inventory/managedObjects', call, LIST_PARAMS)
     const { query: _query, q: _q, onlyRoots: _onlyRoots, ...honoured } = call.query
-    return Response.json(listManagedObjects({ ...call, query: honoured }, data, [...data.managedObjects.values()]).length)
+    const access = data.world.access()
+    const counted = listManagedObjects({ ...call, query: honoured }, data, [...data.managedObjects.values()])
+    return Response.json(access ? counted.filter((document) => listedManagedObject(data, access, document)).length : counted.length)
   }
 
   if (kind === 'supportedSeries' || kind === 'supportedMeasurements' || kind === 'availability') {

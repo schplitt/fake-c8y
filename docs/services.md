@@ -207,7 +207,7 @@ A tenant snapshot holds the state as `[<service>/<store>/<key>, value]` pairs, a
 
 ## Calls and errors
 
-- Every call in `world.calls` has an `id` (from 1 since the last reset), and once answered a `status` and `durationMs` (host time). A call that reached a registered service has its context path in `service`. A request a service sent with `ctx.fetch()` has the id of the request it was answering in `parent`, so following the links gives agent, service, platform.
+- Every call in `world.calls` has an `id` (from 1 since the last reset), and once answered a `status` and `durationMs` (host time). A call that reached a registered service has its context path in `service`. A request a service sent with `ctx.fetch()` has the id of the request it was answering in `parent`, so following the links gives agent, service, platform. A call that wrote documents lists them in `writes` (`{ collection, id, action }` for the managed objects, measurements, events, alarms, and operations it created, updated, or deleted), so an eval can tell which service changed what by following `parent` up from the write.
 - A handler that throws makes the trial invalid (kind `'error'`, answered 500). Requests a service sends that the world does not emulate count like the agent's.
 - `ctx.unsupported(reason)` and a service registered without a handler answer 501 (kind `'feature'`), and the trial is invalid.
 - A request whose world is reset or restored while its handler runs answers 503. The handler's later state calls, `now()`, and `newId()` throw, and its later `fetch()` calls answer 503, so nothing of it reaches the next trial.
@@ -245,7 +245,7 @@ Every call of the short form is a new definition, so registering the same contex
 
 ## Permissions
 
-Permissions are not enforced, for service users or anyone else. The platform does enforce them: a service user without `ROLE_EVENT_READ` gets 403 `Access is denied` on `/event/events`. Keep `requiredRoles` complete. A minimal check was left out because the platform's mapping of endpoints to roles has exceptions, and a wrong 403 would make a correct agent fail.
+By default permissions are not enforced, for service users or anyone else. With `createWorld({ roles: 'enforce' })` a service's requests through `ctx.fetch()` get the manifest's `requiredRoles` (and `ROLE_SYSTEM`), like on the platform: a service user without `ROLE_EVENT_READ` gets 403 `Access is denied` on `/event/events`. Turn it on to catch an incomplete `requiredRoles` in tests. See [Roles](roles.md).
 
 ## Use from an evals host
 

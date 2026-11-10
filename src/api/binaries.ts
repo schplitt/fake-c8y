@@ -1,3 +1,4 @@
+import { hasRole, listedManagedObject } from './access'
 import type { C8yRequest } from '../types'
 import type { BinaryContent, StoredDocument, TenantData } from '../store'
 import { deleteManagedObject } from '../store'
@@ -187,7 +188,10 @@ export function inventoryBinaries(call: C8yRequest, segments: string[], data: Te
           && (ids === undefined || ids.includes(document.id))
           && (query.owner === undefined || document.owner === query.owner)
           && (query.type === undefined || document.type === query.type))
-      return paged(data, call, 'managedObjects', items, '/inventory/binaries', { statistics: 'binaries', errorCode: 'REST API/Unprocessable Entity', render: (document) => renderBinary(data, document) })
+      const access = data.world.access()
+      // the binary roles show every binary, like the inventory read roles
+      const shown = access && !hasRole(access, ['ROLE_BINARY_READ', 'ROLE_BINARY_ADMIN']) ? items.filter((document) => listedManagedObject(data, access, document)) : items
+      return paged(data, call, 'managedObjects', shown, '/inventory/binaries', { statistics: 'binaries', errorCode: 'REST API/Unprocessable Entity', render: (document) => renderBinary(data, document) })
     }
     return undefined
   }

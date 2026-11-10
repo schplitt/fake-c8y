@@ -1,4 +1,4 @@
-import type { C8yCoverage, C8yRequest, C8yRequestHandler, C8ySubscription, C8yUnhandledRequest, C8yUser, C8yWorldState } from './types'
+import type { C8yCoverage, C8yRequest, C8yRequestHandler, C8ySubscription, C8yUnhandledRequest, C8yUser, C8yWorldState, C8yWrite } from './types'
 import type { CompiledRoute } from './router'
 import type { StoredDocument, TenantCollection, TenantData, WorldContext } from './store'
 import type { Collection } from './collection'
@@ -6,6 +6,7 @@ import type { RealtimeApi } from './realtime'
 import type { C8yBinaryInput, C8yDb, C8yManagedObjectInput, C8ySeed, C8ySeedResultFor } from './data'
 import type { WorldDiff, WorldSnapshot } from './snapshot'
 import type { Clock } from './clock'
+import type { Access } from './api/access'
 import type { C8yService, C8yServiceContext, C8yServiceDefinition, C8yServiceHandler, C8yServiceOptions } from './services'
 import { DEFAULTS } from './defaults'
 import { withReasonPhrase } from './reason-phrases'
@@ -14,6 +15,7 @@ import { emptyTenant, forkTenant, freezeTenant, optionKey, TENANT_COLLECTIONS } 
 import { Realtime } from './realtime'
 import { platformApi, UnsupportedRequestError } from './api'
 import { UsageLog } from './api/statistics'
+import { applicationAccess, authorize, userAccess } from './api/access'
 import { apiError, rawRequests } from './api/http'
 import { mediaType, negotiate, notAcceptable, withLocation, withMediaType } from './api/media'
 import { applySeed, createBinaryFromInput, createDb, createFromInput } from './data'
@@ -246,12 +248,24 @@ export interface WorldOptions extends C8yWorldState {
    * @default false
    */
   freezeDocuments?: boolean
+  /**
+   * Whether requests are checked against the caller's rights, like on the
+   * platform. With `'enforce'`, a request with Basic auth of a stored user
+   * (other than the world's `user`) or of a registered service's bootstrap or
+   * service user answers 403 where the platform would, and lists show only
+   * what the caller may see: global roles (own and from groups), ownership,
+   * and inventory roles on an object and its parents. Requests without Basic
+   * auth, as the world's `user`, or as a user the tenant does not store stay
+   * unrestricted. See docs/roles.md.
+   * @default 'off'
+   */
+  roles?: 'enforce' | 'off'
 }
 
 /**
  * What a fork can set for itself; everything else comes from its base.
  */
-export type ForkOptions = Pick<WorldOptions, 'now' | 'clock' | 'schedule' | 'unsupported' | 'onUnsupported' | 'onChange'>
+export type ForkOptions = Pick<WorldOptions, 'now' | 'clock' | 'schedule' | 'unsupported' | 'onUnsupported' | 'onChange' | 'roles'>
 
 /**
  * Where a tenant option lives. Defaults: own settings category, deployed tenant.
@@ -493,6 +507,16 @@ export interface World {
   readonly frozen: boolean
 }
 
+const WRITE_COLLECTIONS: Record<RealtimeApi, C8yWrite['collection']> = {
+  managedobjects: 'managedObjects',
+  measurements: 'measurements',
+  events: 'events',
+  alarms: 'alarms',
+  operations: 'operations',
+}
+
+const WRITE_ACTIONS = { CREATE: 'created', UPDATE: 'updated', DELETE: 'deleted' } as const
+
 interface RegisteredHandler {
   route: CompiledRoute
   handler: C8yRequestHandler
@@ -658,6 +682,8 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
   let actor: string | undefined
   // the request being answered (its headers decide what counts as device traffic)
   let current: C8yRequest | undefined
+  // the restricted caller of the request being answered (roles: 'enforce')
+  let access: Access | undefined
   const tenants = new Map<string, TenantData>()
   // the world object below, for callbacks and override handlers
 
@@ -694,6 +720,10 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     now: () => new Date(clock()).toISOString(),
     realtime,
     notify(data: TenantData, api: RealtimeApi, action: 'CREATE' | 'UPDATE' | 'DELETE', document: StoredDocument, sourceId: string | undefined) {
+      if (current) {
+        // the request being answered wrote it (handlers run synchronously)
+        (current.writes ??= []).push({ collection: WRITE_COLLECTIONS[api], id: document.id, action: WRITE_ACTIONS[action] })
+      }
       if (muted === 0) {
         realtime.publish(data.tenant, api, action, document, sourceId, data.notificationSubscriptions.values())
       }
@@ -701,6 +731,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     settingsCategory,
     actor: () => actor,
     request: () => current,
+    access: () => access,
     freezeDocuments: options.freezeDocuments ?? false,
     tenantData: (name) => (tenants.has(name) || base?.tenants.has(name) ? tenantData(name) : undefined),
     tenants: () => tenants.values(),
@@ -779,6 +810,28 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
   }
 
   /**
+   * The restricted caller of a request (`roles: 'enforce'`): a stored user of
+   * the caller's tenant other than the world's user, or a registered
+   * service's bootstrap or service user. Everyone else is unrestricted.
+   * @param call - The recorded request
+   */
+  function callerAccess(call: C8yRequest): Access | undefined {
+    if ((options.roles ?? 'off') === 'off' || call.user === undefined) {
+      return undefined
+    }
+    if (user && call.user === user.userName && call.tenant === (user.tenant ?? tenant)) {
+      return undefined
+    }
+    const own = applicationOfCredentials(tenants.values(), call.tenant, call.user)
+    if (own) {
+      return applicationAccess(call.user, own.bootstrap ? ['ROLE_SYSTEM'] : [...(own.application.requiredRoles as string[] ?? []), 'ROLE_SYSTEM'])
+    }
+    const data = context.tenantData?.(call.tenant)
+    const stored = data?.users.get(call.user)
+    return data && stored ? userAccess(data, stored) : undefined
+  }
+
+  /**
    * Platform endpoints a microservice relies on: the current user and the
    * microservice's subscriptions.
    * @param call - The recorded request
@@ -796,6 +849,10 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       }
       if (formerApplicationUser(call)) {
         return apiError(401, 'security/Unauthorized', 'Invalid credentials!')
+      }
+      const restricted = callerAccess(call)
+      if (restricted && !restricted.roles.has('ROLE_USER_MANAGEMENT_OWN_READ')) {
+        return apiError(403, 'security/Forbidden', 'Access Denied')
       }
       if (call.user !== undefined && (call.user !== user?.userName || call.tenant !== (user.tenant ?? tenant))) {
         // Basic auth of another user (by name or tenant): that user of the
@@ -1068,6 +1125,11 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       // another request while they read it
       actor = call.user ?? user?.userName ?? DEFAULTS.user.userName
       current = call
+      access = callerAccess(call)
+      const denied = access && authorize(call, segments, tenantData(call.tenant), access)
+      if (denied) {
+        return withMediaType(method, segments, denied, contentType, accept)
+      }
       // the raw pathname (an encoded `/` in a path parameter is not a
       // segment), with repeated slashes collapsed like the platform does
       const specPath = url.pathname.replace(/\/{2,}/g, '/')
@@ -1095,6 +1157,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     } finally {
       actor = undefined
       current = undefined
+      access = undefined
     }
 
     if (kind === undefined) {

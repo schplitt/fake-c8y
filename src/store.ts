@@ -9,6 +9,7 @@
 import type { NotificationSubscription, NotificationToken, Realtime, RealtimeApi } from './realtime'
 import type { MeasurementStream, MeasurementTombstone } from './generators'
 import type { C8yJson } from './services'
+import type { Access } from './api/access'
 import type { C8yRequest } from './types'
 import type { StoredUsageDay, UsageLog } from './api/statistics'
 import type { StoredTrustedCertificate } from './api/tenant-admin'
@@ -99,6 +100,12 @@ export interface WorldContext {
    * The request being answered, or `undefined` outside a request.
    */
   request: () => C8yRequest | undefined
+  /**
+   * The restricted caller of the request being answered
+   * (`WorldOptions.roles: 'enforce'`), or `undefined` for an unrestricted
+   * one and outside a request. Lists show only what it may see.
+   */
+  access: () => Access | undefined
   /**
    * Deep-freeze every stored document (`WorldOptions.freezeDocuments`).
    */

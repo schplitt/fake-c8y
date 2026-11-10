@@ -21,6 +21,7 @@ import { operationsScenarios } from './scenarios/operations'
 import { optionsScenarios } from './scenarios/options'
 import { acceptScenarios, orderScenarios, platformConformanceScenarios, platformScenarios } from './scenarios/platform'
 import { usersScenarios } from './scenarios/users'
+import { rolesScenarios } from './scenarios/roles'
 import { retentionScenarios } from './scenarios/retention'
 import { sideEffectsScenarios } from './scenarios/side-effects'
 import { adminAuditScenarios } from './scenarios/admin-audit'
@@ -48,6 +49,7 @@ export const scenarios: ContractScenario[] = [
   ...optionsScenarios,
   ...platformScenarios,
   ...usersScenarios,
+  ...rolesScenarios,
   ...retentionScenarios,
   ...auditScenarios,
   ...sideEffectsScenarios,

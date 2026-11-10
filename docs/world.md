@@ -35,6 +35,7 @@ const world = createWorld({
 | `unsupported`      | `'developer'`                          | How to answer a request the world does not emulate. See [The coverage gate](coverage.md).                                           |
 | `onUnsupported`    | none                                   | Called with every request the world does not emulate, and the world.                                                                |
 | `onChange`         | none                                   | Called with the world when the deployed tenant or the current user changed.                                                         |
+| `roles`            | `'off'`                                | `'enforce'` checks requests against the caller's roles, ownership, and inventory roles, like the platform. See [Roles](#roles).     |
 | `freezeDocuments`  | `false`                                | Deep-freezes every stored document, so code that changes one in place throws. For tests of fake-c8y itself; it makes writes slower. |
 
 `DEFAULTS` (exported) holds the default values.
@@ -92,6 +93,21 @@ world.seed({
 Like the platform, a write (POST or PUT) answers with its object only if the request accepts JSON (`Accept: application/json` or a Cumulocity vendor type). Without an Accept header, or with `*/*`, the status is the same and the body is empty. Send `Accept: application/json` when you read the result of a write.
 
 Basic auth selects the tenant and the user (`<tenant>/<user>:<password>`). A request without Basic auth works in the deployed tenant as the world's `user`.
+
+## Roles
+
+By default every request may do everything. With `roles: 'enforce'`, a request with Basic auth of a user the tenant stores (other than the world's `user`), or of a registered service's bootstrap or service user, gets the platform's 403 `security/Forbidden` where it lacks the rights, and lists show only what it may see. Requests without Basic auth and as the world's `user` stay unrestricted, so existing tests keep working.
+
+```ts
+const world = createWorld({ roles: 'enforce' })
+const pump = world.device({ name: 'Pump' })
+world.seed({ users: [{ userName: 'viewer', roles: ['ROLE_USER_MANAGEMENT_OWN_READ', 'ROLE_INVENTORY_READ'] }] })
+const headers = { authorization: `Basic ${btoa(`${world.tenant}/viewer:any`)}` }
+await world.fetch(new Request(`${world.baseUrl}/inventory/managedObjects/${pump}`, { headers })) // 200
+await world.fetch(new Request(`${world.baseUrl}/event/events`, { headers })) // 403 Access is denied
+```
+
+A fork can turn it on for itself: `base.fork({ roles: 'enforce' })`. [Roles](roles.md) has the rules per endpoint, ownership, and inventory roles.
 
 ## Overrides
 

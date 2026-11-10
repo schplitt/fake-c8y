@@ -1,3 +1,5 @@
+import type { AccessScope } from './access'
+import { listed, visible } from './access'
 import type { C8yRequest } from '../types'
 import type { C8yEndpoint } from '../capabilities.generated'
 import type { DocumentCollection, StoredDocument, TenantData, ChildKind } from '../store'
@@ -69,6 +71,20 @@ function publish(data: TenantData, resource: Resource, action: 'CREATE' | 'UPDAT
   const source = resource.collection === 'operations' ? document.deviceId as string | undefined : sourceId(document)
   const payload = action === 'DELETE' ? { id: document.id } : renderDocument(data, resource, document)
   data.world.notify(data, resource.collection as RealtimeApi, action, payload, source)
+}
+
+const SCOPES: Record<Resource['collection'], AccessScope> = { measurements: 'MEASUREMENT', events: 'EVENT', alarms: 'ALARM', operations: 'OPERATION' }
+
+/**
+ * The filter of a list for a restricted caller (`roles: 'enforce'`), or
+ * `undefined` for an unrestricted one.
+ * @param data - Tenant data
+ * @param resource - The listed resource
+ */
+function listedBy(data: TenantData, resource: Resource): ((document: StoredDocument) => boolean) | undefined {
+  const access = data.world.access()
+  const scope = SCOPES[resource.collection]
+  return access && ((document) => listed(data, access, scope, document))
 }
 
 function notFound(resource: Resource, id: string): Response {
@@ -1092,7 +1108,9 @@ export function documents(call: C8yRequest, segments: string[], data: TenantData
     }
     // verified: the list filters apply, but a comma-separated severity
     // (accepted by the list) counts nothing; the answer is a bare JSON number
-    return Response.json(list(call, data, resource, 'GET /alarm/alarms/count').length)
+    const counted = list(call, data, resource, 'GET /alarm/alarms/count')
+    const access = data.world.access()
+    return Response.json(access ? visible(counted, (document: StoredDocument) => listed(data, access, 'ALARM', document)).length : counted.length)
   }
 
   if (id === 'upsert' && resource.collection === 'alarms') {
@@ -1177,9 +1195,9 @@ export function documents(call: C8yRequest, segments: string[], data: TenantData
           },
           slice: (start: number, end: number) => merged.page(start, end - start),
         }
-        return paged(data, call, resource.collection, items, resource.path, { render: (document) => renderDocument(data, resource, document) })
+        return paged(data, call, resource.collection, visible(items, listedBy(data, resource)), resource.path, { render: (document) => renderDocument(data, resource, document) })
       }
-      return paged(data, call, resource.collection, list(call, data, resource, `GET ${resource.path}` as C8yEndpoint), resource.path, { render: (document) => renderDocument(data, resource, document) })
+      return paged(data, call, resource.collection, visible(list(call, data, resource, `GET ${resource.path}` as C8yEndpoint), listedBy(data, resource)), resource.path, { render: (document) => renderDocument(data, resource, document) })
     }
     if (method === 'POST') {
       checkQuery(`POST ${resource.path}` as C8yEndpoint, call, [])
