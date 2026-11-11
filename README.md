@@ -31,7 +31,7 @@ const alarm = await response.json()
 - [Trials](https://github.com/schplitt/fake-c8y/blob/main/docs/trials.md): forks, reset, snapshots, diffs, and the trial clock.
 - [The coverage gate](https://github.com/schplitt/fake-c8y/blob/main/docs/coverage.md): telling a faithful trial from one that hit a request the fake does not emulate.
 - [Services](https://github.com/schplitt/fake-c8y/blob/main/docs/services.md): emulating the tenant's own microservices with `defineService()` and `world.service()`.
-- [Roles](https://github.com/schplitt/fake-c8y/blob/main/docs/roles.md): checking requests against the caller's roles, ownership, and inventory roles (`roles: 'enforce'`).
+- [Roles](https://github.com/schplitt/fake-c8y/blob/main/docs/roles.md): checking requests against the caller's roles, ownership, and inventory roles, on by default (`roles: 'off'` gives full access).
 - [Applications](https://github.com/schplitt/fake-c8y/blob/main/docs/applications.md): the default applications and the application API.
 - [Generated measurements](https://github.com/schplitt/fake-c8y/blob/main/docs/generated-measurements.md): measurement history computed on read.
 - [Emulated API](https://github.com/schplitt/fake-c8y/blob/main/docs/emulated-api.md): what the fake emulates, and where it simplifies.

@@ -245,7 +245,7 @@ Every call of the short form is a new definition, so registering the same contex
 
 ## Permissions
 
-By default permissions are not enforced, for service users or anyone else. With `createWorld({ roles: 'enforce' })` a service's requests through `ctx.fetch()` get the manifest's `requiredRoles` (and `ROLE_SYSTEM`), like on the platform: a service user without `ROLE_EVENT_READ` gets 403 `Access is denied` on `/event/events`. Turn it on to catch an incomplete `requiredRoles` in tests. See [Roles](roles.md).
+Permissions are enforced by default. A service's requests through `ctx.fetch()` get the manifest's `requiredRoles` (and `ROLE_SYSTEM`), like on the platform: a service user without `ROLE_EVENT_READ` gets 403 `Access is denied` on `/event/events`. This catches an incomplete `requiredRoles` in tests, so declare every role the service needs, for example `ROLE_OPTION_MANAGEMENT_READ` to read tenant options. A service registered without a manifest has no required roles. `createWorld({ roles: 'off' })` gives every caller full access. See [Roles](roles.md).
 
 ## Use from an evals host
 

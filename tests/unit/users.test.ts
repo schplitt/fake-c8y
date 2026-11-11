@@ -2,6 +2,7 @@
 // current user as a stored user, and snapshots and diffs with relations.
 import { describe, expect, it } from 'vitest'
 import { createWorld, DEFAULT_ROLES } from '../../src'
+import { NEW_USER_ROLES } from '../../src/api/users'
 import type { World } from '../../src'
 
 async function get(world: World, path: string) {
@@ -88,6 +89,8 @@ describe('user management', () => {
     const world = createWorld({ user: { userName: 'eva', roles: ['ROLE_INVENTORY_ADMIN', 'ROLE_USER_MANAGEMENT_ADMIN'] } })
     const device = (await send(world, 'POST', '/inventory/managedObjects', { name: 'pump', c8y_IsDevice: {} })).body.id
     expect((await send(world, 'POST', `/user/${world.tenant}/users`, { userName: 'otto', password: 'Contract-Pass-2026!x', email: 'otto@example.com' })).status).toBe(201)
+    // otto may enable users
+    expect((await send(world, 'POST', `/user/${world.tenant}/users/otto/roles`, { role: { self: `${world.baseUrl}/user/roles/ROLE_USER_MANAGEMENT_ADMIN` } })).status).toBe(201)
     expect((await send(world, 'PUT', `/inventory/managedObjects/${device}/user`, { enabled: false })).status).toBe(200)
     const locked = { status: 401, body: { error: 'security/Unauthorized', message: 'Authentication failed! : User account is locked', info: 'https://cumulocity.com/api/core/' } }
     for (const path of ['/inventory/managedObjects', '/user/currentUser', `/user/${world.tenant}/users/eva`]) {
@@ -113,7 +116,10 @@ describe('user management', () => {
       ],
     })
     const anna = world.db.users.get('anna@example.com')!
-    expect(anna).toMatchObject({ email: 'anna@example.com', firstName: 'Anna', roles: { references: [] } })
+    // every new user gets the two OWN roles, like on the platform
+    expect(anna).toMatchObject({ email: 'anna@example.com', firstName: 'Anna' })
+    expect(anna.roles.references.map((reference: any) => reference.role.id)).toEqual(NEW_USER_ROLES)
+    expect(world.db.users.get('ben')?.roles.references.map((reference: any) => reference.role.id)).toEqual([...NEW_USER_ROLES, 'ROLE_EVENT_READ'])
     expect(anna.groups.references.map((reference: any) => reference.group.name)).toEqual(['Operators', 'readers'])
     expect(world.db.users.get('ben')?.email).toBe('ben@example.com')
     expect(world.db.users.effectiveRoles('anna@example.com')).toContain('ROLE_PUMP_ADMIN')
@@ -149,7 +155,7 @@ describe('user management', () => {
     world.restore(before)
     expect(world.db.groups.find({ name: 'Ops' })).toEqual([])
     world.restore(JSON.parse(JSON.stringify(after)))
-    expect(world.db.users.effectiveRoles('eva')).toEqual(['ROLE_ALARM_READ'])
+    expect(world.db.users.effectiveRoles('eva')).toEqual([...NEW_USER_ROLES, 'ROLE_ALARM_READ'])
     // the sequences come back too: the next group gets the next id
     expect((await send(world, 'POST', `/user/${world.tenant}/groups`, { name: 'Next' })).body.id).toBe(group.body.id + 1)
   })

@@ -250,14 +250,15 @@ export interface WorldOptions extends C8yWorldState {
   freezeDocuments?: boolean
   /**
    * Whether requests are checked against the caller's rights, like on the
-   * platform. With `'enforce'`, a request with Basic auth of a stored user
+   * platform. `'off'` gives every caller full access. With `'enforce'` (the
+   * default), a request with Basic auth of a stored user
    * (other than the world's `user`) or of a registered service's bootstrap or
    * service user answers 403 where the platform would, and lists show only
    * what the caller may see: global roles (own and from groups), ownership,
    * and inventory roles on an object and its parents. Requests without Basic
    * auth, as the world's `user`, or as a user the tenant does not store stay
    * unrestricted. See docs/roles.md.
-   * @default 'off'
+   * @default 'enforce'
    */
   roles?: 'enforce' | 'off'
 }
@@ -816,7 +817,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
    * @param call - The recorded request
    */
   function callerAccess(call: C8yRequest): Access | undefined {
-    if ((options.roles ?? 'off') === 'off' || call.user === undefined) {
+    if ((options.roles ?? 'enforce') === 'off' || call.user === undefined) {
       return undefined
     }
     if (user && call.user === user.userName && call.tenant === (user.tenant ?? tenant)) {

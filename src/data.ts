@@ -24,7 +24,7 @@ import type { C8yServiceStateInput, C8yServiceStore } from './services'
 import { serviceStateKey, serviceStore, toJson } from './services'
 import type { C8yApplicationInput } from './api/applications'
 import { renderApplication, seedApplications, visibleApplications } from './api/applications'
-import { createAssignment, createGroup, createInventoryRole, createUser, effectiveRoles, groupId, inventoryRoleId, renderAssignment, renderGroup, renderInventoryRole, renderRole, renderUser, UserApiError } from './api/users'
+import { createAssignment, createGroup, createInventoryRole, createUser, effectiveRoles, groupId, inventoryRoleId, NEW_USER_ROLES, renderAssignment, renderGroup, renderInventoryRole, renderRole, renderUser, UserApiError } from './api/users'
 
 /**
  * A managed object id, or an object with its `id` (e.g. a test framework's
@@ -187,7 +187,10 @@ export interface C8yUserInput {
    */
   email?: string
   /**
-   * Global role names assigned to the user directly. Default: none.
+   * Global role names assigned to the user directly, in addition to
+   * `ROLE_USER_MANAGEMENT_OWN_READ` and `ROLE_USER_MANAGEMENT_OWN_ADMIN`,
+   * which every new user gets like on the platform. To take them away,
+   * delete them through the API (`DELETE /user/{tenant}/users/{user}/roles/{role}`).
    */
   roles?: string[]
   /**
@@ -515,7 +518,8 @@ function seedUsers(data: TenantData, seed: C8ySeed, result: C8ySeedResult): void
     attempt(`user ${input.userName}`, () => {
       const email = input.email ?? (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.userName) ? input.userName : `${input.userName}@example.com`)
       // the password only passes validation; the fake does not keep it
-      createUser(data, { ...fields, email, password: 'Seeded-Password-1' }, roles, { seeding: true })
+      // verified (user-default-roles): every new user starts with the two OWN roles
+      createUser(data, { ...fields, email, password: 'Seeded-Password-1' }, [...new Set([...NEW_USER_ROLES, ...roles])], { seeding: true })
       data.users.update(input.userName, (user) => {
         user.groups = [...new Set(groups.map((group) => groupId(data, group)))]
       })

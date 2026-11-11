@@ -37,7 +37,8 @@ const manifest = {
   apiVersion: '2',
   isolation: 'MULTI_TENANT' as const,
   provider: { name: 'Pumps Inc.' },
-  requiredRoles: ['ROLE_INVENTORY_READ', 'ROLE_INVENTORY_ADMIN'],
+  // the service reads its settings as tenant options too
+  requiredRoles: ['ROLE_INVENTORY_READ', 'ROLE_INVENTORY_ADMIN', 'ROLE_OPTION_MANAGEMENT_READ'],
   roles: ['ROLE_PUMP_READ', 'ROLE_PUMP_ADMIN'],
   settingsCategory: 'pumpcfg',
   settings: [{ key: 'interval', defaultValue: '5' }, { key: 'credentials.token', defaultValue: 'abc' }],
@@ -109,7 +110,7 @@ describe('microservices registered from a manifest', () => {
     expect(users).toEqual([{ tenant, name: 'service_pump-service', password: expect.stringMatching(/^.{32}$/) }])
     const asService = `${tenant}/service_pump-service`
     const me = (await send(world, 'GET', '/user/currentUser', undefined, asService)).body
-    expect(me.effectiveRoles.map((role: { id: string }) => role.id)).toEqual(['ROLE_INVENTORY_READ', 'ROLE_INVENTORY_ADMIN', 'ROLE_SYSTEM'])
+    expect(me.effectiveRoles.map((role: { id: string }) => role.id)).toEqual(['ROLE_INVENTORY_READ', 'ROLE_INVENTORY_ADMIN', 'ROLE_OPTION_MANAGEMENT_READ', 'ROLE_SYSTEM'])
     expect((await send(world, 'GET', `/user/${tenant}/users/service_pump-service`)).status).toBe(404)
     expect((await send(world, 'GET', '/application/currentApplication', undefined, asService)).status).toBe(403)
 

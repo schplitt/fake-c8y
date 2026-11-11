@@ -1,11 +1,9 @@
-// Role enforcement (`roles: 'enforce'`): the role matrix, ownership,
+// Role enforcement (`roles: 'enforce'`, the default): the role matrix, ownership,
 // inventory roles on an object and its parents, service and bootstrap users,
 // and the callers that stay unrestricted.
 import { describe, expect, it } from 'vitest'
 import { createWorld, defineService } from '../../src'
 import type { World } from '../../src'
-
-const OWN = ['ROLE_USER_MANAGEMENT_OWN_READ', 'ROLE_USER_MANAGEMENT_OWN_ADMIN']
 
 function as(world: World, user: string | undefined) {
   return async (method: string, path: string, body?: unknown) => {
@@ -30,12 +28,13 @@ function setup(roles: 'enforce' | 'off' = 'enforce') {
   const other = world.device({ name: 'Other' })
   world.seed({
     users: [
-      { userName: 'nobody', roles: OWN },
-      { userName: 'reader', roles: OWN, groups: ['readers'] },
-      { userName: 'eventadmin', roles: [...OWN, 'ROLE_EVENT_ADMIN'] },
-      { userName: 'creator', roles: [...OWN, 'ROLE_INVENTORY_CREATE'] },
-      { userName: 'plant', roles: OWN, inventoryAssignments: [{ managedObject: group, roles: ['Reader'] }] },
-      { userName: 'manager', roles: OWN, inventoryAssignments: [{ managedObject: group, roles: ['Manager'] }] },
+      // every seeded user also gets the two OWN roles
+      { userName: 'nobody' },
+      { userName: 'reader', groups: ['readers'] },
+      { userName: 'eventadmin', roles: ['ROLE_EVENT_ADMIN'] },
+      { userName: 'creator', roles: ['ROLE_INVENTORY_CREATE'] },
+      { userName: 'plant', inventoryAssignments: [{ managedObject: group, roles: ['Reader'] }] },
+      { userName: 'manager', inventoryAssignments: [{ managedObject: group, roles: ['Manager'] }] },
     ],
   })
   // Plant > Pump (asset) > Sensor (device)
@@ -129,15 +128,29 @@ describe('role enforcement', () => {
   it('matches a typed permission against the document\'s fragments', async () => {
     const { world, pump } = setup()
     const [role] = world.seed({ inventoryRoles: [{ name: 'Doors', permissions: [{ permission: '*', scope: 'EVENT', type: 'c8y_Door' }] }] }).inventoryRoles
-    world.seed({ users: [{ userName: 'doors', roles: OWN, inventoryAssignments: [{ managedObject: pump, roles: [role!] }] }] })
+    world.seed({ users: [{ userName: 'doors', inventoryAssignments: [{ managedObject: pump, roles: [role!] }] }] })
     const doors = as(world, 'doors')
     const event = (fragments: object) => ({ source: { id: pump }, type: 'c8y_Door', text: 'x', time: '2026-01-01T00:00:00Z', ...fragments })
     expect((await doors('POST', '/event/events', event({}))).status).toBe(403)
     expect((await doors('POST', '/event/events', event({ c8y_Door: {} }))).status).toBe(201)
   })
 
+  it('gives seeded and API-created users the two OWN roles, like the platform', async () => {
+    const world = createWorld()
+    world.seed({ users: [{ userName: 'seeded', roles: ['ROLE_ALARM_READ', 'ROLE_USER_MANAGEMENT_OWN_READ'] }] })
+    expect((await as(world, undefined)('POST', `/user/${world.tenant}/users`, { userName: 'posted', password: 'Contract-Pass-2026!x', email: 'posted@example.com' })).status).toBe(201)
+    for (const [user, roles] of [['seeded', ['ROLE_USER_MANAGEMENT_OWN_READ', 'ROLE_USER_MANAGEMENT_OWN_ADMIN', 'ROLE_ALARM_READ']], ['posted', ['ROLE_USER_MANAGEMENT_OWN_READ', 'ROLE_USER_MANAGEMENT_OWN_ADMIN']]] as const) {
+      const me = await as(world, user)('GET', '/user/currentUser')
+      expect(me.status).toBe(200)
+      expect(me.body.effectiveRoles.map((role: { id: string }) => role.id)).toEqual(roles)
+    }
+    // taken away through the API, the user no longer reads itself
+    expect((await as(world, undefined)('DELETE', `/user/${world.tenant}/users/seeded/roles/ROLE_USER_MANAGEMENT_OWN_READ`)).status).toBe(204)
+    expect((await as(world, 'seeded')('GET', '/user/currentUser')).status).toBe(403)
+  })
+
   it('gives a service user its required roles and the bootstrap user none', async () => {
-    const world = createWorld({ roles: 'enforce' })
+    const world = createWorld()
     const pump = world.device({ name: 'Pump' })
     world.service(defineService({ manifest: { name: 'reports', contextPath: 'reports', requiredRoles: ['ROLE_INVENTORY_READ'] } }))
     const service = as(world, 'service_reports')
@@ -155,15 +168,20 @@ describe('role enforcement', () => {
     }
   })
 
-  it('checks nothing with roles: \'off\' (the default)', async () => {
-    const { world, pump } = setup('off')
-    expect((await as(world, 'nobody')('GET', `/inventory/managedObjects/${pump}`)).status).toBe(200)
-    expect((await as(createWorld(), 'x')('GET', '/tenant/options')).status).toBe(200)
+  it('enforces by default and checks nothing with roles: \'off\'', async () => {
+    const { world, pump } = setup()
+    expect((await as(world, 'nobody')('GET', `/inventory/managedObjects/${pump}`)).status).toBe(403)
+    const off = setup('off')
+    expect((await as(off.world, 'nobody')('GET', `/inventory/managedObjects/${off.pump}`)).status).toBe(200)
+    expect((await as(off.world, 'nobody')('GET', '/tenant/options')).status).toBe(200)
   })
 
-  it('lets a fork turn enforcement on', async () => {
-    const { world, pump } = setup('off')
-    const fork = world.fork({ roles: 'enforce' })
-    expect((await as(fork, 'nobody')('GET', `/inventory/managedObjects/${pump}`)).status).toBe(403)
+  it('lets a fork turn enforcement on or off', async () => {
+    const off = setup('off')
+    expect((await as(off.world.fork({ roles: 'enforce' }), 'nobody')('GET', `/inventory/managedObjects/${off.pump}`)).status).toBe(403)
+    const { world, pump } = setup()
+    expect((await as(world.fork({ roles: 'off' }), 'nobody')('GET', `/inventory/managedObjects/${pump}`)).status).toBe(200)
+    // without its own option a fork takes the base's
+    expect((await as(off.world.fork(), 'nobody')('GET', `/inventory/managedObjects/${off.pump}`)).status).toBe(200)
   })
 })

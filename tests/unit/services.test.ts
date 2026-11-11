@@ -149,7 +149,7 @@ describe('world.service()', () => {
       const marker = await ctx.fetch('/inventory/managedObjects', { method: 'POST', headers: json, body: JSON.stringify({ name: 'marker' }) })
       const alarm = await ctx.fetch(new Request(`${base.baseUrl}/alarm/alarms`, { method: 'POST', headers: json, body: JSON.stringify({ source: { id: device }, type: 'pump_hot', text: 'hot', severity: 'MAJOR', time: '2026-11-01T00:00:00.000Z' }) }))
       return Response.json({ marker: (await marker.json()).id, alarm: alarm.status })
-    }, { user: 'service_alarm-raiser' })
+    }, { user: 'service_alarm-raiser', manifest: { requiredRoles: ['ROLE_INVENTORY_ADMIN', 'ROLE_ALARM_ADMIN'] } })
     const fork = base.fork()
     const { body } = await send(fork, 'POST', '/service/alarms/raise')
     expect(body.alarm).toBe(201)

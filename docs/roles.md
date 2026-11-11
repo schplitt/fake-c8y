@@ -1,11 +1,11 @@
 # Roles
 
-With `createWorld({ roles: 'enforce' })`, the world checks every request against the caller's rights the way the platform does: it answers 403 where the platform would, and lists show only what the caller may see. The default is `'off'`: every request may do everything, as before.
+By default (`roles: 'enforce'`), the world checks every request against the caller's rights the way the platform does: it answers 403 where the platform would, and lists show only what the caller may see. `createWorld({ roles: 'off' })` turns the checks off: every caller may do everything.
 
 ```ts
 import { createWorld } from 'fake-c8y'
 
-const world = createWorld({ roles: 'enforce' })
+const world = createWorld()
 const plant = world.managedObject({ name: 'Plant', c8y_IsDeviceGroup: {} })
 const pump = world.device({ name: 'Pump' })
 await world.fetch(new Request(`${world.baseUrl}/inventory/managedObjects/${plant}/childAssets`, {
@@ -14,7 +14,7 @@ await world.fetch(new Request(`${world.baseUrl}/inventory/managedObjects/${plant
   body: JSON.stringify({ managedObject: { id: pump } }),
 }))
 world.seed({
-  users: [{ userName: 'operator', roles: ['ROLE_USER_MANAGEMENT_OWN_READ'], inventoryAssignments: [{ managedObject: plant, roles: ['Reader'] }] }],
+  users: [{ userName: 'operator', inventoryAssignments: [{ managedObject: plant, roles: ['Reader'] }] }],
 })
 
 const asOperator = { authorization: `Basic ${btoa(`${world.tenant}/operator:any`)}` }
@@ -26,16 +26,18 @@ await world.fetch(new Request(`${world.baseUrl}/tenant/options`, { headers: asOp
 
 | Caller (Basic Auth `<tenant>/<user>`)                                   | Rights                                                                                          |
 | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| No Basic auth                                                           | Unrestricted (the world's `user`, as before).                                                   |
+| No Basic auth                                                           | Unrestricted (the request runs as the world's `user`).                                          |
 | The world's `user`                                                      | Unrestricted, whatever its `roles`.                                                             |
 | A user the caller's tenant stores                                       | Its global roles (own and from its groups), ownership, inventory roles, and device permissions. |
 | A registered service's service user (`world.service()`)                 | The manifest's `requiredRoles` and `ROLE_SYSTEM`.                                               |
 | A registered service's bootstrap user                                   | `ROLE_SYSTEM` only.                                                                             |
 | A name the tenant does not store, the world's own `subscriptions` users | Unrestricted (the fake checks no passwords).                                                    |
 
-A seeded user has only the roles you give it. Users created through the API get `ROLE_USER_MANAGEMENT_OWN_READ` and `ROLE_USER_MANAGEMENT_OWN_ADMIN`, like on the platform; without `OWN_READ`, `GET /user/currentUser` answers 403.
+So under enforcement only stored users and a service's bootstrap and service users are restricted. Requests without Basic auth, the world's own `user`, and user names the tenant does not store keep full access, so tests that send no credentials work unchanged.
 
-A fork takes the option of its base unless it sets its own: `base.fork({ roles: 'enforce' })`.
+Every new user gets `ROLE_USER_MANAGEMENT_OWN_READ` and `ROLE_USER_MANAGEMENT_OWN_ADMIN`, like on the platform: users seeded with `world.seed({ users })` (in addition to the `roles` you give) and users created with `POST /user/{tenant}/users`. Without `OWN_READ`, `GET /user/currentUser` answers 403; delete the role through the API to test that. The world's `user` keeps exactly its `roles`, since it is unrestricted anyway.
+
+A fork takes the option of its base unless it sets its own: `base.fork({ roles: 'off' })`.
 
 ## How a request is checked
 

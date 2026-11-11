@@ -30,7 +30,7 @@ describe('the writes of a request', () => {
 
   it('records a service\'s write on its own request, the child of the service call', async () => {
     const world = createWorld()
-    world.service('planner', async (_request, ctx) => ctx.fetch('/inventory/managedObjects', { method: 'POST', headers: json, body: JSON.stringify({ type: 'plan' }) }))
+    world.service('planner', async (_request, ctx) => ctx.fetch('/inventory/managedObjects', { method: 'POST', headers: json, body: JSON.stringify({ type: 'plan' }) }), { manifest: { requiredRoles: ['ROLE_INVENTORY_ADMIN'] } })
 
     await world.fetch(new Request(`${world.baseUrl}/service/planner/plans`, { method: 'POST' }))
 

@@ -35,7 +35,7 @@ const world = createWorld({
 | `unsupported`      | `'developer'`                          | How to answer a request the world does not emulate. See [The coverage gate](coverage.md).                                           |
 | `onUnsupported`    | none                                   | Called with every request the world does not emulate, and the world.                                                                |
 | `onChange`         | none                                   | Called with the world when the deployed tenant or the current user changed.                                                         |
-| `roles`            | `'off'`                                | `'enforce'` checks requests against the caller's roles, ownership, and inventory roles, like the platform. See [Roles](#roles).     |
+| `roles`            | `'enforce'`                            | Checks requests against the caller's rights, like the platform. `'off'` gives every caller full access. See [Roles](#roles).        |
 | `freezeDocuments`  | `false`                                | Deep-freezes every stored document, so code that changes one in place throws. For tests of fake-c8y itself; it makes writes slower. |
 
 `DEFAULTS` (exported) holds the default values.
@@ -96,18 +96,20 @@ Basic auth selects the tenant and the user (`<tenant>/<user>:<password>`). A req
 
 ## Roles
 
-By default every request may do everything. With `roles: 'enforce'`, a request with Basic auth of a user the tenant stores (other than the world's `user`), or of a registered service's bootstrap or service user, gets the platform's 403 `security/Forbidden` where it lacks the rights, and lists show only what it may see. Requests without Basic auth and as the world's `user` stay unrestricted, so existing tests keep working.
+Roles are enforced by default. A request with Basic auth of a user the tenant stores (other than the world's `user`), or of a registered service's bootstrap or service user, gets the platform's 403 `security/Forbidden` where it lacks the rights, and lists show only what it may see. Three kinds of caller stay unrestricted: requests without Basic auth, the world's own `user`, and user names the tenant does not store. `roles: 'off'` gives every caller full access.
+
+Seeded users get the two roles every new user gets on the platform, `ROLE_USER_MANAGEMENT_OWN_READ` and `ROLE_USER_MANAGEMENT_OWN_ADMIN`, plus the `roles` you give.
 
 ```ts
-const world = createWorld({ roles: 'enforce' })
+const world = createWorld()
 const pump = world.device({ name: 'Pump' })
-world.seed({ users: [{ userName: 'viewer', roles: ['ROLE_USER_MANAGEMENT_OWN_READ', 'ROLE_INVENTORY_READ'] }] })
+world.seed({ users: [{ userName: 'viewer', roles: ['ROLE_INVENTORY_READ'] }] })
 const headers = { authorization: `Basic ${btoa(`${world.tenant}/viewer:any`)}` }
 await world.fetch(new Request(`${world.baseUrl}/inventory/managedObjects/${pump}`, { headers })) // 200
 await world.fetch(new Request(`${world.baseUrl}/event/events`, { headers })) // 403 Access is denied
 ```
 
-A fork can turn it on for itself: `base.fork({ roles: 'enforce' })`. [Roles](roles.md) has the rules per endpoint, ownership, and inventory roles.
+A fork can turn it off or on for itself: `base.fork({ roles: 'off' })`. [Roles](roles.md) has the rules per endpoint, ownership, and inventory roles.
 
 ## Overrides
 

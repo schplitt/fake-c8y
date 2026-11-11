@@ -301,7 +301,7 @@ Audit records the platform writes, as checked on a tenant (November 2026). `chan
 
 ## Roles and Permissions
 
-Checked with a user that had only the default roles and got one role, ownership, or inventory role at a time. The fake checks the same with `createWorld({ roles: 'enforce' })`; [Roles](roles.md) has the full table.
+Checked with a user that had only the default roles and got one role, ownership, or inventory role at a time. The fake checks the same by default (`roles: 'enforce'`); [Roles](roles.md) has the full table.
 
 | Id                            | The Docs Say                                                                                     | The Platform Does                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ----------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
