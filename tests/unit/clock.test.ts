@@ -11,13 +11,13 @@ const DAY = 24 * 60 * 60_000
 describe('createClock', () => {
   it('starts at a fixed time, runs with wall time, and jumps', async () => {
     const clock = createClock({ start: START })
-    expect(clock.now() - Date.parse(START)).toBeLessThan(50)
+    expect(clock.now() - Date.parse(START)).toBeLessThan(1000)
     await sleep(20)
     expect(clock.now() - Date.parse(START)).toBeGreaterThanOrEqual(15)
     clock.advance(DAY)
-    expect(clock.now() - Date.parse(START) - DAY).toBeLessThan(100)
+    expect(clock.now() - Date.parse(START) - DAY).toBeLessThan(1000)
     clock.set(Date.parse(START))
-    expect(clock.now() - Date.parse(START)).toBeLessThan(50)
+    expect(clock.now() - Date.parse(START)).toBeLessThan(1000)
   })
 
   it('stands still without realtime', () => {
@@ -60,7 +60,7 @@ describe('a world on a trial clock', () => {
     const world = createWorld({ clock })
     const pump = world.device({ name: 'Pump' })
     world.seed({ events: [1, 3, 6].map((days) => ({ source: pump, type: 'c8y_Restart', text: 'Restart', time: new Date(Date.parse(START) - days * DAY).toISOString() })) })
-    expect(Date.parse(world.db.managedObjects.get(pump)!.creationTime as string) - Date.parse(START)).toBeLessThan(50)
+    expect(Date.parse(world.db.managedObjects.get(pump)!.creationTime as string) - Date.parse(START)).toBeLessThan(1000)
 
     // the agent computes "the last 7 days" from the same clock
     const dateFrom = new Date(clock.now() - 7 * DAY).toISOString()

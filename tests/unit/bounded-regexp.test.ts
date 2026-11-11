@@ -23,7 +23,10 @@ describe('wildcard work limit', () => {
     const result = await names(world, `name eq '*(\\w+\\s?)+z*'`)
     expect(result.status).toBe(200)
     expect(result.names).toEqual([])
-    expect(result.elapsed).toBeLessThan(50)
+    // Without the step limit this pattern backtracks exponentially on a 41-character name and
+    // never finishes. The bound only has to tell "bounded" from "hangs", so it leaves room for
+    // slow CI machines (one run took 51 ms against an earlier 50 ms bound).
+    expect(result.elapsed).toBeLessThan(1000)
   })
 
   it('counts a match over the limit as no match, like the platform', async () => {
