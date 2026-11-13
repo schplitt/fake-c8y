@@ -1,0 +1,108 @@
+name: Update OpenAPI spec
+
+# Regenerates src/capabilities.generated.ts and tests/contract/spec.generated.json
+# from the live Cumulocity OpenAPI spec (pnpm gen:capabilities) every night and
+# opens or updates a PR when they changed. The tests run here and their result
+# goes into the PR body, since a PR opened with GITHUB_TOKEN does not start CI.
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-spec
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Regenerate from the live spec
+        run: |
+          pnpm gen:capabilities
+          pnpm lint:fix
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if git diff --quiet -- src/capabilities.generated.ts tests/contract/spec.generated.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Typecheck and test
+        id: test
+        if: steps.diff.outputs.changed == 'true'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          { pnpm typecheck && pnpm test:run; } 2>&1 | tee "$RUNNER_TEMP/test.log"
+
+      - name: Push changes and open or update the PR
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          BRANCH="chore/update-openapi-spec"
+          BASE="${{ github.event.repository.default_branch }}"
+          VERSION=$(jq -r .version tests/contract/spec.generated.json)
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add src/capabilities.generated.ts tests/contract/spec.generated.json
+          git commit -m "chore: update the OpenAPI spec ($VERSION)"
+          git push --force origin "$BRANCH"
+
+          BODY_FILE=$(mktemp)
+          {
+            echo "Nightly regeneration from the live Cumulocity OpenAPI spec (\`pnpm gen:capabilities\`), spec version \`$VERSION\`."
+            echo ""
+            if [ "$TEST_OUTCOME" = "success" ]; then
+              echo "Typecheck and tests passed with the new spec: $RUN_URL"
+            else
+              echo "**Typecheck or tests fail with the new spec**: the fake needs changes before this can merge. Run: $RUN_URL"
+              echo ""
+              echo "<details><summary>Last lines of the output</summary>"
+              echo ""
+              echo '```'
+              tail -n 60 "$RUNNER_TEMP/test.log"
+              echo '```'
+              echo ""
+              echo "</details>"
+            fi
+            echo ""
+            echo "> CI does not start on its own for this PR (opened by GITHUB_TOKEN); close and reopen it to run CI."
+          } > "$BODY_FILE"
+
+          EXISTING=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')
+          if [ -z "$EXISTING" ]; then
+            gh pr create --title "chore: update the OpenAPI spec ($VERSION)" --body-file "$BODY_FILE" --head "$BRANCH" --base "$BASE"
+          else
+            gh pr edit "$EXISTING" --title "chore: update the OpenAPI spec ($VERSION)" --body-file "$BODY_FILE"
+          fi

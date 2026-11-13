@@ -14,7 +14,7 @@ Before a commit, run `pnpm lint:fix && pnpm typecheck && pnpm test:run && pnpm b
 ## The real-tenant contract run
 
 > [!WARNING]
-> `pnpm test:contract` runs the contract scenarios against a **real Cumulocity tenant**, not the fake. It reads the tenant only from `C8Y_CONTRACT_BASEURL`, `C8Y_CONTRACT_TENANT`, `C8Y_CONTRACT_USER`, and `C8Y_CONTRACT_PASSWORD`, set in the environment or in a local `.env` (copy `.env.example`). It creates data on that tenant and deletes it afterwards; audit records stay. Use a tenant meant for it. In CI the contract workflow runs only when started by hand.
+> `pnpm test:contract` runs the contract scenarios against a **real Cumulocity tenant**, not the fake. It reads the tenant only from `C8Y_CONTRACT_BASEURL`, `C8Y_CONTRACT_TENANT`, `C8Y_CONTRACT_USER`, and `C8Y_CONTRACT_PASSWORD`, set in the environment or in a local `.env` (copy `.env.example`). It creates data on that tenant and deletes it afterwards; audit records stay. Use a tenant meant for it. In CI the contract workflow runs every Monday and when started by hand, and opens a `contract-drift` issue when the fake and the platform disagree. Another workflow regenerates the spec files every night and opens a PR when they changed.
 
 `pnpm test:run` covers the fake and never touches a tenant. It runs the same scenarios against a plain world and against a fork.
 
