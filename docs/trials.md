@@ -35,6 +35,26 @@ A fork costs a few microseconds and a few kilobytes, whatever the size of the ba
 
 On a fork, `reset()` goes back to the state the fork started in: its own writes, ids, overrides, and call log are dropped. A clock the fork got as a copy of the base's goes back to the fork's start time, so a replay gets the same ids and times. A clock you passed to `fork({ clock })` stays where it is. A `baseline` is applied on top.
 
+## Checkpoints
+
+`world.checkpoint()` remembers the current state, and `world.reset({ to: checkpoint })` goes back to it on the same world: data, ids, tenant options, the user, subscriptions, overrides, and the call log, like a fork's `reset()` but to a state taken later than the baseline. Use it when something keeps running against the world between tests, such as an app that subscribed to Notification 2.0 at startup:
+
+```ts
+await startApp(world) // creates subscriptions and tokens, connects consumers
+const startup = world.checkpoint()
+
+beforeEach(() => {
+  world.reset({ to: startup, consumers: 'keep' })
+})
+```
+
+- `consumers: 'keep'` keeps every open socket whose subscription the checkpoint has, with its token, also a token minted after the checkpoint (clients mint a new one on every reconnect). Subscriptions created after the checkpoint are deleted and their sockets closed. The default, `'close'`, closes every socket whose token the checkpoint does not have. Undelivered notifications are dropped either way.
+- State fields (`tenant`, `user`, `subscriptions`, `tenantOptions`) apply on top without changing the baseline; a plain `reset()` still goes back to the baseline.
+- Services registered after the checkpoint stay registered and are installed again.
+- The clock is not part of a checkpoint and stays where it is.
+- The data so far becomes a frozen layer, as for a fork, so `reset({ to })` costs about as much as a fork's `reset()`, and a checkpoint costs about as much as a first `fork()`. A frozen base (after `fork()`) takes no checkpoints; a fork does.
+- A checkpoint belongs to the world that took it.
+
 ## Snapshots and diffs
 
 `world.snapshot()` returns the data and platform state as plain JSON, with Notification 2.0 subscriptions and tokens, but without overrides and sockets. `world.restore(snapshot)` puts it back. You can store a snapshot as a fixture.

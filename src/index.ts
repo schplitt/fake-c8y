@@ -2,7 +2,7 @@ import type { C8yCoverage, C8yOverrideContext, C8yOverrideHandler, C8yRequest, C
 import type { CompiledRoute } from './router'
 import type { StoredDocument, TenantCollection, TenantData, WorldContext } from './store'
 import type { Collection } from './collection'
-import type { RealtimeApi } from './realtime'
+import type { NotificationToken, RealtimeApi } from './realtime'
 import type { C8yBinaryInput, C8yDb, C8yManagedObjectInput, C8ySeed, C8ySeedResultFor } from './data'
 import type { WorldDiff, WorldSnapshot } from './snapshot'
 import type { Clock } from './clock'
@@ -12,7 +12,7 @@ import { DEFAULTS } from './defaults'
 import { withReasonPhrase } from './reason-phrases'
 import { compileRoute, matchRoute, splitPath } from './router'
 import { emptyTenant, forkTenant, freezeTenant, optionKey, TENANT_COLLECTIONS } from './store'
-import { Realtime } from './realtime'
+import { Realtime, SOCKET_STATE } from './realtime'
 import { platformApi, UnsupportedRequestError } from './api'
 import { UsageLog } from './api/statistics'
 import { applicationAccess, authorize, userAccess } from './api/access'
@@ -344,9 +344,23 @@ export interface World {
    * overrides, and call log are dropped, the base shows again, and a clock
    * the fork got as a copy of the base's goes back to the fork's start. A
    * `baseline` is applied on top of that.
-   * @param baseline - A new baseline (default: the current one)
+   *
+   * With `to`, the world goes back to a checkpoint of its own
+   * (`checkpoint()`) instead, and the state fields apply on top without
+   * changing the baseline. `consumers: 'keep'` keeps the open Notification
+   * 2.0 sockets whose subscription is in the state reset to, with their
+   * tokens (also tokens minted after the checkpoint, e.g. on a reconnect).
+   * @param options - A new baseline (default: the current one), `to`, `consumers`
    */
-  reset: (baseline?: C8yWorldState) => void
+  reset: (options?: C8yResetOptions) => void
+  /**
+   * Remembers the current state for `reset({ to })`: data, ids, tenant
+   * options, the user, subscriptions, overrides, and services. The world goes
+   * on as before; its data so far becomes a frozen layer (like the base of a
+   * fork), so going back to it costs about as much as a fork's `reset()`.
+   * The clock is not part of it.
+   */
+  checkpoint: () => C8yCheckpoint
   /**
    * Applies a partial state on top of the current one.
    */
@@ -637,7 +651,38 @@ export function createWorld(options: WorldOptions = {}): World {
 }
 
 /**
- * The frozen state a fork starts from.
+ * A state of a world that `world.reset({ to })` goes back to
+ * (`world.checkpoint()`). It belongs to the world that took it.
+ */
+export interface C8yCheckpoint {
+  /**
+   * Counts the checkpoints of a world, from 1.
+   */
+  readonly id: number
+}
+
+/**
+ * Options of `world.reset()`: a new baseline (the state fields), or a
+ * checkpoint to go back to.
+ */
+export interface C8yResetOptions extends C8yWorldState {
+  /**
+   * Goes back to this checkpoint of the world instead of the baseline; the
+   * state fields apply on top without changing the baseline.
+   */
+  to?: C8yCheckpoint
+  /**
+   * What happens to open Notification 2.0 sockets: `'close'` (default)
+   * closes those whose token the state reset to does not have; `'keep'` also
+   * keeps the sockets (and their tokens) whose subscription it has.
+   * Undelivered notifications are dropped either way.
+   * @default 'close'
+   */
+  consumers?: 'keep' | 'close'
+}
+
+/**
+ * The frozen state a fork starts from, or a checkpoint goes back to.
  */
 interface ForkBase {
   tenants: ReadonlyMap<string, TenantData>
@@ -685,6 +730,9 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
   let user: C8yUser | null = null
   // what storing the current user replaced (restored when the user changes)
   let displaced: DisplacedUser | undefined = base?.displaced
+  // the checkpoints of this world (`checkpoint()`, `reset({ to })`)
+  const checkpoints = new WeakMap<C8yCheckpoint, ForkBase>()
+  let checkpointCount = 0
   let subscriptions: C8ySubscription[] = []
   let nextId = 1
   // operations running in muted() (async ones until they settle)
@@ -840,6 +888,76 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       data.users.set(userName, previous)
     } else {
       data.users.delete(userName)
+    }
+  }
+
+  /**
+   * Back to a frozen state (a fork's base or a checkpoint): its data in new
+   * layers, its ids, user, subscriptions, and overrides, then `state` on top
+   * and the services registered since.
+   * @param from - The frozen state
+   * @param state - State fields to apply on top
+   */
+  function rebuildFrom(from: ForkBase, state: C8yWorldState | undefined): void {
+    handlers = [...from.handlers]
+    nextId = from.nextId
+    tenant = from.tenant
+    user = copyUser(from.user)
+    displaced = from.displaced
+    subscriptions = from.subscriptions.map((subscription) => ({ ...subscription }))
+    for (const [name, data] of from.tenants) {
+      tenants.set(name, forkTenant(data, context))
+    }
+    apply(state ? pickState(state) : {})
+    if (state?.user !== undefined) {
+      // a new baseline user is base data, not a switch
+      displaced = undefined
+    }
+    // the frozen data has the services registered when it was taken; the
+    // ones registered since go on top
+    for (const [contextPath, service] of services) {
+      const inherited = from.services.get(contextPath)
+      if (service !== inherited) {
+        installService(contextPath, service, inherited)
+        if (service.source !== inherited?.source) {
+          seedService(contextPath, service)
+        }
+      }
+    }
+  }
+
+  /**
+   * The tokens of the open Notification 2.0 sockets, as stored now.
+   */
+  function openConsumers(): Array<[string, NotificationToken]> {
+    const open: Array<[string, NotificationToken]> = []
+    for (const socket of realtime.sockets) {
+      const value = new URL(socket.url).searchParams.get('token') ?? ''
+      const token = socket.readyState === SOCKET_STATE.OPEN ? tenants.get(socket.token?.tenant ?? '')?.notificationTokens.get(value) : undefined
+      if (token) {
+        open.push([value, token])
+      }
+    }
+    return open
+  }
+
+  /**
+   * Stores the tokens of open sockets again after a reset (`consumers:
+   * 'keep'`) where the data has their subscription, and moves the tenant's
+   * notification sequence past them, so new ids and tokens do not collide.
+   * @param kept - Tokens from `openConsumers()`
+   */
+  function keepConsumers(kept: Array<[string, NotificationToken]>): void {
+    for (const [value, token] of kept) {
+      const data = tenants.get(token.tenant)
+      if (!data || ![...data.notificationSubscriptions.values()].some((subscription) => subscription.subscription === token.subscription)) {
+        continue
+      }
+      data.notificationTokens.set(value, token)
+      const number = Number(/^fake-token-(\d+)-/.exec(value)?.[1] ?? 0)
+      if (number >= (data.sequences.get('notification') ?? 1)) {
+        data.sequences.set('notification', number + 1)
+      }
     }
   }
 
@@ -1729,6 +1847,14 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
 
     reset(next) {
       writable()
+      const { to, consumers = 'close', ...rest } = next ?? {}
+      // a new baseline only when state fields are given (or a plain `{}`)
+      const state = next === undefined || ((to !== undefined || next.consumers !== undefined) && Object.keys(rest).length === 0) ? undefined : rest
+      const from = to === undefined ? undefined : checkpoints.get(to)
+      if (to !== undefined && !from) {
+        throw new TypeError('fake-c8y: reset({ to }) needs a checkpoint of this world (world.checkpoint())')
+      }
+      const kept = consumers === 'keep' ? openConsumers() : []
       generation++
       calls = []
       usage = new UsageLog()
@@ -1737,41 +1863,18 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       unhandledRequests = []
       platformErrors = []
       tenants.clear()
-      if (base) {
-        // back to the state of the fork's creation, then the new baseline on top
-        if (forkStart !== undefined && clock() !== forkStart) {
+      if (from || base) {
+        if (!from && forkStart !== undefined && clock() !== forkStart) {
+          // a fork's own clock goes back to the fork's start
           options.clock!.set(forkStart)
         }
-        handlers = [...base.handlers]
-        nextId = base.nextId
-        tenant = base.tenant
-        user = copyUser(base.user)
-        displaced = base.displaced
-        subscriptions = base.subscriptions.map((subscription) => ({ ...subscription }))
-        for (const [name, data] of base.tenants) {
-          tenants.set(name, forkTenant(data, context))
-        }
-        apply(next ? pickState(next) : {})
-        if (next?.user !== undefined) {
-          // a new baseline user is base data, not a switch
-          displaced = undefined
-        }
-        // the base's data has the services it had at fork time; the fork's
-        // own registrations go on top
-        for (const [contextPath, service] of services) {
-          const inherited = base.services.get(contextPath)
-          if (service !== inherited) {
-            installService(contextPath, service, inherited)
-            if (service.source !== inherited?.source) {
-              seedService(contextPath, service)
-            }
-          }
-        }
+        rebuildFrom((from ?? base)!, state)
+        keepConsumers(kept)
         realtime.resync()
         return
       }
-      if (next) {
-        baseline = pickState(next)
+      if (state) {
+        baseline = pickState(state)
       }
       tenant = baseline.tenant ?? DEFAULTS.tenant
       handlers = []
@@ -1788,7 +1891,33 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         installService(contextPath, service)
         seedService(contextPath, service)
       }
+      keepConsumers(kept)
       realtime.resync()
+    },
+
+    checkpoint() {
+      writable()
+      tick()
+      const frozenTenants = new Map<string, TenantData>()
+      for (const [name, data] of tenants) {
+        freezeTenant(data, true)
+        frozenTenants.set(name, data)
+        // the world goes on in a layer of its own on top
+        tenants.set(name, forkTenant(data, context))
+      }
+      const checkpoint: C8yCheckpoint = Object.freeze({ id: ++checkpointCount })
+      checkpoints.set(checkpoint, {
+        tenants: frozenTenants,
+        nextId,
+        tenant,
+        user: copyUser(user),
+        displaced,
+        subscriptions: subscriptions.map((subscription) => ({ ...subscription })),
+        handlers: [...handlers],
+        services: new Map(services),
+        ownClock: false,
+      })
+      return checkpoint
     },
 
     apply,

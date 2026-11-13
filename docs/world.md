@@ -211,4 +211,4 @@ import { createFakeWebSocket } from 'fake-c8y/realtime'
 const WebSocket = createFakeWebSocket(world.realtime, { encodeMessage: (text) => Buffer.from(text) })
 ```
 
-Sockets belong to one world, so use `createFakeWebSocket(fork.realtime)` for a fork. Subscriptions and tokens are tenant data: a fork inherits the base's, `reset()` drops the ones created since, `restore()` brings back the snapshot's, and `diff()` lists subscriptions under `notificationSubscriptions`.
+Sockets belong to one world, so use `createFakeWebSocket(fork.realtime)` for a fork. Subscriptions and tokens are tenant data: a fork inherits the base's, `reset()` drops the ones created since (`reset({ to, consumers: 'keep' })` keeps open consumers, see [Checkpoints](trials.md#checkpoints)), `restore()` brings back the snapshot's, and `diff()` lists subscriptions under `notificationSubscriptions`.
