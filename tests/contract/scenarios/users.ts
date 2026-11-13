@@ -402,6 +402,12 @@ export const usersScenarios: ContractScenario[] = [
           [{ scope: 'ALARM', type: '*' }, 'permission is required'],
           [{ permission: 'READ', type: '*' }, 'scope is required'],
           [{ permission: 'READ', scope: 'ALARM' }, 'type is required'],
+          // the required fields in order: type, permission, scope
+          [{}, 'type is required'],
+          [{ scope: 'ALARM' }, 'type is required'],
+          [{ type: '*' }, 'permission is required'],
+          [{ permission: 'WRITE' }, 'type is required'],
+          [{ scope: 'FOO', type: '*' }, 'permission is required'],
         ] as const) {
           expect(await api(client, 'POST', '/user/inventoryroles', { name: `${name}-x`, permissions: [permission] })).toMatchObject({ status: 422, body: { error: 'undefined/validationError', message } })
         }

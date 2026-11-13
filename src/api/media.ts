@@ -364,14 +364,14 @@ export async function withLocation(response: Response): Promise<Response> {
 /**
  * The answer to an Accept header `negotiate()` rejects: 406 with an empty
  * body. Verified exception: a single measurement whose Accept header names
- * only the collection type fails with 500 (no message, nothing stored).
+ * only the collection type fails with 500 (nothing stored).
  * @param method - Request method
  * @param segments - Decoded path segments
  * @param accept - The request's Accept header
  */
 export function notAcceptable(method: string, segments: readonly string[], accept: string | null): Response {
   if (method === 'POST' && segments.length === 2 && segments[0] === 'measurement' && segments[1] === 'measurements' && /measurementcollection\+json/i.test(accept ?? '')) {
-    return Response.json({ error: 'general/internalError', info: ERROR_INFO }, { status: 500, headers: { 'content-type': ERROR_MEDIA_TYPE } })
+    return Response.json({ error: 'general/internalError', message: 'Cannot invoke "java.util.List.size()" because the return value of "com.cumulocity.rest.representation.measurement.MeasurementCollectionRepresentation.getMeasurements()" is null', info: ERROR_INFO }, { status: 500, headers: { 'content-type': ERROR_MEDIA_TYPE } })
   }
   return new Response(null, { status: 406 })
 }

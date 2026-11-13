@@ -652,7 +652,7 @@ export function applicationApi(call: C8yRequest, segments: string[], data: Tenan
 
 function createApplication(data: TenantData, body: Record<string, unknown>): Response {
   // verified: checked in this order, one at a time
-  for (const field of ['key', 'name', 'type']) {
+  for (const field of ['key', 'type', 'name']) {
     if (body[field] === undefined || body[field] === null || body[field] === '') {
       return apiError(422, 'undefined/validationError', `${field} is required`)
     }

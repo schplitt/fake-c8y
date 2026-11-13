@@ -6,6 +6,9 @@ export default defineConfig({
     include: ['tests/contract/real-tenant.test.ts'],
     // one tenant, one scenario at a time
     fileParallelism: false,
-    testTimeout: 60_000,
+    // a real tenant can be slow (series of 5000 points, microservice
+    // subscriptions, cleanup of many objects), more so from CI runners
+    testTimeout: 180_000,
+    hookTimeout: 60_000,
   },
 })

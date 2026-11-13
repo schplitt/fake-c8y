@@ -116,7 +116,7 @@ export const httpScenarios: ContractScenario[] = [
       expect((await send(client, 'POST', '/measurement/measurements', { contentType: `${VENDOR}measurementcollection+json`, accept: `${VENDOR}measurement+json`, body: { measurements: [{ source, type: `mt_${unique}`, time: time(3), mt_T: { T: { value: 4 } } }] } })).status).toBe(406)
       // a single measurement that accepts only the collection type fails, nothing is stored
       const failed = await send(client, 'POST', '/measurement/measurements', { accept: `${VENDOR}measurementcollection+json`, body: { source, type: `mt_${unique}`, time: time(4), mt_T: { T: { value: 5 } } } })
-      expect({ status: failed.status, body: failed.json }).toEqual({ status: 500, body: { error: 'general/internalError', info: 'https://cumulocity.com/api/core/' } })
+      expect({ status: failed.status, body: failed.json }).toEqual({ status: 500, body: { error: 'general/internalError', message: 'Cannot invoke "java.util.List.size()" because the return value of "com.cumulocity.rest.representation.measurement.MeasurementCollectionRepresentation.getMeasurements()" is null', info: 'https://cumulocity.com/api/core/' } })
       expectType(await send(client, 'GET', `/measurement/measurements?source=${id}`), vendor('measurementcollection'), 'GET measurements')
       expectType(await send(client, 'GET', `/measurement/measurements/series?source=${id}&dateFrom=2025-01-01&dateTo=2027-01-01`), 'application/json', 'GET series')
 
