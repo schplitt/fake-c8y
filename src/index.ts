@@ -342,8 +342,8 @@ export interface World {
    *
    * A fork goes back to the state it was forked in: its own writes, ids,
    * overrides, and call log are dropped, the base shows again, and a clock
-   * the fork got as a copy of the base's goes back to the fork's start. A
-   * `baseline` is applied on top of that.
+   * the fork got as a copy of the base's goes back to the fork's start. The
+   * state fields of `options` are applied on top of that.
    *
    * With `to`, the world goes back to a checkpoint of its own
    * (`checkpoint()`) instead, and the state fields apply on top without
@@ -358,8 +358,10 @@ export interface World {
   /**
    * Remembers the current state for `reset({ to })`: data, ids, tenant
    * options, the user, subscriptions, overrides, and services. The world goes
-   * on as before; its data so far becomes a frozen layer (like the base of a
-   * fork), so going back to it costs about as much as a fork's `reset()`.
+   * on as before. A plain world's first checkpoint makes its data so far a
+   * frozen layer (like the base of a fork); later ones, and a fork's, keep a
+   * copy of what was written since, so going back costs about as much as a
+   * fork's `reset()` plus those writes.
    * The clock is not part of it.
    */
   checkpoint: () => C8yCheckpoint
@@ -911,12 +913,10 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     displaced = from.displaced
     subscriptions = from.subscriptions.map((subscription) => ({ ...subscription }))
     for (const [name, layer] of from.tenants) {
-      const data = forkTenant(layer, context)
+      const data = { tenant: layer.tenant, world: context, availability: layer.availability.fork() } as TenantData
       for (const collection of TENANT_COLLECTIONS) {
         const frozenLayer = layer[collection] as Collection<unknown>
-        if (copiedLayers.has(frozenLayer)) {
-          (data as unknown as Record<TenantCollection, Collection<unknown>>)[collection] = frozenLayer.copy()
-        }
+        ;(data as unknown as Record<TenantCollection, Collection<unknown>>)[collection] = copiedLayers.has(frozenLayer) ? frozenLayer.copy() : frozenLayer.fork()
       }
       tenants.set(name, data)
     }
@@ -976,9 +976,10 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       }
       // an older token of the same consumer without a socket was replaced
       // (reconnect); a newer one may still be about to connect
-      const number = Number(/^fake-token-(\d+)-/.exec(value)?.[1] ?? 0)
+      const tokenNumber = (token: string) => Number(/^fake-token-(\d+)-/.exec(token)?.[1])
+      const number = tokenNumber(value)
       for (const [other, stored] of [...data.notificationTokens]) {
-        if (!values.has(other) && stored.subscription === token.subscription && stored.subscriber === token.subscriber && Number(/^fake-token-(\d+)-/.exec(other)?.[1] ?? 0) < number) {
+        if (!values.has(other) && stored.subscription === token.subscription && stored.subscriber === token.subscriber && tokenNumber(other) < number) {
           data.notificationTokens.delete(other)
         }
       }

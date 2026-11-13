@@ -126,7 +126,7 @@ describe('checkpoint', () => {
     expect(created(fork.diff(), fork.tenant)).toEqual(['before checkpoint'])
   })
 
-  it('does not stack layers: a second checkpoint copies only what changed', async () => {
+  it('a second checkpoint goes back to its own state', async () => {
     const world = createWorld()
     world.device({ name: 'a' })
     world.checkpoint()
@@ -257,11 +257,41 @@ describe('reset({ to, consumers })', () => {
     const second = await consumer(world, run, 'startup')
     world.reset({ to: startup, consumers: 'keep' })
     expect([...world.realtime.tokens.keys()]).toEqual([second.token])
+    // every stored token has a connected socket, so waiting for consumers ends without the timeout
+    const connected = new Set([...world.realtime.sockets].map((socket) => socket.token))
+    expect([...world.realtime.tokens.values()].every((token) => connected.has(token))).toBe(true)
+  })
+
+  it('lets waiting for consumers end when a reset hit a client between two sockets', async () => {
+    // real scheduling, as in a host
+    const world = createWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const connect = async () => {
+      const token = (await call(world, 'POST', '/notification2/token', { subscription: 'startup', subscriber: 's' })).body.token as string
+      const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
+      await new Promise((resolve) => socket.on('open', resolve))
+      return socket
+    }
+    const first = await connect()
+    const startup = world.checkpoint()
+    // the socket dropped and the client is in its backoff when the reset comes
+    first.close()
+    world.reset({ to: startup, consumers: 'keep' })
+    await connect()
     const started = Date.now()
-    const waiting = waitForRealtimeStartup(world.realtime, () => world.inflight, 1000)
-    run()
-    await waiting
-    expect(Date.now() - started).toBeLessThan(500)
+    await waitForRealtimeStartup(world.realtime, () => world.inflight, 2000)
+    expect(Date.now() - started).toBeLessThan(1500)
+  })
+
+  it('gives consumers of one subscription different tokens, also after a reset', async () => {
+    const world = createWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
+    const startup = world.checkpoint()
+    const a = (await call(world, 'POST', '/notification2/token', { subscription: 'startup', subscriber: 'a' })).body.token
+    world.reset({ to: startup })
+    const b = (await call(world, 'POST', '/notification2/token', { subscription: 'startup', subscriber: 'b' })).body.token
+    expect(b).not.toBe(a)
   })
 
   it('keeps a socket that is still connecting with a token minted after the checkpoint', async () => {
