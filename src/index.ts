@@ -644,6 +644,7 @@ interface ForkBase {
   nextId: number
   tenant: string
   user: C8yUser | null
+  displaced: DisplacedUser | undefined
   subscriptions: C8ySubscription[]
   handlers: RegisteredHandler[]
   services: ReadonlyMap<string, RegisteredService>
@@ -652,6 +653,18 @@ interface ForkBase {
    * it back to the time the fork started at).
    */
   ownClock: boolean
+}
+
+/**
+ * What storing the world's user replaced: the stored user of that name
+ * before (or none), and the document the world wrote, so switching away puts
+ * the old one back unless the API changed the user meanwhile.
+ */
+interface DisplacedUser {
+  tenant: string
+  userName: string
+  previous: Readonly<StoredDocument> | undefined
+  written: Readonly<StoredDocument>
 }
 
 function copyUser(user: C8yUser | null): C8yUser | null {
@@ -670,6 +683,8 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
   let baseline: C8yWorldState = pickState(options)
   let tenant: string = baseline.tenant ?? DEFAULTS.tenant
   let user: C8yUser | null = null
+  // what storing the current user replaced (restored when the user changes)
+  let displaced: DisplacedUser | undefined = base?.displaced
   let subscriptions: C8ySubscription[] = []
   let nextId = 1
   // operations running in muted() (async ones until they settle)
@@ -792,15 +807,39 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
 
   function setUser(next: C8yUser | null): void {
     writable()
+    releaseUser()
     user = copyUser(next)
     storeUser()
     options.onChange?.(world)
   }
 
   // the current user is also a user of its tenant (user API, effective roles)
+  // while it is the current user
   function storeUser(): void {
     if (user) {
-      upsertWorldUser(tenantData(user.tenant ?? tenant), user)
+      const data = tenantData(user.tenant ?? tenant)
+      const previous = data.users.get(user.userName)
+      upsertWorldUser(data, user)
+      displaced = { tenant: data.tenant, userName: user.userName, previous, written: data.users.get(user.userName)! }
+    }
+  }
+
+  // switching away from a user puts back what storing it replaced, unless
+  // the API changed or deleted the user meanwhile
+  function releaseUser(): void {
+    if (!displaced) {
+      return
+    }
+    const { tenant: name, userName, previous, written } = displaced
+    displaced = undefined
+    const data = tenants.get(name)
+    if (data?.users.get(userName) !== written) {
+      return
+    }
+    if (previous) {
+      data.users.set(userName, previous)
+    } else {
+      data.users.delete(userName)
     }
   }
 
@@ -818,6 +857,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       tenant = state.tenant
     }
     if (state.user !== undefined) {
+      releaseUser()
       user = state.user ? { ...state.user, roles: [...(state.user.roles ?? [])] } : null
       storeUser()
     }
@@ -1706,11 +1746,16 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         nextId = base.nextId
         tenant = base.tenant
         user = copyUser(base.user)
+        displaced = base.displaced
         subscriptions = base.subscriptions.map((subscription) => ({ ...subscription }))
         for (const [name, data] of base.tenants) {
           tenants.set(name, forkTenant(data, context))
         }
         apply(next ? pickState(next) : {})
+        if (next?.user !== undefined) {
+          // a new baseline user is base data, not a switch
+          displaced = undefined
+        }
         // the base's data has the services it had at fork time; the fork's
         // own registrations go on top
         for (const [contextPath, service] of services) {
@@ -1736,6 +1781,8 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         subscriptions: baseline.subscriptions ?? [defaultSubscription(tenant)],
         ...(baseline.tenantOptions ? { tenantOptions: baseline.tenantOptions } : {}),
       })
+      // the baseline user is base data: switching away keeps it stored
+      displaced = undefined
       // services are base data: installed and seeded again
       for (const [contextPath, service] of services) {
         installService(contextPath, service)
@@ -1833,6 +1880,8 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       nextId = snapshot.nextId
       tenant = snapshot.tenant
       user = copyUser(snapshot.user)
+      // the snapshot's users stay as they are when the user changes later
+      displaced = undefined
       subscriptions = snapshot.subscriptions.map((subscription) => ({ ...subscription }))
       tenants.clear()
       for (const data of restoreTenants(snapshot.tenants, context, (name) => base?.tenants.get(name))) {
@@ -1896,6 +1945,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         nextId,
         tenant,
         user: copyUser(user),
+        displaced,
         subscriptions: subscriptions.map((subscription) => ({ ...subscription })),
         handlers: [...handlers],
         services: new Map(services),
