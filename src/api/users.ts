@@ -646,7 +646,8 @@ function checkPermissions(permissions: unknown): Array<Record<string, unknown>> 
     return fail(400, 'Failed to parse JSON string', `Cannot deserialize value of type \`java.util.ArrayList<com.cumulocity.rest.representation.role.inventory.InventoryPermissionRepresentation>\` from ${jsonTokenName(permissions)}${JACKSON_SOURCE} (through reference chain: ${INVENTORY_ROLE_TYPE}["permissions"])`)
   }
   return permissions.map((permission: Record<string, unknown>) => {
-    for (const field of ['permission', 'scope', 'type']) {
+    // verified: checked in this order, one at a time, before the values
+    for (const field of ['type', 'permission', 'scope']) {
       if (permission?.[field] === undefined || permission[field] === null) {
         fail(422, 'undefined/validationError', `${field} is required`)
       }

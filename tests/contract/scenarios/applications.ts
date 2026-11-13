@@ -170,8 +170,10 @@ export const applicationScenarios: ContractScenario[] = [
         // validation, one field at a time
         const failures: Array<[Record<string, unknown>, number, string, string?]> = [
           [{}, 422, 'undefined/validationError', 'key is required'],
-          [{ key: `${u}-v` }, 422, 'undefined/validationError', 'name is required'],
+          [{ key: `${u}-v` }, 422, 'undefined/validationError', 'type is required'],
           [{ key: `${u}-v`, name: `${u}-v` }, 422, 'undefined/validationError', 'type is required'],
+          [{ key: `${u}-v`, type: 'HOSTED' }, 422, 'undefined/validationError', 'name is required'],
+          [{ key: `${u}-v`, type: 'FOO' }, 422, 'undefined/validationError', 'name is required'],
           [{ key: `${u}-v`, name: `${u}-v`, type: 'FOO' }, 422, 'undefined/validationError', 'type invalid value'],
           [{ key: `${u}-v`, name: `${u}-h`, type: 'HOSTED', contextPath: `${u}-v` }, 409, 'applications/Duplicate', `Application for tenant ${tenant} with properties ( name:${u}-h ) already exists or is subscribed`],
           [{ key: `${u}-h-key`, name: `${u}-v`, type: 'HOSTED', contextPath: `${u}-v` }, 409, 'applications/Duplicate', `Application for tenant ${tenant} with properties ( key:${u}-h-key ) already exists or is subscribed`],
