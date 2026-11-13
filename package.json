@@ -1,6 +1,6 @@
 {
   "name": "fake-c8y",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "packageManager": "pnpm@12.18.0",
   "description": "An in-memory Cumulocity platform for tests and evals: runs in Node, workers, and iso4 isolates",
