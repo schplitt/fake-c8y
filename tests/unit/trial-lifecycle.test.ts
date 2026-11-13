@@ -136,7 +136,7 @@ describe('forks have their own state', () => {
   it('give overrides the fork they serve and a body they can read', async () => {
     const base = createWorld()
     base.device({ name: 'base' })
-    base.override('POST /service/svc/**', async ({ world, request }) => {
+    base.override('POST /service/svc/**', async (request, { world }) => {
       const body = await request.json() as { name: string }
       world.device({ name: body.name })
       return { names: world.db.managedObjects.find().map((item) => item.name) }

@@ -184,11 +184,11 @@ describe('world.service()', () => {
     const world = createWorld()
     const seen: Array<{ service: string, call: { id: number, parent?: number } }> = []
     world.service('inner', async (_request, ctx) => {
-      seen.push({ service: ctx.service, call: ctx.call })
+      seen.push({ service: ctx.service, call: { id: ctx.call.id, ...(ctx.call.parent === undefined ? {} : { parent: ctx.call.parent }) } })
       return Response.json({})
     })
     world.service('outer', async (_request, ctx) => {
-      seen.push({ service: ctx.service, call: ctx.call })
+      seen.push({ service: ctx.service, call: { id: ctx.call.id, ...(ctx.call.parent === undefined ? {} : { parent: ctx.call.parent }) } })
       await ctx.fetch('/service/inner/x')
       return Response.json({})
     })

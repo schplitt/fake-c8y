@@ -9,6 +9,7 @@
 import type { TenantData } from './store'
 import type { C8yMicroserviceManifest } from './api/applications'
 import type { C8yManagedObjectInput } from './data'
+import type { C8yHandlerContext } from './types'
 import { clone } from './utils'
 
 /**
@@ -39,16 +40,11 @@ export interface C8yServiceStore {
  * What a service handler gets besides the request. It is bound to the world
  * (fork) that answers the request and to the caller's tenant.
  */
-export interface C8yServiceContext {
+export interface C8yServiceContext extends C8yHandlerContext {
   /**
    * The service's context path (`<contextPath>` in `/service/<contextPath>/**`).
    */
   readonly service: string
-  /**
-   * The caller's tenant: the tenant whose data and service state the
-   * request works with.
-   */
-  readonly tenant: string
   /**
    * The caller's user name (Basic auth), or the world's user without one.
    */
@@ -59,13 +55,6 @@ export interface C8yServiceContext {
    * `fetch()` sends requests as.
    */
   readonly serviceUser: string
-  /**
-   * The request being answered in the call log (`C8yRequest.id`), and the
-   * request a service sent it for (`C8yRequest.parent`), if any. Following
-   * `parent` through `world.calls` gives the chain of services this request
-   * runs in.
-   */
-  readonly call: { readonly id: number, readonly parent?: number }
   /**
    * The world's clock (the trial clock of a fork), in epoch milliseconds.
    */
@@ -95,13 +84,6 @@ export interface C8yServiceContext {
    * (it is not sent then), like `fetch`.
    */
   fetch: (input: Request | string, init?: ConstructorParameters<typeof Request>[1]) => Promise<Response>
-  /**
-   * Records the request as unhandled (kind `'feature'`, the trial is
-   * invalid) and throws; the world answers it like any request it does not
-   * emulate. The trial stays invalid even if the handler catches the error.
-   * @param reason - What the emulation does not support
-   */
-  unsupported: (reason: string) => never
 }
 
 /**
