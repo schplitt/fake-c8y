@@ -267,7 +267,8 @@ function options(call: C8yRequest, segments: string[], data: TenantData): Respon
     if (method !== 'PUT') {
       return undefined
     }
-    checkQuery('PUT /tenant/options/{category}/{key}/editable', call, [])
+    // `targetTenant` is not read, like everywhere else
+    checkQuery('PUT /tenant/options/{category}/{key}/editable', call, ['targetTenant'])
     // verified: only the management tenant may change it
     return apiError(403, 'security/Forbidden', 'Access Denied')
   }

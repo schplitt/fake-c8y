@@ -25,6 +25,19 @@ it('ignores targetTenant', async () => {
   expect(fork.diff()).toEqual({ tenants: {}, options: [] })
 })
 
+it('ignores targetTenant where the spec lists it (editable answers 403 like without it)', async () => {
+  const world = createWorld()
+  world.options.set('alpha', 'one', { category: 'ctr' })
+  const response = await world.fetch(new Request(`${world.baseUrl}/tenant/options/ctr/alpha/editable?targetTenant=${world.tenant}`, {
+    method: 'PUT',
+    headers: { 'accept': 'application/json', 'content-type': 'application/json' },
+    body: JSON.stringify({ editable: 'false' }),
+  }))
+  expect(response.status).toBe(403)
+  expect((await response.json()).error).toBe('security/Forbidden')
+  expect(world.unhandled).toEqual([])
+})
+
 it('accepts credentials of the subscribed tenants and of tenants with data', async () => {
   const world = createWorld({ subscriptions: [{ tenant: 't12345', user: 'service_t12345', password: 'p' }, { tenant: 't2', user: 'service_t2', password: 'p' }] })
   world.device({ tenant: 't3', name: 'other' })

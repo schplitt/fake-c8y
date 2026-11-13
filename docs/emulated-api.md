@@ -83,7 +83,7 @@ The world writes the audit records the platform writes: alarm creation and chang
 ## Tenant options and retention rules
 
 - `POST` upserts. `credentials.*` values come back encrypted on writes and read `<<Encrypted>>`, except in the world's own settings category, and for a registered service's own users in its settings category. An option can exist without a value.
-- `PUT …/editable` answers 403, as for any tenant other than management. `GET /tenant/system/options` answers the platform's fixed set of system options.
+- `PUT …/editable` answers 403, as for any tenant other than management (also with `targetTenant`, which is not read). `GET /tenant/system/options` answers the platform's fixed set of system options.
 - Retention rules are validated, stored, and served like the platform's, but the world deletes no data by them.
 
 ## Usage statistics and tenant administration
