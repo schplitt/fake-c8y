@@ -127,6 +127,10 @@ export class Realtime {
   nextAck = 1
   sockets: Set<NotificationSocket> = new Set()
   /**
+   * sockets created whose connect has not run yet
+   */
+  connecting: Set<NotificationSocket> = new Set()
+  /**
    * frames waiting for a consumer of a subscription name (persistent subscriptions)
    */
   backlog: Map<string, NotificationFrame[]> = new Map()
@@ -171,6 +175,7 @@ export class Realtime {
   }
 
   connect(socket: NotificationSocket): void {
+    this.connecting.delete(socket)
     const token = this.tokens.get(new URL(socket.url).searchParams.get('token') ?? '')
     if (!token || socket.readyState === SOCKET_STATE.CLOSED) {
       socket.readyState = SOCKET_STATE.CLOSED
@@ -191,6 +196,7 @@ export class Realtime {
   }
 
   disconnect(socket: NotificationSocket): void {
+    this.connecting.delete(socket)
     this.sockets.delete(socket)
     this.unacked.delete(socket)
   }
@@ -331,6 +337,7 @@ export class Realtime {
       socket.emit('close', 1000, '')
     }
     this.sockets.clear()
+    this.connecting.clear()
     this.unacked.clear()
     this.dropPending()
   }

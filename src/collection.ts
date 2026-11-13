@@ -538,6 +538,21 @@ export class Collection<V> implements Iterable<[string, V]> {
   }
 
   /**
+   * A writable copy with this collection's own writes on the same base: it
+   * costs as much as the own writes (a collection without a base copies
+   * everything), and its `touched()` is the same as this one's.
+   */
+  copy(): Collection<V> {
+    const copy = new Collection<V>([], { freezeValues: this.#freezeValues }, this.#base)
+    copy.#changed = new Map(this.#changed)
+    copy.#added = new Map(this.#added)
+    copy.#hidden = new Set(this.#hidden)
+    copy.#addedOrder = new Map(this.#addedOrder)
+    copy.#nextOrder = this.#nextOrder
+    return copy
+  }
+
+  /**
    * Drops everything written since the collection was created: a fork shows
    * its base again, a collection without a base is empty.
    */

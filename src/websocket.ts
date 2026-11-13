@@ -67,6 +67,7 @@ export function createFakeWebSocket(realtime: Realtime, options: FakeWebSocketOp
 
     constructor(url: string | URL) {
       this.url = String(url)
+      realtime.connecting.add(this)
       realtime.schedule(() => realtime.connect(this))
     }
 
@@ -131,7 +132,9 @@ export function createFakeWebSocket(realtime: Realtime, options: FakeWebSocketOp
 /**
  * Waits until a service has finished starting up its realtime clients: no
  * request in flight, nothing scheduled, and every minted token has a connected
- * socket. Uses real timers; meant for hosts, not isolates.
+ * socket of its consumer (the same tenant, subscription, and subscriber: a
+ * client that reconnected uses a newer token). Uses real timers; meant for
+ * hosts, not isolates.
  * @param realtime - Notification 2.0 state of the world
  * @param inflight - Requests the world is answering right now
  * @param timeout - Milliseconds to wait at most
@@ -143,8 +146,9 @@ export async function waitForRealtimeStartup(realtime: Realtime, inflight: () =>
     await new Promise<void>((resolve) => {
       setTimeout(resolve, 5)
     })
-    const connected = new Set([...realtime.sockets].map((socket) => socket.token))
-    const quiet = inflight() === 0 && realtime.scheduled === 0 && [...realtime.tokens.values()].every((token) => connected.has(token))
+    const consumer = (token: { tenant: string, subscription: string, subscriber: string }) => `${token.tenant}\u0000${token.subscription}\u0000${token.subscriber}`
+    const connected = new Set([...realtime.sockets].flatMap((socket) => socket.token ? [consumer(socket.token)] : []))
+    const quiet = inflight() === 0 && realtime.scheduled === 0 && [...realtime.tokens.values()].every((token) => connected.has(consumer(token)))
     quietTicks = quiet ? quietTicks + 1 : 0
   }
 }

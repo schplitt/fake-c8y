@@ -33,10 +33,15 @@ export interface UserSequences {
   permission: number
   assignment: number
   /**
-   * Next number of Notification 2.0 subscription ids and tokens. Missing in
-   * snapshots of older versions.
+   * Next number of Notification 2.0 subscription ids (and of tokens in
+   * snapshots of older versions). Missing in snapshots of older versions.
    */
   notification?: number
+  /**
+   * Next number of Notification 2.0 tokens, once a token was minted. Missing
+   * in snapshots of older versions, where tokens counted with `notification`.
+   */
+  notificationToken?: number
   /**
    * Next number of application ids. Missing in snapshots of older versions.
    */
@@ -339,7 +344,7 @@ function tenantSnapshot(data: TenantData, entries: EntryPicker): TenantSnapshot 
     roles: [...entries(data.roles)].map(([name]) => name),
     inventoryRoles: documents(data.inventoryRoles),
     inventoryAssignments: documents(data.inventoryAssignments),
-    sequences: { group: sequence('group'), inventoryRole: sequence('inventoryRole'), permission: sequence('permission'), assignment: sequence('assignment'), notification: sequence('notification'), ...(data.sequences.has('application') ? { application: sequence('application') } : {}) },
+    sequences: { group: sequence('group'), inventoryRole: sequence('inventoryRole'), permission: sequence('permission'), assignment: sequence('assignment'), notification: sequence('notification'), ...(data.sequences.has('notificationToken') ? { notificationToken: sequence('notificationToken') } : {}), ...(data.sequences.has('application') ? { application: sequence('application') } : {}) },
     bulkOperations: documents(data.bulkOperations),
     nextBulkOperationId: sequence('bulkOperation'),
     newDeviceRequests: documents(data.newDeviceRequests),
