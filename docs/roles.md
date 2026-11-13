@@ -35,7 +35,7 @@ await world.fetch(new Request(`${world.baseUrl}/tenant/options`, { headers: asOp
 
 So under enforcement only stored users and a service's bootstrap and service users are restricted. Requests without Basic auth, the world's own `user`, and user names the tenant does not store keep full access, so tests that send no credentials work unchanged.
 
-Every new user gets `ROLE_USER_MANAGEMENT_OWN_READ` and `ROLE_USER_MANAGEMENT_OWN_ADMIN`, like on the platform: users seeded with `world.seed({ users })` (in addition to the `roles` you give) and users created with `POST /user/{tenant}/users`. Without `OWN_READ`, `GET /user/currentUser` answers 403; delete the role through the API to test that. The world's `user` keeps exactly its `roles`, since it is unrestricted anyway. A user is unrestricted only while it is the world's `user`: after `setUser()` switches away, it is restricted by what the tenant stores for it, which is what was there before the switch (see [Switching the current user](world.md#switching-the-current-user)).
+Every new user gets `ROLE_USER_MANAGEMENT_OWN_READ` and `ROLE_USER_MANAGEMENT_OWN_ADMIN`, like on the platform: users seeded with `world.seed({ users })` (in addition to the `roles` you give) and users created with `POST /user/{tenant}/users`. Without `OWN_READ`, `GET /user/currentUser` answers 403; delete the role through the API to test that. The world's `user` keeps exactly its `roles`, since it is unrestricted anyway. A user is unrestricted only while it is the world's `user`: after `setUser()` switches away, it is restricted by what the tenant stores for it, which is what was there before the switch.
 
 A fork takes the option of its base unless it sets its own: `base.fork({ roles: 'off' })`.
 
