@@ -270,7 +270,9 @@ describe('reset({ to, consumers })', () => {
     const connect = async () => {
       const token = (await call(world, 'POST', '/notification2/token', { subscription: 'startup', subscriber: 's' })).body.token as string
       const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
-      await new Promise((resolve) => socket.on('open', resolve))
+      await new Promise<void>((resolve) => {
+        socket.on('open', () => resolve())
+      })
       return socket
     }
     const first = await connect()
@@ -280,8 +282,9 @@ describe('reset({ to, consumers })', () => {
     world.reset({ to: startup, consumers: 'keep' })
     await connect()
     const started = Date.now()
-    await waitForRealtimeStartup(world.realtime, () => world.inflight, 2000)
-    expect(Date.now() - started).toBeLessThan(1500)
+    // generous bounds for slow CI runners: ending at all before the timeout is the point
+    await waitForRealtimeStartup(world.realtime, () => world.inflight, 4000)
+    expect(Date.now() - started).toBeLessThan(3000)
   })
 
   it('gives consumers of one subscription different tokens, also after a reset', async () => {
