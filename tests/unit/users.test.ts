@@ -256,15 +256,21 @@ describe('switching the current user', () => {
     expect((await as(world, 'operator')).status).toBe(200)
   })
 
-  it('keeps changes the API made to the user while it was current, until reset()', async () => {
+  it('keeps changes the API made to the user while it was current, across switches, until reset()', async () => {
     const world = createWorld()
     world.seed({ users: [{ userName: 'olivia', roles: [] }] })
     const admin = world.user
     world.setUser({ userName: 'olivia', roles: [] })
     expect((await send(world, 'POST', `/user/${world.tenant}/groups/2/users`, { user: { self: `${world.baseUrl}/user/${world.tenant}/users/olivia` } })).status).toBe(201)
+    for (let round = 0; round < 3; round++) {
+      world.setUser(admin)
+      expect(world.db.users.effectiveRoles('olivia')).toContain('ROLE_INVENTORY_ADMIN')
+      expect((await as(world, 'olivia', '/inventory/managedObjects')).status).toBe(200)
+      world.setUser({ userName: 'olivia', roles: [] })
+      expect(world.db.users.effectiveRoles('olivia')).toContain('ROLE_INVENTORY_ADMIN')
+    }
     world.setUser(admin)
     expect(world.db.users.effectiveRoles('olivia')).toContain('ROLE_INVENTORY_ADMIN')
-    expect((await as(world, 'olivia', '/inventory/managedObjects')).status).toBe(200)
     world.reset()
     expect(world.db.users.get('olivia')).toBeUndefined()
   })
