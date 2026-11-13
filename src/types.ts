@@ -100,10 +100,6 @@ export interface C8yRequest {
    */
   user: string | undefined
   /**
-   * Route params captured by the matching `world.override()` pattern.
-   */
-  params: Record<string, string>
-  /**
    * HTTP status of the answer, set once the world answered the request.
    */
   status?: number
@@ -192,23 +188,49 @@ export interface C8yCoverage {
 }
 
 /**
- * Context passed to a `world.override()` handler.
+ * What a `world.override()` handler gets besides the request.
  */
-export interface C8yRequestContext extends C8yRequest {
+export interface C8yOverrideContext {
   /**
-   * The raw request; its body can still be read (a copy of the original).
+   * The caller's tenant: the tenant whose data the request works with.
    */
-  request: Request
+  readonly tenant: string
+  /**
+   * The caller's user name (Basic auth), if any.
+   */
+  readonly user: string | undefined
+  /**
+   * The params the pattern captured: `:name` segments, and `_` for the rest
+   * a `**` matched (`{}` for an override without a pattern).
+   */
+  readonly params: Record<string, string>
   /**
    * The world answering the request: the fork it was sent to, also for an
    * override registered on the base.
    */
-  world: World
+  readonly world: World
+  /**
+   * How many requests this override got in the answering world, this one
+   * included: `callCount === 2` is its second request. A fork counts on
+   * its own (from 1), and `reset()` starts over.
+   */
+  readonly callCount: number
+  /**
+   * Answers the request as if this override did not exist: the next older
+   * matching override, else a service or the emulated platform, and returns
+   * that answer. What it writes stays written, whatever the handler returns
+   * afterwards. The call log keeps one call (the client's), with the status
+   * the handler finally returns. Callable once per request; after a reset
+   * or restore it answers 503 and changes nothing.
+   */
+  next: () => Promise<Response>
 }
 
 /**
- * Answers a platform request. Return a `Response` for full control (status,
- * headers), any other value to answer `200` with it as JSON, or nothing for
- * `204`.
+ * Answers a request instead of the world. The request is a copy whose body
+ * can be read. Return a `Response` for full control (status, headers), any
+ * other value to answer `200` with it as JSON, or nothing for `204`. Throw
+ * `UnsupportedRequestError` to report the request as not emulated (kind
+ * `'feature'`).
  */
-export type C8yRequestHandler = (context: C8yRequestContext) => unknown
+export type C8yOverrideHandler = (request: Request, context: C8yOverrideContext) => unknown
