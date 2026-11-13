@@ -257,7 +257,7 @@ export type Relations = Readonly<Record<ChildKind, readonly string[]>>
 /**
  * The per-tenant sequences (next ids) in `TenantData.sequences`.
  */
-export type SequenceName = 'group' | 'inventoryRole' | 'permission' | 'assignment' | 'bulkOperation' | 'notification' | 'application'
+export type SequenceName = 'group' | 'inventoryRole' | 'permission' | 'assignment' | 'bulkOperation' | 'notification' | 'notificationToken' | 'application'
 
 /**
  * The collections of a tenant, in snapshot order.

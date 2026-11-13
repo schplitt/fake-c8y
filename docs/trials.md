@@ -31,7 +31,7 @@ A fork costs a few microseconds and a few kilobytes, whatever the size of the ba
 
 ## Reset
 
-`world.reset(baseline?)` goes back to the baseline: data (also service state, Notification 2.0 subscriptions and tokens), tenant options, overrides, call log, and ids. Registered services stay, and a root world installs them and applies their definition seeds again ([Services](services.md#seeding)). Undelivered notifications are dropped, and sockets whose token is gone are closed. A request still in flight answers 503 and changes nothing.
+`world.reset(options?)` goes back to the baseline (or, with `to`, to a [checkpoint](#checkpoints)): data (also service state, Notification 2.0 subscriptions and tokens), tenant options, overrides, call log, and ids. Registered services stay, and a root world installs them and applies their definition seeds again ([Services](services.md#seeding)). Undelivered notifications are dropped, and sockets whose token is gone are closed. A request still in flight answers 503 and changes nothing.
 
 On a fork, `reset()` goes back to the state the fork started in: its own writes, ids, overrides, and call log are dropped. A clock the fork got as a copy of the base's goes back to the fork's start time, so a replay gets the same ids and times. A clock you passed to `fork({ clock })` stays where it is. A `baseline` is applied on top.
 
@@ -48,11 +48,13 @@ beforeEach(() => {
 })
 ```
 
-- `consumers: 'keep'` keeps every open socket whose subscription the checkpoint has, with its token, also a token minted after the checkpoint (clients mint a new one on every reconnect). Subscriptions created after the checkpoint are deleted and their sockets closed. The default, `'close'`, closes every socket whose token the checkpoint does not have. Undelivered notifications are dropped either way.
+- `consumers: 'keep'` keeps every open (or still connecting) socket whose subscription the checkpoint has, with its token, also a token minted after the checkpoint (clients mint a new one on every reconnect). The checkpoint's token of the same consumer that such a token replaced is dropped, so `waitForRealtimeStartup()` does not wait for it. Subscriptions created after the checkpoint are deleted and their sockets closed. The default, `'close'`, closes every socket whose token the checkpoint does not have. Undelivered notifications are dropped either way.
 - State fields (`tenant`, `user`, `subscriptions`, `tenantOptions`) apply on top without changing the baseline; a plain `reset()` still goes back to the baseline.
-- Services registered after the checkpoint stay registered and are installed again.
+- Services registered after the checkpoint stay registered and are installed again; the applications of services removed since are deleted.
 - The clock is not part of a checkpoint and stays where it is.
-- The data so far becomes a frozen layer, as for a fork, so `reset({ to })` costs about as much as a fork's `reset()`, and a checkpoint costs about as much as a first `fork()`. A frozen base (after `fork()`) takes no checkpoints; a fork does.
+- The first checkpoint of a plain world makes its data so far a frozen layer, as a first `fork()` does. Later checkpoints, and checkpoints of a fork, copy only what was written since that layer (or since the fork), so layers do not stack up, a fork's `diff()` keeps comparing with its base, and `reset({ to })` costs about as much as a fork's `reset()` plus the writes it copies.
+- `restore()` and a plain `reset()` do not invalidate a checkpoint: `reset({ to })` afterwards goes back to it. A checkpoint lives as long as its world.
+- A frozen base (after `fork()`) takes no checkpoints and cannot reset to one. Its forks start from its current state and take checkpoints of their own.
 - A checkpoint belongs to the world that took it.
 
 ## Snapshots and diffs

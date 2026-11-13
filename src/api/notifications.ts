@@ -227,7 +227,8 @@ export function notifications(call: C8yRequest, segments: string[], data: Tenant
     if (invalid) {
       return invalid
     }
-    const token = `fake-token-${nextSequence(data, 'notification')}-${body.subscription}`
+    // own sequence: tokens a reset keeps (`consumers: 'keep'`) do not move subscription ids
+    const token = `fake-token-${nextSequence(data, 'notificationToken')}-${body.subscription}`
     data.notificationTokens.set(token, { tenant, subscription: body.subscription, subscriber: body.subscriber })
     auditTokenCreated(data, String(body.subscription))
     return Response.json({ token })

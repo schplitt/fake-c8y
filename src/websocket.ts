@@ -67,6 +67,7 @@ export function createFakeWebSocket(realtime: Realtime, options: FakeWebSocketOp
 
     constructor(url: string | URL) {
       this.url = String(url)
+      realtime.connecting.add(this)
       realtime.schedule(() => realtime.connect(this))
     }
 

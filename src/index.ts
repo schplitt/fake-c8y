@@ -350,6 +350,8 @@ export interface World {
    * changing the baseline. `consumers: 'keep'` keeps the open Notification
    * 2.0 sockets whose subscription is in the state reset to, with their
    * tokens (also tokens minted after the checkpoint, e.g. on a reconnect).
+   * Options with only `to` or `consumers` keep the baseline; `reset({})`
+   * sets an empty one.
    * @param options - A new baseline (default: the current one), `to`, `consumers`
    */
   reset: (options?: C8yResetOptions) => void
@@ -656,7 +658,7 @@ export function createWorld(options: WorldOptions = {}): World {
  */
 export interface C8yCheckpoint {
   /**
-   * Counts the checkpoints of a world, from 1.
+   * Counts the checkpoints of a world, from 1 (informational only).
    */
   readonly id: number
 }
@@ -732,6 +734,9 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
   let displaced: DisplacedUser | undefined = base?.displaced
   // the checkpoints of this world (`checkpoint()`, `reset({ to })`)
   const checkpoints = new WeakMap<C8yCheckpoint, ForkBase>()
+  // checkpoint layers that are copies of a collection's own writes (reset
+  // copies them again); the other layers are frozen in place (reset forks them)
+  const copiedLayers = new WeakSet<Collection<unknown>>()
   let checkpointCount = 0
   let subscriptions: C8ySubscription[] = []
   let nextId = 1
@@ -905,8 +910,15 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     user = copyUser(from.user)
     displaced = from.displaced
     subscriptions = from.subscriptions.map((subscription) => ({ ...subscription }))
-    for (const [name, data] of from.tenants) {
-      tenants.set(name, forkTenant(data, context))
+    for (const [name, layer] of from.tenants) {
+      const data = forkTenant(layer, context)
+      for (const collection of TENANT_COLLECTIONS) {
+        const frozenLayer = layer[collection] as Collection<unknown>
+        if (copiedLayers.has(frozenLayer)) {
+          (data as unknown as Record<TenantCollection, Collection<unknown>>)[collection] = frozenLayer.copy()
+        }
+      }
+      tenants.set(name, data)
     }
     apply(state ? pickState(state) : {})
     if (state?.user !== undefined) {
@@ -914,7 +926,12 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       displaced = undefined
     }
     // the frozen data has the services registered when it was taken; the
-    // ones registered since go on top
+    // ones removed since go, the ones registered since go on top
+    for (const [contextPath, service] of from.services) {
+      if (!services.has(contextPath)) {
+        removeApplication(contextPath, service)
+      }
+    }
     for (const [contextPath, service] of services) {
       const inherited = from.services.get(contextPath)
       if (service !== inherited) {
@@ -930,10 +947,12 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
    * The tokens of the open Notification 2.0 sockets, as stored now.
    */
   function openConsumers(): Array<[string, NotificationToken]> {
+    const stored = realtime.tokens
     const open: Array<[string, NotificationToken]> = []
-    for (const socket of realtime.sockets) {
+    // also sockets still connecting (a client that reconnects right now)
+    for (const socket of [...realtime.sockets, ...realtime.connecting]) {
       const value = new URL(socket.url).searchParams.get('token') ?? ''
-      const token = socket.readyState === SOCKET_STATE.OPEN ? tenants.get(socket.token?.tenant ?? '')?.notificationTokens.get(value) : undefined
+      const token = socket.readyState === SOCKET_STATE.CLOSED ? undefined : stored.get(value)
       if (token) {
         open.push([value, token])
       }
@@ -943,20 +962,28 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
 
   /**
    * Stores the tokens of open sockets again after a reset (`consumers:
-   * 'keep'`) where the data has their subscription, and moves the tenant's
-   * notification sequence past them, so new ids and tokens do not collide.
+   * 'keep'`) where the data has their subscription, drops the tokens of the
+   * same consumer they replaced, and moves the tenant's token sequence past
+   * them, so new tokens do not collide.
    * @param kept - Tokens from `openConsumers()`
    */
   function keepConsumers(kept: Array<[string, NotificationToken]>): void {
+    const values = new Set(kept.map(([value]) => value))
     for (const [value, token] of kept) {
       const data = tenants.get(token.tenant)
       if (!data || ![...data.notificationSubscriptions.values()].some((subscription) => subscription.subscription === token.subscription)) {
         continue
       }
+      // a token of the same consumer without a socket was replaced (reconnect)
+      for (const [other, stored] of [...data.notificationTokens]) {
+        if (!values.has(other) && stored.subscription === token.subscription && stored.subscriber === token.subscriber) {
+          data.notificationTokens.delete(other)
+        }
+      }
       data.notificationTokens.set(value, token)
       const number = Number(/^fake-token-(\d+)-/.exec(value)?.[1] ?? 0)
-      if (number >= (data.sequences.get('notification') ?? 1)) {
-        data.sequences.set('notification', number + 1)
+      if (number >= (data.sequences.get('notificationToken') ?? 1)) {
+        data.sequences.set('notificationToken', number + 1)
       }
     }
   }
@@ -1849,7 +1876,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       writable()
       const { to, consumers = 'close', ...rest } = next ?? {}
       // a new baseline only when state fields are given (or a plain `{}`)
-      const state = next === undefined || ((to !== undefined || next.consumers !== undefined) && Object.keys(rest).length === 0) ? undefined : rest
+      const state = next === undefined || (('to' in next || 'consumers' in next) && Object.keys(pickState(rest)).length === 0) ? undefined : rest
       const from = to === undefined ? undefined : checkpoints.get(to)
       if (to !== undefined && !from) {
         throw new TypeError('fake-c8y: reset({ to }) needs a checkpoint of this world (world.checkpoint())')
@@ -1900,10 +1927,26 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       tick()
       const frozenTenants = new Map<string, TenantData>()
       for (const [name, data] of tenants) {
-        freezeTenant(data, true)
-        frozenTenants.set(name, data)
-        // the world goes on in a layer of its own on top
-        tenants.set(name, forkTenant(data, context))
+        const layer = { tenant: data.tenant, world: context, availability: data.availability } as TenantData
+        // the live queue goes on as a fork, so the layer's queue never changes
+        data.availability = data.availability.fork()
+        for (const collection of TENANT_COLLECTIONS) {
+          const live = data[collection] as Collection<unknown>
+          if (base || live.base) {
+            // a copy of the own writes on the same base: a fork's diff() keeps
+            // comparing with its base, and layers do not stack up
+            const copy = live.copy()
+            copy.freeze()
+            copiedLayers.add(copy)
+            ;(layer as unknown as Record<TenantCollection, Collection<unknown>>)[collection] = copy
+          } else {
+            // the data so far becomes the layer; the world goes on on top
+            live.freeze(true)
+            ;(layer as unknown as Record<TenantCollection, Collection<unknown>>)[collection] = live
+            ;(data as unknown as Record<TenantCollection, Collection<unknown>>)[collection] = live.fork()
+          }
+        }
+        frozenTenants.set(name, layer)
       }
       const checkpoint: C8yCheckpoint = Object.freeze({ id: ++checkpointCount })
       checkpoints.set(checkpoint, {

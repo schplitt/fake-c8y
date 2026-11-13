@@ -6,8 +6,8 @@
  */
 import { describe, expect, it } from 'vitest'
 import { createWorld } from '../../src'
-import type { World } from '../../src'
-import { createFakeWebSocket } from '../../src/realtime-entry'
+import type { C8yResetOptions, World } from '../../src'
+import { createFakeWebSocket, waitForRealtimeStartup } from '../../src/realtime-entry'
 
 async function call(world: World, method: string, path: string, body?: unknown) {
   const response = await world.fetch(new Request(`${world.baseUrl}${path}`, {
@@ -108,6 +108,51 @@ describe('checkpoint', () => {
     expect(await names(base)).toEqual(['base'])
   })
 
+  it('keeps a fork\'s diff() against its base, also after reset({ to }) and in a tenant the fork created', async () => {
+    const base = createWorld()
+    base.device({ name: 'base' })
+    const start = base.snapshot()
+    const fork = base.fork()
+    fork.device({ name: 'before checkpoint' })
+    fork.device({ name: 'other tenant', tenant: 't9' })
+    const startup = fork.checkpoint()
+    fork.device({ name: 'after checkpoint' })
+    expect(fork.diff()).toEqual(fork.diff(start))
+    const created = (diff: ReturnType<World['diff']>, tenant: string) => diff.tenants[tenant]?.managedObjects.created.map((item) => (item as unknown as { name: string }).name)
+    expect(created(fork.diff(), fork.tenant)).toEqual(['before checkpoint', 'after checkpoint'])
+    expect(created(fork.diff(), 't9')).toEqual(['other tenant'])
+    fork.reset({ to: startup })
+    expect(fork.diff()).toEqual(fork.diff(start))
+    expect(created(fork.diff(), fork.tenant)).toEqual(['before checkpoint'])
+  })
+
+  it('does not stack layers: a second checkpoint copies only what changed', async () => {
+    const world = createWorld()
+    world.device({ name: 'a' })
+    world.checkpoint()
+    world.device({ name: 'b' })
+    const second = world.checkpoint()
+    world.device({ name: 'c' })
+    world.reset({ to: second })
+    expect(await names(world)).toEqual(['a', 'b'])
+  })
+
+  it('keeps the baseline with { to: undefined }', () => {
+    const world = createWorld({ tenant: 't42' })
+    // a JavaScript caller (TypeScript with exactOptionalPropertyTypes rejects it)
+    world.reset({ to: undefined } as unknown as C8yResetOptions)
+    expect(world.tenant).toBe('t42')
+  })
+
+  it('removes the application of a service removed after the checkpoint', async () => {
+    const world = createWorld()
+    const remove = world.service('pumps', () => Response.json({ ok: true }), { manifest: {} })
+    const startup = world.checkpoint()
+    remove()
+    world.reset({ to: startup })
+    expect((await call(world, 'GET', '/application/applications?name=pumps')).body.applications).toEqual([])
+  })
+
   it('keeps services registered after the checkpoint', async () => {
     const world = createWorld()
     const startup = world.checkpoint()
@@ -169,7 +214,7 @@ describe('reset({ to, consumers })', () => {
     expect(late.state.closed).toBe(true)
   })
 
-  it('drops undelivered frames', async () => {
+  it('drops undelivered frames but keeps delivering to the kept socket', async () => {
     const { world, run } = manualWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
     const startup = world.checkpoint()
@@ -179,5 +224,51 @@ describe('reset({ to, consumers })', () => {
     world.reset({ to: startup, consumers: 'keep' })
     run()
     expect(open.received).toEqual([])
+    expect(open.state.closed).toBe(false)
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'after' })
+    run()
+    expect(open.received.some((frame) => frame.includes('after'))).toBe(true)
+  })
+
+  it('drops the checkpoint\'s token that a reconnect replaced, so waiting for consumers does not hang', async () => {
+    const { world, run } = manualWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
+    const first = await consumer(world, run, 'startup')
+    const startup = world.checkpoint()
+    // reconnect: the old socket closes, a new token is minted
+    first.socket.close()
+    run()
+    const second = await consumer(world, run, 'startup')
+    world.reset({ to: startup, consumers: 'keep' })
+    expect([...world.realtime.tokens.keys()]).toEqual([second.token])
+    const started = Date.now()
+    const waiting = waitForRealtimeStartup(world.realtime, () => world.inflight, 1000)
+    run()
+    await waiting
+    expect(Date.now() - started).toBeLessThan(500)
+  })
+
+  it('keeps a socket that is still connecting with a token minted after the checkpoint', async () => {
+    const { world, run } = manualWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
+    const startup = world.checkpoint()
+    const token = (await call(world, 'POST', '/notification2/token', { subscription: 'startup', subscriber: 's' })).body.token as string
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
+    world.reset({ to: startup, consumers: 'keep' })
+    run()
+    expect(socket.readyState).toBe(1)
+  })
+
+  it('replays subscription ids the same after keeping a reconnected consumer', async () => {
+    const { world, run } = manualWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
+    const startup = world.checkpoint()
+    const first = (await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'x' })).body.id
+    world.reset({ to: startup, consumers: 'keep' })
+    await consumer(world, run, 'startup')
+    world.reset({ to: startup, consumers: 'keep' })
+    const again = (await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'x' })).body.id
+    expect(again).toBe(first)
   })
 })
