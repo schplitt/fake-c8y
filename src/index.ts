@@ -974,14 +974,15 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       if (!data || ![...data.notificationSubscriptions.values()].some((subscription) => subscription.subscription === token.subscription)) {
         continue
       }
-      // a token of the same consumer without a socket was replaced (reconnect)
+      // an older token of the same consumer without a socket was replaced
+      // (reconnect); a newer one may still be about to connect
+      const number = Number(/^fake-token-(\d+)-/.exec(value)?.[1] ?? 0)
       for (const [other, stored] of [...data.notificationTokens]) {
-        if (!values.has(other) && stored.subscription === token.subscription && stored.subscriber === token.subscriber) {
+        if (!values.has(other) && stored.subscription === token.subscription && stored.subscriber === token.subscriber && Number(/^fake-token-(\d+)-/.exec(other)?.[1] ?? 0) < number) {
           data.notificationTokens.delete(other)
         }
       }
       data.notificationTokens.set(value, token)
-      const number = Number(/^fake-token-(\d+)-/.exec(value)?.[1] ?? 0)
       if (number >= (data.sequences.get('notificationToken') ?? 1)) {
         data.sequences.set('notificationToken', number + 1)
       }
@@ -1936,7 +1937,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
             // a copy of the own writes on the same base: a fork's diff() keeps
             // comparing with its base, and layers do not stack up
             const copy = live.copy()
-            copy.freeze()
+            copy.freeze(true)
             copiedLayers.add(copy)
             ;(layer as unknown as Record<TenantCollection, Collection<unknown>>)[collection] = copy
           } else {

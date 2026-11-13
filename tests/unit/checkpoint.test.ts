@@ -137,11 +137,27 @@ describe('checkpoint', () => {
     expect(await names(world)).toEqual(['a', 'b'])
   })
 
-  it('keeps the baseline with { to: undefined }', () => {
-    const world = createWorld({ tenant: 't42' })
+  it('keeps the baseline with { to: undefined } and with only consumers', () => {
+    const world = createWorld({ tenant: 't42', tenantOptions: { mode: 'baseline' } })
     // a JavaScript caller (TypeScript with exactOptionalPropertyTypes rejects it)
     world.reset({ to: undefined } as unknown as C8yResetOptions)
     expect(world.tenant).toBe('t42')
+    expect(world.options.get('mode')).toBe('baseline')
+    world.reset({ consumers: 'keep' })
+    expect(world.options.get('mode')).toBe('baseline')
+  })
+
+  it('still goes back to a checkpoint after restore()', async () => {
+    const world = createWorld()
+    world.device({ name: 'startup' })
+    const startup = world.checkpoint()
+    world.device({ name: 'test' })
+    const later = world.snapshot()
+    world.reset()
+    world.restore(later)
+    expect(await names(world)).toEqual(['startup', 'test'])
+    world.reset({ to: startup })
+    expect(await names(world)).toEqual(['startup'])
   })
 
   it('removes the application of a service removed after the checkpoint', async () => {
@@ -258,6 +274,48 @@ describe('reset({ to, consumers })', () => {
     world.reset({ to: startup, consumers: 'keep' })
     run()
     expect(socket.readyState).toBe(1)
+  })
+
+  it('keeps a newer token of the same consumer that is not connected yet', async () => {
+    const { world, run } = manualWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
+    const connected = await consumer(world, run, 'startup')
+    // a second client of the same subscriber minted its token but has not connected yet
+    const pending = (await call(world, 'POST', '/notification2/token', { subscription: 'startup', subscriber: 's' })).body.token as string
+    const startup = world.checkpoint()
+    world.reset({ to: startup, consumers: 'keep' })
+    expect(world.realtime.tokens.has(connected.token)).toBe(true)
+    expect(world.realtime.tokens.has(pending)).toBe(true)
+  })
+
+  it('keeps consumers on a fork\'s plain reset', async () => {
+    const queue: Array<() => void> = []
+    const run = () => {
+      while (queue.length > 0) {
+        queue.shift()!()
+      }
+    }
+    const base = createWorld({ schedule: (callback) => queue.push(callback) })
+    await call(base, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
+    const fork = base.fork()
+    const open = await consumer(fork, run, 'startup')
+    fork.reset({ consumers: 'keep' })
+    expect(open.state.closed).toBe(false)
+    await call(fork, 'POST', '/inventory/managedObjects', { name: 'after' })
+    run()
+    expect(open.received.some((frame) => frame.includes('after'))).toBe(true)
+  })
+
+  it('does not hand out a restored token again after snapshot and restore', async () => {
+    const world = createWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 's' })
+    const first = (await call(world, 'POST', '/notification2/token', { subscription: 's', subscriber: 'a' })).body.token as string
+    const snapshot = world.snapshot()
+    world.reset()
+    world.restore(snapshot)
+    const next = (await call(world, 'POST', '/notification2/token', { subscription: 's', subscriber: 'b' })).body.token as string
+    expect(next).not.toBe(first)
+    expect(world.realtime.tokens.get(first)?.subscriber).toBe('a')
   })
 
   it('replays subscription ids the same after keeping a reconnected consumer', async () => {

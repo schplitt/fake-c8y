@@ -227,7 +227,12 @@ export function notifications(call: C8yRequest, segments: string[], data: Tenant
     if (invalid) {
       return invalid
     }
-    // own sequence: tokens a reset keeps (`consumers: 'keep'`) do not move subscription ids
+    // own sequence: tokens a reset keeps (`consumers: 'keep'`) do not move
+    // subscription ids. It starts where the shared one is, so tokens of an
+    // older snapshot (counted with `notification`) are not handed out again
+    if (!data.sequences.has('notificationToken')) {
+      data.sequences.set('notificationToken', data.sequences.get('notification') ?? 1)
+    }
     const token = `fake-token-${nextSequence(data, 'notificationToken')}-${body.subscription}`
     data.notificationTokens.set(token, { tenant, subscription: body.subscription, subscriber: body.subscriber })
     auditTokenCreated(data, String(body.subscription))
