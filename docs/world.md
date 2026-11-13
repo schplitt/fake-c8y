@@ -123,24 +123,22 @@ Patterns are `"[METHOD ]/path"`: `:name` captures a segment into `ctx.params`, `
 
 The handler gets a copy of the request whose body it can read, and a context:
 
-| Field                 | What It Is                                                                                                                                             |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `params`              | What the pattern captured.                                                                                                                             |
-| `call`                | The request as `world.calls` records it: `id` (its number in the log), `parent`, `method`, `path`, the parsed `query` and `body`, `headers`.           |
-| `tenant`, `user`      | The caller's tenant and user name (`user` is `undefined` without Basic auth).                                                                          |
-| `world`               | The world that got the request: the fork, also for an override registered on the base.                                                                 |
-| `matchCount`          | Which match of this override this is, from 1. A fork counts on its own, and `reset()` starts over.                                                     |
-| `next()`              | Answers the request as if this override did not exist (the next older matching override, else a service or the emulation) and returns that `Response`. |
-| `unsupported(reason)` | Reports the request as not emulated (kind `'feature'`) and throws. Throwing `UnsupportedRequestError` (exported) does the same.                        |
+| Field            | What It Is                                                                                                                                             |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `params`         | What the pattern captured.                                                                                                                             |
+| `tenant`, `user` | The caller's tenant and user name (`user` is `undefined` without Basic auth).                                                                          |
+| `world`          | The world that got the request: the fork, also for an override registered on the base.                                                                 |
+| `callCount`      | How many requests this override got, this one included: `2` is its second. A fork counts on its own, and `reset()` starts over.                        |
+| `next()`         | Answers the request as if this override did not exist (the next older matching override, else a service or the emulation) and returns that `Response`. |
 
-The handler returns a `Response`, another value (200 with it as JSON), or nothing (204).
+The handler returns a `Response`, another value (200 with it as JSON), or nothing (204). It can throw `UnsupportedRequestError` (exported) to report the request as not emulated (kind `'feature'`).
 
 Use overrides for what can't be expressed as data: failures, latency, and endpoints the fake doesn't emulate. Seed normal data instead of rewriting answers, so a test does not depend on the endpoints the code under test calls.
 
 ```ts
 // fail the second request, pass the others on
 world.override('POST /alarm/alarms', (request, ctx) =>
-  ctx.matchCount === 2 ? Response.json({ error: 'general/internalError' }, { status: 500 }) : ctx.next())
+  ctx.callCount === 2 ? Response.json({ error: 'general/internalError' }, { status: 500 }) : ctx.next())
 
 // add latency
 world.override('GET /inventory/**', async (request, ctx) => {
@@ -156,6 +154,25 @@ world.override('POST /alarm/alarms', async (request, ctx) => {
   return new Response(null, { status: 503 })
 })
 ```
+
+### Without a pattern
+
+`world.override(handler)` gets every request. Answer what you want and pass the rest on with `next()`, for example with an HTTP framework. With h3, hand the context to the event and send the routes the app does not have on:
+
+```ts
+const app = new H3()
+  .post('/alarm/alarms', async (event) => {
+    await event.context.c8y.next()
+    return new Response(null, { status: 503 })
+  })
+  .all('/**', (event) => event.context.c8y.next())
+
+world.override((request, ctx) => app.request(request, undefined, { c8y: ctx }))
+```
+
+h3 answers errors it throws in its own JSON shape, not the platform's.
+
+### What next() records
 
 `next()` passes on the request the client sent; it takes no other request. What it writes stays written, whatever the handler returns afterwards: the call log has one call (the client's) with the status the handler returned, and its `writes`, the diff, `unhandled`, and `platformErrors` show what the world did. `next()` can be called once per request, and after a `reset()` or `restore()` it answers 503 and changes nothing.
 

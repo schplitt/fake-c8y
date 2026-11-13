@@ -99,8 +99,8 @@ docs/platform-behavior.md       # verified platform behaviors, kept in sync with
 
 ### Overrides
 
-- `world.override(pattern, handler)`: the handler is `(request, ctx) => unknown` (`C8yOverrideHandler`), like a service handler `(request, ctx)`; both contexts extend `C8yHandlerContext` (`tenant`, `call`: the call log entry itself, `unsupported()`). `answer()` takes a copy of `handlers` when the request comes in (`stack`) and walks it newest first (`route()`); `ctx.next()` continues below the override (`route(i)`), then `emulate()` (core fallback, built-in routes, services, platform). One request is one call: `next()` records nothing new, `dispatch()` sets the final status.
-- `ctx.matchCount` comes from the per-world `matches` map (keyed by the registered entry): a fork starts with an empty map, `reset()` clears it, `restore()` keeps it. `next()` throws on a second call and answers 503 when `generation` changed; a handler that finishes after a reset or restore answers 503.
+- `world.override(pattern?, handler)`: the handler is `(request, ctx) => unknown` (`C8yOverrideHandler`), like a service handler `(request, ctx)`; `ctx` has only what the request does not carry (`params`, `tenant`, `user`, `world`, `callCount`, `next()`). Without a pattern (`route: undefined`) it gets every request. `answer()` takes a copy of `handlers` when the request comes in (`stack`) and walks it newest first (`route()`); `ctx.next()` continues below the override (`route(i)`), then `emulate()` (core fallback, built-in routes, services, platform). One request is one call: `next()` records nothing new, `dispatch()` sets the final status.
+- `ctx.callCount` comes from the per-world `callCounts` map (keyed by the registered entry): a fork starts with an empty map, `reset()` clears it, `restore()` keeps it. `next()` throws on a second call and answers 503 when `generation` changed; a handler that finishes after a reset or restore answers 503.
 
 ### Service emulations
 

@@ -188,41 +188,20 @@ export interface C8yCoverage {
 }
 
 /**
- * What every handler the world calls gets besides the request: an override
- * (`world.override()`) and a service (`world.service()`).
+ * What a `world.override()` handler gets besides the request.
  */
-export interface C8yHandlerContext {
+export interface C8yOverrideContext {
   /**
    * The caller's tenant: the tenant whose data the request works with.
    */
   readonly tenant: string
-  /**
-   * The request being answered, as the call log records it (`world.calls`):
-   * `id` (its number in the log), `parent` (the request a service sent it
-   * for), and the parsed `query` and `body`. `status` and `durationMs` are
-   * set once the world answered it.
-   */
-  readonly call: Readonly<C8yRequest>
-  /**
-   * Records the request as unhandled (kind `'feature'`, the trial is
-   * invalid) and throws; the world answers it like any request it does not
-   * emulate. The trial stays invalid even if the handler catches the error.
-   * @param reason - What the emulation does not support
-   */
-  unsupported: (reason: string) => never
-}
-
-/**
- * What a `world.override()` handler gets besides the request.
- */
-export interface C8yOverrideContext extends C8yHandlerContext {
   /**
    * The caller's user name (Basic auth), if any.
    */
   readonly user: string | undefined
   /**
    * The params the pattern captured: `:name` segments, and `_` for the rest
-   * a `**` matched.
+   * a `**` matched (`{}` for an override without a pattern).
    */
   readonly params: Record<string, string>
   /**
@@ -231,11 +210,11 @@ export interface C8yOverrideContext extends C8yHandlerContext {
    */
   readonly world: World
   /**
-   * Which match of this override this is in the answering world, from 1:
-   * `matchCount === 2` is the second request it matched. A fork counts on
+   * How many requests this override got in the answering world, this one
+   * included: `callCount === 2` is its second request. A fork counts on
    * its own (from 1), and `reset()` starts over.
    */
-  readonly matchCount: number
+  readonly callCount: number
   /**
    * Answers the request as if this override did not exist: the next older
    * matching override, else a service or the emulated platform, and returns
@@ -250,6 +229,8 @@ export interface C8yOverrideContext extends C8yHandlerContext {
 /**
  * Answers a request instead of the world. The request is a copy whose body
  * can be read. Return a `Response` for full control (status, headers), any
- * other value to answer `200` with it as JSON, or nothing for `204`.
+ * other value to answer `200` with it as JSON, or nothing for `204`. Throw
+ * `UnsupportedRequestError` to report the request as not emulated (kind
+ * `'feature'`).
  */
 export type C8yOverrideHandler = (request: Request, context: C8yOverrideContext) => unknown

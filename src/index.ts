@@ -367,16 +367,28 @@ export interface World {
    * Answers matching requests with a handler instead of the emulation. The
    * most recently registered handler wins; `ctx.next()` passes the request
    * on to the next older matching override, else the emulation, and returns
-   * its answer. `ctx.matchCount` says which match of this override it is.
+   * its answer. `ctx.callCount` says how many requests this override got.
    * The handler gets the answering world in `ctx.world` (a fork, for an
    * override registered on its base) and a request whose body it can read.
    * Allowed on a frozen base: forks created afterwards get it, earlier ones
    * do not.
-   * @param pattern - `"[METHOD ]/path"`: `:name` captures a segment into
-   * `ctx.params`, `*` matches one segment, `**` the rest (also none)
+   * Without a pattern, the handler gets every request (e.g. to answer them
+   * with an HTTP framework that calls `ctx.next()` for the routes it does
+   * not have).
    * @returns A function that removes the handler
    */
-  override: (pattern: string, handler: C8yOverrideHandler) => () => void
+  override: {
+    /**
+     * @param pattern - `"[METHOD ]/path"`: `:name` captures a segment into
+     * `ctx.params`, `*` matches one segment, `**` the rest (also none)
+     * @param handler - Answers the matching requests
+     */
+    (pattern: string, handler: C8yOverrideHandler): () => void
+    /**
+     * @param handler - Answers every request
+     */
+    (handler: C8yOverrideHandler): () => void
+  }
   /**
    * Emulates a microservice: requests to `/service/<contextPath>/**` go to
    * its handler (overrides still win), in every subscribed tenant. The
@@ -524,7 +536,8 @@ const WRITE_COLLECTIONS: Record<RealtimeApi, C8yWrite['collection']> = {
 const WRITE_ACTIONS = { CREATE: 'created', UPDATE: 'updated', DELETE: 'deleted' } as const
 
 interface RegisteredHandler {
-  route: CompiledRoute
+  // undefined: every request
+  route: CompiledRoute | undefined
   handler: C8yOverrideHandler
 }
 
@@ -667,9 +680,9 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
   let generation = 0
   let frozen = false
   let handlers: RegisteredHandler[] = []
-  // how often each override matched in this world (ctx.matchCount); a fork
-  // starts its own count, reset() starts over
-  let matches = new Map<RegisteredHandler, number>()
+  // how many requests each override got in this world (ctx.callCount); a
+  // fork starts its own count, reset() starts over
+  let callCounts = new Map<RegisteredHandler, number>()
   // kept by reset(): services are part of the platform, not of a trial
   const services = new Map<string, RegisteredService>(base?.services)
   // the removers of this world's own registrations
@@ -1077,16 +1090,15 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
      * @param below - Answers the request without it
      */
     const answerOverride = async (entry: RegisteredHandler, params: Record<string, string>, below: () => Promise<Response>): Promise<Response> => {
-      const matchCount = (matches.get(entry) ?? 0) + 1
-      matches.set(entry, matchCount)
+      const callCount = (callCounts.get(entry) ?? 0) + 1
+      callCounts.set(entry, callCount)
       let passed = false
       const context: C8yOverrideContext = {
         tenant: call.tenant,
         user: call.user,
-        call,
         params,
         world,
-        matchCount,
+        callCount,
         next: async () => {
           if (passed) {
             throw new TypeError(`fake-c8y: next() was called twice for ${method} ${path}`)
@@ -1094,26 +1106,10 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
           passed = true
           return withReasonPhrase(generation === started ? await below() : staleAnswer())
         },
-        unsupported: (reason) => {
-          const error = new UnsupportedRequestError(reason)
-          if (generation === started) {
-            reported.set(error, recordUnhandled(call, reason, 'feature'))
-          }
-          throw error
-        },
       }
       // a copy whose body can still be read
       const copy = new Request(request.url, { method: request.method, headers: request.headers, ...(bytes.length > 0 ? { body: bytes } : {}) })
-      let result: unknown
-      try {
-        result = await entry.handler(copy, context)
-      } catch (error) {
-        const unhandled = typeof error === 'object' && error !== null ? reported.get(error) : undefined
-        if (unhandled && generation === started) {
-          return unsupportedAnswer(unhandled)
-        }
-        throw error
-      }
+      const result = await entry.handler(copy, context)
       return generation === started ? toResponse(result) : staleAnswer()
     }
 
@@ -1218,7 +1214,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     const route = async (below: number): Promise<Response> => {
       for (let i = below - 1; i >= 0; i--) {
         const entry = stack[i]!
-        const params = matchRoute(entry.route, method, segments)
+        const params = entry.route ? matchRoute(entry.route, method, segments) : {}
         if (params) {
           return answerOverride(entry, params, () => route(i))
         }
@@ -1509,7 +1505,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       tenant: call.tenant,
       user: call.user ?? user?.userName ?? DEFAULTS.user.userName,
       serviceUser: serviceUser.name,
-      call,
+      call: call.parent === undefined ? { id: call.id } : { id: call.id, parent: call.parent },
       now: () => {
         live()
         return clock()
@@ -1697,7 +1693,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       calls = []
       usage = new UsageLog()
       callCount = 0
-      matches = new Map()
+      callCounts = new Map()
       unhandledRequests = []
       platformErrors = []
       tenants.clear()
@@ -1768,8 +1764,8 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       return new Map([...services].map(([contextPath, service]) => [contextPath, service.definition]))
     },
 
-    override(pattern, handler) {
-      const entry: RegisteredHandler = { route: compileRoute(pattern), handler }
+    override(first: string | C8yOverrideHandler, second?: C8yOverrideHandler) {
+      const entry: RegisteredHandler = typeof first === 'string' ? { route: compileRoute(first), handler: second! } : { route: undefined, handler: first }
       handlers.push(entry)
       return () => {
         handlers = handlers.filter((item) => item !== entry)

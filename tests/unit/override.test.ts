@@ -1,9 +1,9 @@
 /**
  * `world.override()`: handlers that answer instead of the world, pass the
- * request on with `ctx.next()`, and count their matches (`ctx.matchCount`).
+ * request on with `ctx.next()`, and count their requests (`ctx.callCount`).
  */
 import { describe, expect, it } from 'vitest'
-import { createWorld } from '../../src'
+import { createWorld, UnsupportedRequestError } from '../../src'
 import type { World } from '../../src'
 
 const json = { 'accept': 'application/json', 'content-type': 'application/json' }
@@ -15,16 +15,32 @@ function send(world: World, method: string, path: string, body?: unknown): Promi
 const alarm = (source: string) => ({ source: { id: source }, type: 'hot', text: 'hot', severity: 'MAJOR', time: '2026-11-01T00:00:00.000Z' })
 
 describe('world.override()', () => {
-  it('answers instead of the world with the request, the params, and the call', async () => {
+  it('answers instead of the world with the request and the params', async () => {
     const world = createWorld()
     world.override('POST /custom/:name/**', async (request, ctx) => {
-      expect(ctx.call).toBe(world.calls[0])
-      return { name: ctx.params.name, rest: ctx.params._, body: await request.json(), parsed: ctx.call.body, tenant: ctx.tenant, matchCount: ctx.matchCount }
+      return { method: request.method, name: ctx.params.name, rest: ctx.params._, body: await request.json(), tenant: ctx.tenant, callCount: ctx.callCount }
     })
     const response = await send(world, 'POST', '/custom/pump/a/b', { x: 1 })
-    expect(await response.json()).toEqual({ name: 'pump', rest: 'a/b', body: { x: 1 }, parsed: { x: 1 }, tenant: world.tenant, matchCount: 1 })
+    expect(await response.json()).toEqual({ method: 'POST', name: 'pump', rest: 'a/b', body: { x: 1 }, tenant: world.tenant, callCount: 1 })
     expect(world.calls).toHaveLength(1)
     expect(world.calls[0]!.status).toBe(200)
+  })
+
+  it('gets every request without a pattern and passes on what it does not answer', async () => {
+    const world = createWorld()
+    const pump = world.device({ name: 'Pump' })
+    const seen: string[] = []
+    world.override((request, ctx) => {
+      const { pathname } = new URL(request.url)
+      seen.push(`${request.method} ${pathname} ${ctx.callCount}`)
+      if (request.method === 'GET' && pathname === '/custom/health') {
+        return { status: 'UP' }
+      }
+      return ctx.next()
+    })
+    expect(await (await send(world, 'GET', '/custom/health')).json()).toEqual({ status: 'UP' })
+    expect((await send(world, 'GET', `/inventory/managedObjects/${pump}`)).status).toBe(200)
+    expect(seen).toEqual(['GET /custom/health 1', `GET /inventory/managedObjects/${pump} 2`])
   })
 
   it('passes a request on with next(): one call, written by the platform', async () => {
@@ -39,10 +55,10 @@ describe('world.override()', () => {
     expect(world.calls[0]).toMatchObject({ status: 201, writes: [{ collection: 'alarms', action: 'created' }] })
   })
 
-  it('fails the nth match and passes the others on', async () => {
+  it('fails the nth request and passes the others on', async () => {
     const world = createWorld()
     const pump = world.device({ name: 'Pump' })
-    world.override('POST /alarm/alarms', (_request, ctx) => ctx.matchCount === 2 ? Response.json({ error: 'general/500' }, { status: 500 }) : ctx.next())
+    world.override('POST /alarm/alarms', (_request, ctx) => ctx.callCount === 2 ? Response.json({ error: 'general/500' }, { status: 500 }) : ctx.next())
     const statuses = []
     for (let i = 0; i < 3; i++) {
       statuses.push((await send(world, 'POST', '/alarm/alarms', { ...alarm(pump), type: `hot${i}` })).status)
@@ -52,11 +68,11 @@ describe('world.override()', () => {
     expect(world.db.alarms.find()).toHaveLength(2)
   })
 
-  it('counts only the requests the override matched', async () => {
+  it('counts only the requests the override got', async () => {
     const world = createWorld()
     const counts: number[] = []
     world.override('GET /inventory/managedObjects/:id', (_request, ctx) => {
-      counts.push(ctx.matchCount)
+      counts.push(ctx.callCount)
       return ctx.next()
     })
     const pump = world.device({ name: 'Pump' })
@@ -149,18 +165,13 @@ describe('world.override()', () => {
     expect(world.unhandled).toMatchObject([{ kind: 'error', reason: expect.stringContaining('next() was called twice') }])
   })
 
-  it('records ctx.unsupported() as a feature the fake does not emulate', async () => {
+  it('records an UnsupportedRequestError as a feature the fake does not emulate', async () => {
     const world = createWorld()
-    world.override('GET /custom/feature', (_request, ctx) => {
-      try {
-        ctx.unsupported('revert is not supported')
-      } catch {
-        // the request stays unhandled
-      }
-      return ctx.unsupported('revert is not supported')
+    world.override('GET /custom/feature', () => {
+      throw new UnsupportedRequestError('revert is not supported')
     })
     expect((await send(world, 'GET', '/custom/feature')).status).toBe(501)
-    expect(world.unhandled).toMatchObject([{ kind: 'feature', reason: 'revert is not supported' }, { kind: 'feature' }])
+    expect(world.unhandled).toMatchObject([{ kind: 'feature', reason: 'revert is not supported' }])
   })
 
   it('answers next() after a reset with a 503 and writes nothing', async () => {
@@ -195,7 +206,7 @@ describe('world.override()', () => {
     const base = createWorld()
     const counts: Array<[string, number]> = []
     base.override('GET /custom/count', (_request, ctx) => {
-      counts.push([ctx.world === base ? 'base' : 'fork', ctx.matchCount])
+      counts.push([ctx.world === base ? 'base' : 'fork', ctx.callCount])
       return {}
     })
     await send(base, 'GET', '/custom/count')
