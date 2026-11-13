@@ -98,6 +98,19 @@ Basic auth selects the tenant and the user (`<tenant>/<user>:<password>`). A req
 
 Roles are enforced by default. A request with Basic auth of a user the tenant stores (other than the world's `user`), or of a registered service's bootstrap or service user, gets the platform's 403 `security/Forbidden` where it lacks the rights, and lists show only what it may see. Three kinds of caller stay unrestricted: requests without Basic auth, the world's own `user`, and user names the tenant does not store. `roles: 'off'` gives every caller full access.
 
+### Switching the current user
+
+The world's `user` is also a stored user of its tenant, with exactly its `roles`, so the user API and `GET /user/currentUser` answer for it. The user the world starts with (from `createWorld()` or `reset()`) stays stored. A user you switch to with `setUser()` or `apply({ user })` is stored only while it is current: when you switch away, the world puts back what was there before. A user it created is removed, and a seeded user of the same name gets its seeded fields and roles back. Changes the API made to that user while it was current stay until `reset()`. So a request still running with the old user's credentials after a switch is not restricted by the roles it had while it was current.
+
+```ts
+world.seed({ users: [{ userName: 'operator', roles: ['ROLE_INVENTORY_READ'] }] })
+const previous = world.user
+world.setUser({ userName: 'operator', roles: [] }) // stored with no roles while current
+world.setUser(previous) // operator has ROLE_INVENTORY_READ again
+```
+
+A fork switches back to its base's users the same way. After `restore()`, the users are what the snapshot has; switching away then removes nothing.
+
 Seeded users get the two roles every new user gets on the platform, `ROLE_USER_MANAGEMENT_OWN_READ` and `ROLE_USER_MANAGEMENT_OWN_ADMIN`, plus the `roles` you give.
 
 ```ts

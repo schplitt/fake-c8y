@@ -224,3 +224,73 @@ describe('user management', () => {
     expect(world.unhandled).toEqual([])
   })
 })
+
+describe('switching the current user', () => {
+  const as = (world: World, name: string, path = '/user/currentUser') => world.fetch(new Request(`${world.baseUrl}${path}`, { headers: { authorization: `Basic ${btoa(`${world.tenant}/${name}:x`)}`, accept: 'application/json' } }))
+
+  it('removes a user that setUser() created when the user changes again', async () => {
+    const world = createWorld()
+    const before = world.snapshot()
+    const admin = world.user
+    world.setUser({ userName: 'persona', roles: ['ROLE_ALARM_READ'] })
+    // the user the world started with stays stored
+    expect(world.db.users.get(admin!.userName)).toBeDefined()
+    expect((await (await as(world, 'persona')).json()).effectiveRoles.map((role: any) => role.id)).toEqual(['ROLE_ALARM_READ'])
+    world.setUser(admin)
+    expect(world.db.users.get('persona')).toBeUndefined()
+    // in-flight work with the persona's credentials stays unrestricted
+    expect((await as(world, 'persona', '/inventory/managedObjects')).status).toBe(200)
+    expect(world.diff(before)).toEqual({ tenants: {}, options: [] })
+  })
+
+  it('puts a seeded user back with its roles', async () => {
+    const world = createWorld()
+    world.seed({ users: [{ userName: 'operator', roles: ['ROLE_INVENTORY_READ'] }] })
+    const seeded = world.db.users.get('operator')
+    const admin = world.user
+    world.setUser({ userName: 'operator', roles: [] })
+    expect(world.db.users.get('operator')?.roles.references).toEqual([])
+    world.setUser(admin)
+    expect(world.db.users.get('operator')).toEqual(seeded)
+    expect(world.db.users.effectiveRoles('operator')).toEqual(expect.arrayContaining(['ROLE_INVENTORY_READ', ...NEW_USER_ROLES]))
+    expect((await as(world, 'operator')).status).toBe(200)
+  })
+
+  it('keeps changes the API made to the user while it was current, until reset()', async () => {
+    const world = createWorld()
+    world.seed({ users: [{ userName: 'olivia', roles: [] }] })
+    const admin = world.user
+    world.setUser({ userName: 'olivia', roles: [] })
+    expect((await send(world, 'POST', `/user/${world.tenant}/groups/2/users`, { user: { self: `${world.baseUrl}/user/${world.tenant}/users/olivia` } })).status).toBe(201)
+    world.setUser(admin)
+    expect(world.db.users.effectiveRoles('olivia')).toContain('ROLE_INVENTORY_ADMIN')
+    expect((await as(world, 'olivia', '/inventory/managedObjects')).status).toBe(200)
+    world.reset()
+    expect(world.db.users.get('olivia')).toBeUndefined()
+  })
+
+  it('lets two personas take turns without a 403', async () => {
+    const world = createWorld()
+    for (const name of ['a', 'b', 'a', 'b']) {
+      world.setUser({ userName: name, roles: [] })
+      for (const other of ['a', 'b']) {
+        expect((await as(world, other, '/inventory/managedObjects')).status).toBe(200)
+      }
+    }
+  })
+
+  it('restores the base user on a fork and after its reset()', () => {
+    const base = createWorld()
+    base.seed({ users: [{ userName: 'operator', roles: ['ROLE_INVENTORY_READ'] }] })
+    const seeded = base.db.users.get('operator')
+    base.setUser({ userName: 'operator', roles: [] })
+    const fork = base.fork()
+    fork.setUser({ userName: 'other', roles: [] })
+    expect(fork.db.users.get('operator')).toEqual(seeded)
+    expect(base.db.users.get('operator')?.roles.references).toEqual([])
+    fork.reset()
+    expect(fork.db.users.get('operator')?.roles.references).toEqual([])
+    fork.setUser(null)
+    expect(fork.db.users.get('operator')).toEqual(seeded)
+  })
+})
