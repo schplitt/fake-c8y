@@ -12,7 +12,7 @@
  * - the inventory: the device counts of today (and of the days of the log)
  *   are counted from the managed objects.
  */
-import type { C8yRequest } from '../types'
+import type { C8yRequest, C8yWrite } from '../types'
 import type { StoredDocument, TenantData } from '../store'
 import type { Collection } from '../collection'
 import { apiError, checkQuery, paged, parsePlatformDate } from './http'
@@ -146,66 +146,89 @@ export function dayOf(time: number): string {
   return new Date(time).toISOString().slice(0, 10)
 }
 
-const DEVICE_USER = /^device_/
+/**
+ * Requests no request counter counts. The platform's statistics FAQ: "Only a
+ * few internal endpoints are not counted: `/health` (and all endpoints
+ * including this URI fragment, like `/tenant/health`),
+ * `/application/currentApplication` (and all subresources ...),
+ * `/tenant/limit`, `/devicecontrol/deviceCredentials`,
+ * `/inventory/templates` (and all subresources)".
+ */
+const UNCOUNTED_PATH = /\/health(?:\/|$)|^\/application\/currentApplication(?:\/|$)|^\/tenant\/limit\/?$|^\/devicecontrol\/deviceCredentials\/?$|^\/inventory\/templates(?:\/|$)/i
+/**
+ * The spec on `deviceRequestCount`: "The following requests are not included:
+ * Requests made to /user, /tenant and /application APIs; Application related
+ * requests (with `X-Cumulocity-Application-Key` header)".
+ */
 const NOT_DEVICE_TRAFFIC = new Set(['user', 'tenant', 'application'])
 
 function countRequest(live: LiveDay, call: C8yRequest, status: number, data: TenantData | undefined): void {
   const { counters } = live
-  counters.requestCount++
   const [domain, resource, id, sub] = call.path.split('/').slice(1)
-  if (call.user !== undefined && DEVICE_USER.test(call.user) && !NOT_DEVICE_TRAFFIC.has(domain ?? '')) {
-    counters.deviceRequestCount++
+  const segments = call.path.split('/').filter(Boolean)
+  if (!UNCOUNTED_PATH.test(`/${segments.join('/')}`)) {
+    counters.requestCount++
+    if (!NOT_DEVICE_TRAFFIC.has(segments[0] ?? '') && call.headers['x-cumulocity-application-key'] === undefined) {
+      counters.deviceRequestCount++
+    }
   }
   if (status < 200 || status >= 300) {
     return
   }
-  const body = (call.body ?? {}) as Record<string, unknown>
-  const device = (source: unknown, count = 1) => {
+  // what the request stored (`call.writes`): a suppressed alarm, a
+  // TRANSIENT or CEP write, or a failed item stores nothing; a deduplicated
+  // alarm counts as created
+  const writes = call.writes ?? []
+  const written = (collection: C8yWrite['collection'], actions: ReadonlyArray<C8yWrite['action']>) => writes.filter((write) => write.collection === collection && actions.includes(write.action)).map((write) => write.id)
+  const device = (source: unknown) => {
     const sourceId = (source as { id?: unknown } | undefined)?.id
     if (sourceId !== undefined) {
-      live.devices.set(String(sourceId), (live.devices.get(String(sourceId)) ?? 0) + count)
+      live.devices.set(String(sourceId), (live.devices.get(String(sourceId)) ?? 0) + 1)
     }
   }
-  const stored = (collection: 'events' | 'alarms', documentId: string) => data?.[collection].get(documentId) as StoredDocument | undefined
+  const created = (collection: 'measurements' | 'events' | 'alarms', counter: RequestCounter, actions: ReadonlyArray<C8yWrite['action']> = ['created']) => {
+    for (const documentId of written(collection, actions)) {
+      counters[counter]++
+      device(data?.[collection].get(documentId)?.source)
+    }
+  }
+  const updated = (collection: 'events' | 'alarms', counter: RequestCounter) => {
+    if (written(collection, ['updated']).includes(id!)) {
+      counters[counter]++
+      device(data?.[collection].get(id!)?.source)
+    }
+  }
   const route = `${call.method} ${domain}/${resource}${id === undefined ? '' : '/{id}'}${sub === undefined ? '' : `/${sub}`}`
   switch (route) {
-    case 'POST measurement/measurements': {
-      const collection = /measurementcollection/i.test(call.headers['content-type'] ?? '') && Array.isArray(body.measurements)
-      const items = collection ? body.measurements as Array<Record<string, unknown>> : [body]
-      counters.measurementsCreatedCount += items.length
-      for (const item of items) {
-        device(item.source)
-      }
+    case 'POST measurement/measurements':
+      created('measurements', 'measurementsCreatedCount')
       break
-    }
     case 'POST event/events':
-      counters.eventsCreatedCount++
-      device(body.source)
+      created('events', 'eventsCreatedCount')
       break
     case 'PUT event/events/{id}':
-      counters.eventsUpdatedCount++
-      device(stored('events', id!)?.source)
+      updated('events', 'eventsUpdatedCount')
       break
     case 'POST alarm/alarms':
-      counters.alarmsCreatedCount++
-      device(body.source)
+      created('alarms', 'alarmsCreatedCount', ['created', 'updated'])
       break
     case 'PUT alarm/alarms/{id}':
-      counters.alarmsUpdatedCount++
-      device(stored('alarms', id!)?.source)
+      updated('alarms', 'alarmsUpdatedCount')
       break
     case 'POST inventory/managedObjects':
+      counters.inventoriesCreatedCount += written('managedObjects', ['created']).length
+      break
     case 'POST inventory/binaries':
       counters.inventoriesCreatedCount++
       break
     case 'PUT inventory/managedObjects/{id}':
-      counters.inventoriesUpdatedCount++
+      counters.inventoriesUpdatedCount += written('managedObjects', ['updated']).includes(id!) ? 1 : 0
       break
     case 'POST devicecontrol/operations':
-      counters.operationsCreatedCount++
+      counters.operationsCreatedCount += written('operations', ['created']).length
       break
     case 'PUT devicecontrol/operations/{id}':
-      counters.operationsUpdatedCount++
+      counters.operationsUpdatedCount += written('operations', ['updated']).includes(id!) ? 1 : 0
       break
     default:
       break

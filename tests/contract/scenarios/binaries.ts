@@ -250,4 +250,76 @@ export const binariesScenarios: ContractScenario[] = [
       await notFound(`/inventory/binaries/${binary.id}`)
     },
   },
+  {
+    name: 'binaries: range downloads',
+    verifies: ['binary-range', 'binary-download-headers'],
+    async run({ client, unique }) {
+      const binary = await upload(client, unique, 'range.txt', 'abcdef')
+      try {
+        const get = async (range?: string) => {
+          const res = await client.core.fetch(`/inventory/binaries/${binary.id}`, { headers: { accept: '*/*', ...(range === undefined ? {} : { range }) } })
+          const text = await res.text()
+          return { status: res.status, text, range: res.headers.get('content-range'), headers: res.headers, json: res.headers.get('content-type')?.includes('json') ? JSON.parse(text) : undefined }
+        }
+        const whole = await get()
+        expect([whole.status, whole.text, whole.headers.get('accept-ranges')]).toEqual([200, 'abcdef', 'bytes'])
+        expect(whole.headers.get('content-disposition')).toBe(`attachment; filename="${binary.name}"; filename*=UTF-8''${binary.name}`)
+        for (const [range, part, header] of [['bytes=2-4', 'cde', 'bytes 2-4/6'], ['bytes=4-', 'ef', 'bytes 4-5/6'], ['bytes=-2', 'ef', 'bytes 4-5/6'], ['bytes=6-', '', 'bytes 6-5/6'], ['bytes=-0', '', 'bytes 6-5/6'], ['bytes=4-2', 'ef', 'bytes 4-2/6']]) {
+          const answer = await get(range)
+          expect([range, answer.status, answer.text, answer.range, answer.headers.get('accept-ranges')]).toEqual([range, 206, part, header, 'bytes'])
+        }
+        const past = await get('bytes=2-100')
+        expect([past.status, past.json]).toEqual([416, { error: 'inventory/Requested Range Not Satisfiable', message: 'Range parameter "end" is bigger than actual file length', info: 'https://cumulocity.com/api/core/' }])
+        const several = await get('bytes=0-1,3-4')
+        expect([several.status, several.json]).toEqual([422, { error: 'Only one Range is supported by the resource/Invalid Data', info: 'https://cumulocity.com/api/core/' }])
+        const unit = await get('items=0-1')
+        expect([unit.status, unit.json]).toEqual([400, { error: 'general/internalError', message: 'HTTP 400 Bad Request : Range \'items=0-1\' does not start with \'bytes=\'', info: 'https://cumulocity.com/api/core/' }])
+      } finally {
+        await client.inventoryBinary.delete(binary.id)
+      }
+    },
+  },
+  {
+    name: 'binaries: event attachment name from Content-Disposition, size limit',
+    verifies: ['event-binary-disposition', 'binary-download-headers', 'event-binary-size-limit'],
+    async run({ client, unique }) {
+      const { data: device } = await client.inventory.create({ name: `cd-${unique}`, c8y_IsDevice: {} })
+      try {
+        const attach = async (body: string | Uint8Array, disposition?: string) => {
+          const { data: event } = await client.event.create({ source: { id: device.id }, type: `cd-${unique}`, text: 'x', time: new Date().toISOString() } as any)
+          const put = await client.core.fetch(`/event/events/${event.id}/binaries`, {
+            method: 'PUT',
+            headers: { 'accept': 'application/json', 'content-type': 'application/octet-stream', ...(disposition === undefined ? {} : { 'content-disposition': disposition }) },
+            body: body as string,
+          })
+          const answer = await put.json()
+          const download = put.status === 201 ? await client.core.fetch(`/event/events/${event.id}/binaries`, { headers: { accept: '*/*' } }) : undefined
+          return { id: event.id, status: put.status, body: answer, disposition: download?.headers.get('content-disposition'), ranges: download?.headers.get('accept-ranges') }
+        }
+        // unlike inventory binaries: no Accept-Ranges
+        const plain = await attach('hello', 'attachment; filename="file.txt"')
+        expect([plain.status, plain.body.name, plain.disposition, plain.ranges]).toEqual([201, 'file.txt', 'attachment; filename="file.txt"; filename*=UTF-8\'\'file.txt', null])
+        // and a Range is ignored
+        const ranged = await client.core.fetch(`/event/events/${plain.id}/binaries`, { headers: { accept: '*/*', range: 'bytes=1-2' } })
+        expect([ranged.status, await ranged.text(), ranged.headers.get('content-range')]).toEqual([200, 'hello', null])
+        const euro = await attach('hello', 'attachment; filename*=UTF-8\'\'%E2%82%AC.txt')
+        expect([euro.body.name, euro.disposition]).toEqual(['€.txt', 'attachment; filename=" .txt"; filename*=UTF-8\'\'%e2%82%ac.txt'])
+        const both = await attach('hello', 'attachment; filename="fallback.txt"; filename*=UTF-8\'\'r%C3%A9sum%C3%A9.txt')
+        expect([both.body.name, both.disposition]).toEqual(['résumé.txt', 'attachment; filename="résumé.txt"; filename*=UTF-8\'\'r%c3%a9sum%c3%a9.txt'])
+        const latin1 = await attach('hello', 'attachment; filename*=ISO-8859-1\'\'%E4.txt')
+        expect([latin1.body.name, latin1.disposition]).toEqual(['ä.txt', 'attachment; filename="ä.txt"; filename*=UTF-8\'\'%c3%a4.txt'])
+        const quote = await attach('hello', 'attachment; filename="a\\"b.txt"')
+        expect([quote.body.name, quote.disposition]).toEqual(['a\\', 'attachment; filename="a\\"; filename*=UTF-8\'\'a%5c'])
+        const none = await attach('hello')
+        expect([none.body.name, none.disposition]).toEqual([none.id, `attachment; filename="${none.id}"; filename*=UTF-8''${none.id}`])
+
+        // the default limit of 50 MiB
+        const big = await attach(new Uint8Array(51 * 1024 * 1024))
+        expect([big.status, big.body]).toEqual([422, { error: 'event/Invalid Data', message: 'File size too big. Max size is 50MB', info: 'https://cumulocity.com/api/core/' }])
+      } finally {
+        // deletes the events with their attachments
+        await client.inventory.delete(device.id)
+      }
+    },
+  },
 ]

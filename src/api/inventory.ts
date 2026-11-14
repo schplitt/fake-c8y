@@ -13,6 +13,7 @@ import { deleteUser } from './users'
 import { matchesText, parseTextSearch } from './text-search'
 import { recordTraffic } from './data'
 import { listedManagedObject, visible } from './access'
+import { ERROR_INFO } from './media'
 
 const SERVER_FIELDS = ['id', 'self', 'creationTime', 'lastUpdated', ...CHILD_KINDS, ...Object.values(PARENT_KIND)]
 
@@ -431,6 +432,17 @@ function createFromRequest(data: TenantData, call: C8yRequest, owner: string, op
   if (body instanceof Response) {
     return body
   }
+  return checkCreate(data, body, operation) ?? storeCreated(data, body, owner)
+}
+
+/**
+ * Checks a managed object to create (see `createFromRequest()`).
+ * @param data - Tenant data
+ * @param body - The managed object as `normalizeManagedObject()` returns it
+ * @param operation - `post`, or `create` for a child created under a parent
+ * @param bound - External id keys bound before (a bulk create's earlier items)
+ */
+function checkCreate(data: TenantData, body: Record<string, unknown>, operation: 'post' | 'create', bound?: Set<string>): Response | undefined {
   const invalid = checkManagedObject(body, operation)
   if (invalid) {
     return invalid
@@ -444,10 +456,23 @@ function createFromRequest(data: TenantData, call: C8yRequest, owner: string, op
     if (missing) {
       return apiError(422, 'undefined/validationError', `post.managedObjectRepresentation.externalIds[${index}].${missing}: must not be empty`)
     }
-    if (data.externalIds.has(externalIdKey(String(entry!.type), String(entry!.externalId)))) {
+    const key = externalIdKey(String(entry!.type), String(entry!.externalId))
+    if (data.externalIds.has(key) || bound?.has(key)) {
       return apiError(409, 'identity/Duplicate', `ID [type=${String(entry!.type)}, value=${String(entry!.externalId)}] was already bound to different Global ID.`)
     }
+    bound?.add(key)
   }
+  return undefined
+}
+
+/**
+ * Stores a checked managed object (see `createFromRequest()`).
+ * @param data - Tenant data
+ * @param body - The managed object, checked by `checkCreate()`
+ * @param owner - Owner user name
+ */
+function storeCreated(data: TenantData, body: Record<string, unknown>, owner: string): StoredDocument {
+  const externalIds = body.externalIds ?? []
   const document = createManagedObject(data, omit(body, ['externalIds', ...AVAILABILITY_FIELDS]), owner)
   for (const entry of externalIds as Array<Record<string, unknown>>) {
     addExternalId(data, document.id, String(entry.type), String(entry.externalId))
@@ -552,22 +577,29 @@ function bulkUpdate(call: C8yRequest, data: TenantData): Response {
   if (items !== undefined && items !== null && !Array.isArray(items)) {
     return apiError(400, 'Failed to parse JSON string', `Cannot deserialize value of type \`java.util.ArrayList<${REPRESENTATION}>\` from ${jsonKind(items)} (through reference chain: com.cumulocity.rest.representation.inventory.ManagedObjectCollectionRepresentation["managedObjects"])`)
   }
-  const failed = (status: number, error: string, message: string, failedIndex: number) =>
-    Response.json({ error, message, info: 'https://cumulocity.com/api/core/', bulkRequest: { failedIndex } }, { status })
+  const list = (items ?? []) as unknown[]
+  const malformed = malformedItem(call, list)
+  if (malformed) {
+    return malformed
+  }
   const updates: Array<Record<string, unknown>> = []
-  for (const item of (items ?? []) as unknown[]) {
-    const normalized = normalizeManagedObject((item ?? {}) as Record<string, unknown>, 'put')
+  for (const [index, item] of list.entries()) {
+    if (item === null) {
+      // verified: the validator fails on it
+      return apiError(422, 'undefined/validationError', 'HV000028: Unexpected exception during isValid call. : Cannot invoke "com.cumulocity.rest.representation.ResourceRepresentationWithId.getId()" because "representation" is null')
+    }
+    const normalized = normalizeManagedObject(item as Record<string, unknown>, 'put')
     if (normalized instanceof Response) {
       return normalized
+    }
+    if (normalized.id === undefined || normalized.id === null) {
+      // verified
+      return failedItem(422, 'undefined/validationError', `put.managedObjectCollection.managedObjects[${index}].id: is required`, index)
     }
     updates.push(normalized)
   }
   if (updates.length === 0) {
     return apiError(422, 'undefined/validationError', 'put.managedObjectCollection.managedObjects: At least one managed object is required for a bulk request')
-  }
-  const missing = updates.findIndex((update) => update.id === undefined || update.id === null)
-  if (missing >= 0) {
-    return failed(422, 'undefined/validationError', `put.managedObjectCollection.managedObjects[${missing}].id: is required`, missing)
   }
   const ids = updates.map((update) => String(update.id))
   const duplicates = [...new Set(ids.filter((id, index) => ids.indexOf(id) !== index))]
@@ -576,7 +608,7 @@ function bulkUpdate(call: C8yRequest, data: TenantData): Response {
   }
   const unknown = ids.findIndex((id) => !data.managedObjects.has(id))
   if (unknown >= 0) {
-    return failed(404, 'inventory/Not Found', `Could not find managed object in database for update. : No managedObject for id '${ids[unknown]}'!`, unknown)
+    return failedItem(404, 'inventory/Not Found', `Could not find managed object in database for update. : No managedObject for id '${ids[unknown]}'!`, unknown)
   }
   for (const [index, update] of updates.entries()) {
     const document = data.managedObjects.get(ids[index]!)!
@@ -589,6 +621,194 @@ function bulkUpdate(call: C8yRequest, data: TenantData): Response {
   return Response.json({
     self: `${data.world.baseUrl}/inventory/managedObjects?currentPage=1&pageSize=1000000`,
     managedObjects: ids.map((id) => renderManagedObject(data, data.managedObjects.get(id)!, { skipChildrenNames: true })),
+    statistics: { totalPages: 1, pageSize: 1000000, currentPage: 1 },
+  })
+}
+
+/**
+ * An error of one item of a bulk request, named in `bulkRequest.failedIndex`.
+ * @param status - HTTP status
+ * @param error - The error
+ * @param message - The message
+ * @param failedIndex - The item's index
+ */
+function failedItem(status: number, error: string, message: string, failedIndex: number): Response {
+  return Response.json({ error, message, info: ERROR_INFO, bulkRequest: { failedIndex } }, { status })
+}
+
+/**
+ * Where the value `managedObjects[index]` starts in a JSON body, as Jackson
+ * names it (line and column from 1), or `undefined` when it is not found.
+ * @param text - The JSON body
+ * @param index - The item's index
+ */
+function itemLocation(text: string, index: number): { line: number, column: number } | undefined {
+  let i = 0
+  const space = () => {
+    while (/\s/.test(text[i] ?? '')) {
+      i++
+    }
+  }
+  const skipString = () => {
+    i++
+    while (i < text.length && text[i] !== '"') {
+      i += text[i] === '\\' ? 2 : 1
+    }
+    i++
+  }
+  const skipValue = () => {
+    space()
+    if (text[i] === '"') {
+      skipString()
+      return
+    }
+    if (text[i] === '{' || text[i] === '[') {
+      let depth = 0
+      while (i < text.length) {
+        const char = text[i]!
+        if (char === '"') {
+          skipString()
+          continue
+        }
+        i++
+        if (char === '{' || char === '[') {
+          depth++
+        } else if ((char === '}' || char === ']') && --depth === 0) {
+          return
+        }
+      }
+      return
+    }
+    while (i < text.length && !/[\s,}\]]/.test(text[i]!)) {
+      i++
+    }
+  }
+  // moves past the separator after a value; false at the end of the container
+  const next = () => {
+    space()
+    return text[i++] === ','
+  }
+  space()
+  if (text[i++] !== '{') {
+    return undefined
+  }
+  do {
+    space()
+    const start = i
+    skipString()
+    const name = text.slice(start + 1, i - 1)
+    space()
+    i++
+    space()
+    if (name === 'managedObjects' && text[i] === '[') {
+      i++
+      for (let n = 0; n < index; n++) {
+        skipValue()
+        if (!next()) {
+          return undefined
+        }
+      }
+      space()
+      const before = text.slice(0, i)
+      return { line: before.split('\n').length, column: i - before.lastIndexOf('\n') }
+    }
+    skipValue()
+  } while (next())
+  return undefined
+}
+
+/**
+ * The 400 for the first item of a bulk request that is neither an object nor
+ * `null` (verified for a string: Jackson's message with the item's location).
+ * @param call - The request
+ * @param list - The items
+ */
+function malformedItem(call: C8yRequest, list: readonly unknown[]): Response | undefined {
+  const index = list.findIndex((item) => item !== null && (typeof item !== 'object' || Array.isArray(item)))
+  if (index < 0) {
+    return undefined
+  }
+  const item = list[index]
+  const location = itemLocation(new TextDecoder().decode(raw(call).bytes), index) ?? { line: 1, column: 1 }
+  const problem = Array.isArray(item)
+    ? `Cannot deserialize value of type \`${REPRESENTATION}\` from ${jsonKind(item)}`
+    : `Cannot construct instance of \`${REPRESENTATION}\` (although at least one Creator exists): no ${typeof item === 'string' ? 'String' : typeof item === 'boolean' ? 'boolean/Boolean' : Number.isInteger(item) ? 'int/Int' : 'double/Double'}-argument constructor/factory method to deserialize from ${typeof item === 'string' ? `String value ('${item}')` : jsonKind(item)}`
+  return apiError(400, 'Failed to parse JSON string', `${problem}\n at [Source: REDACTED (\`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION\` disabled); line: ${location.line}, column: ${location.column}] (through reference chain: com.cumulocity.rest.representation.inventory.ManagedObjectCollectionRepresentation["managedObjects"]->java.util.ArrayList[${index}])`)
+}
+
+/**
+ * Creates several managed objects (`POST /inventory/managedObjects` with the
+ * `managedobjectcollection` content type; verified): 1 to 50 items, every
+ * one checked (also its external ids, which may occur only once in the
+ * request) before anything is created. A validation error names the item
+ * (`post.managedObjectCollection.managedObjects[1].id: is not allowed here`,
+ * `bulkRequest.failedIndex`); an item that is no object answers 400 while the
+ * body is read, a single `null` item 500, a `null` among two or more items 422
+ * (`HV000028`, without `bulkRequest`). Fragments starting with `c8y_BatchId_` are
+ * dropped. Answers 200 with the objects in request order, as one page like
+ * `bulkUpdate()`.
+ * @param call - The request
+ * @param data - Tenant data
+ * @param owner - Owner user name
+ */
+function bulkCreate(call: C8yRequest, data: TenantData, owner: string): Response {
+  const body = readJsonBody(call, 'managedobjectcollection', 'Cannot invoke "Object.getClass()" because "source" is null')
+  if (body instanceof Response) {
+    return body
+  }
+  const items = body.managedObjects
+  if (items !== undefined && items !== null && !Array.isArray(items)) {
+    return apiError(400, 'Failed to parse JSON string', `Cannot deserialize value of type \`java.util.ArrayList<${REPRESENTATION}>\` from ${jsonKind(items)} (through reference chain: com.cumulocity.rest.representation.inventory.ManagedObjectCollectionRepresentation["managedObjects"])`)
+  }
+  const list = (items ?? []) as unknown[]
+  const malformed = malformedItem(call, list)
+  if (malformed) {
+    return malformed
+  }
+  if (list.length === 0) {
+    return apiError(422, 'undefined/validationError', 'post.managedObjectCollection.managedObjects: At least one managed object is required for a bulk request')
+  }
+  if (list.length > 50) {
+    return apiError(422, 'undefined/validationError', 'post.managedObjectCollection.managedObjects: Maximum of 50 managed objects allowed in a bulk request')
+  }
+  if (list.length > 1 && list.includes(null)) {
+    // verified: with two or more items the external id check of the
+    // collection fails on a `null` item, nothing is created; before the
+    // items' own checks (unverified)
+    return apiError(422, 'undefined/validationError', 'HV000028: Unexpected exception during isValid call. : Cannot invoke "com.cumulocity.rest.representation.inventory.ManagedObjectRepresentation.getExternalIds()" because "managedObject" is null')
+  }
+  // validation first (it skips a single `null` item), then the items are read
+  const normalized: Array<Record<string, unknown> | null> = []
+  for (const [index, item] of list.entries()) {
+    const result = item === null ? null : normalizeManagedObject(item as Record<string, unknown>, 'post')
+    if (result instanceof Response) {
+      const failure = result as Response & { message?: string }
+      return failure.status === 422
+        ? failedItem(422, 'undefined/validationError', String(failure.message).replace(/^post\.managedObjectRepresentation\./, `post.managedObjectCollection.managedObjects[${index}].`), index)
+        : failure
+    }
+    normalized.push(result)
+  }
+  if (normalized.includes(null)) {
+    return apiError(500, 'general/internalError', 'Cannot invoke "Object.getClass()" because "source" is null')
+  }
+  const creates: Array<Record<string, unknown>> = []
+  const bound = new Set<string>()
+  for (const [index, item] of (normalized as Array<Record<string, unknown>>).entries()) {
+    const failure = checkCreate(data, item, 'post', bound) as (Response & { message?: string }) | undefined
+    if (failure) {
+      // the item's own checks (422, 409 for an external id) name it
+      // (unverified); a server error (500) does not
+      return failure.status === 422 || failure.status === 409
+        ? failedItem(failure.status, failure.status === 409 ? 'identity/Duplicate' : 'undefined/validationError', String(failure.message).replace(/^post\.managedObjectRepresentation\./, `post.managedObjectCollection.managedObjects[${index}].`), index)
+        : failure
+    }
+    creates.push(Object.fromEntries(Object.entries(item).filter(([name]) => !name.startsWith('c8y_BatchId_'))))
+  }
+  const created = creates.map((create) => storeCreated(data, create, owner))
+  return Response.json({
+    self: `${data.world.baseUrl}/inventory/managedObjects?currentPage=1&pageSize=1000000`,
+    managedObjects: created.map((document) => renderManagedObject(data, document, { skipChildrenNames: true })),
     statistics: { totalPages: 1, pageSize: 1000000, currentPage: 1 },
   })
 }
@@ -905,7 +1125,11 @@ function inventoryRequest(call: C8yRequest, segments: string[], data: TenantData
     if (method === 'POST') {
       checkQuery('POST /inventory/managedObjects', call, [])
       // verified: the owner is the login user, the one audit records name
-      const created = createFromRequest(data, call, data.world.actor() ?? call.user ?? 'test-user', 'post')
+      const owner = data.world.actor() ?? call.user ?? 'test-user'
+      if (/^application\/vnd\.com\.nsn\.cumulocity\.managedobjectcollection\+json/i.test((call.headers['content-type'] ?? '').trim())) {
+        return bulkCreate(call, data, owner)
+      }
+      const created = createFromRequest(data, call, owner, 'post')
       return created instanceof Response ? created : Response.json(render(created), { status: 201 })
     }
     return undefined
@@ -979,18 +1203,30 @@ function inventoryRequest(call: C8yRequest, segments: string[], data: TenantData
       if (!document) {
         return notFound(id)
       }
+      const deletes = deletedWith(call, data, document)
+      // documented: `withDeviceUser` also deletes the device's own user (the
+      // owner a device gets from its registration); verified: accepted for
+      // objects without one
+      const deviceUser = flag(call, 'withDeviceUser') && typeof document.owner === 'string' && document.owner.startsWith('device_') && data.users.has(document.owner) ? document.owner : undefined
+      if (deviceUser) {
+        // spec: 409 when the user owns managed objects the delete leaves
+        // (unverified), before anything is deleted
+        const gone = new Set(deletes)
+        for (const other of data.managedObjects.values()) {
+          if (other.owner === deviceUser && !gone.has(other.id)) {
+            return apiError(409, 'inventory/Update Conflict', 'Can\'t delete user because it is used by another managed object')
+          }
+        }
+      }
       // verified: only the requested object gets an audit record
-      for (const deleted of deletedWith(call, data, document)) {
+      for (const deleted of deletes) {
         // published first: the object's own subscriptions go with it
         data.world.notify(data, 'managedobjects', 'DELETE', { id: deleted }, deleted)
         deleteManagedObject(data, deleted)
       }
       auditManagedObjectDeleted(data, document)
-      // documented: `withDeviceUser` also deletes the device's own user (the
-      // owner a device gets from its registration); verified: accepted for
-      // objects without one
-      if (flag(call, 'withDeviceUser') && typeof document.owner === 'string' && document.owner.startsWith('device_')) {
-        deleteUser(data, document.owner)
+      if (deviceUser) {
+        deleteUser(data, deviceUser)
       }
       return new Response(null, { status: 204 })
     }

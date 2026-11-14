@@ -485,4 +485,22 @@ export const usersScenarios: ContractScenario[] = [
       }
     },
   },
+  {
+    name: 'users: a user name over 1,000 characters',
+    verifies: ['user-name-max-length'],
+    async run({ client, tenant, unique }) {
+      const data = fixture(client, tenant)
+      try {
+        const prefix = `ev.usr.${unique}.l`
+        const name = prefix.padEnd(1001, 'x')
+        const result = await api(client, 'POST', `/user/${tenant}/users`, { userName: name, email: `${prefix}@example.com`, password: PASSWORD })
+        if (result.status === 201) {
+          data.track.users.push(name)
+        }
+        expect(result).toMatchObject({ status: 422, body: { error: 'undefined/validationError', message: 'userName size must be between 0 and 1000' } })
+      } finally {
+        await data.cleanup()
+      }
+    },
+  },
 ]

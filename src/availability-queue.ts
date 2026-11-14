@@ -47,6 +47,11 @@ export class AvailabilityQueue {
    * scanned on the first tick).
    */
   built: boolean
+  /**
+   * The `#scheduled` value of every device scheduled since `journal()`
+   * started, before its first schedule there (`undefined`: none).
+   */
+  #journal: Map<string, Entry | undefined> | undefined
 
   constructor(base: readonly Entry[] = [], built = false) {
     this.#base = base
@@ -84,6 +89,36 @@ export class AvailabilityQueue {
   }
 
   /**
+   * Starts recording schedules, so `rollback()` can undo them (a
+   * `X-Cumulocity-Processing-Mode: TRANSIENT` request). `next()` is not
+   * recorded: the world does not tick while a request is answered.
+   */
+  journal(): void {
+    this.#journal = new Map()
+  }
+
+  /**
+   * Undoes every schedule since `journal()` and stops recording: each device
+   * gets its entry back (with its alarm flag). Entries pushed meanwhile stay
+   * in the heap as stale ones; a restored entry is still there, since no
+   * entry was popped.
+   */
+  rollback(): void {
+    const journal = this.#journal
+    this.#journal = undefined
+    if (!journal) {
+      return
+    }
+    for (const [id, saved] of journal) {
+      if (saved === undefined) {
+        this.#scheduled.delete(id)
+      } else {
+        this.#scheduled.set(id, saved)
+      }
+    }
+  }
+
+  /**
    * Schedules a look at a device (replacing its earlier schedule).
    * @param id - Managed object id
    * @param time - Epoch milliseconds, `Infinity` for none
@@ -93,6 +128,9 @@ export class AvailabilityQueue {
     const current = this.#scheduled.get(id)
     if (current && current.time === time && current.alarm === alarm) {
       return
+    }
+    if (this.#journal && !this.#journal.has(id)) {
+      this.#journal.set(id, current)
     }
     if (time === Number.POSITIVE_INFINITY) {
       this.#scheduled.set(id, NONE)

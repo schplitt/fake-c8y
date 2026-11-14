@@ -33,6 +33,7 @@ import { adminUserListScenarios } from './scenarios/admin-user-lists'
 import { adminUsersScenarios } from './scenarios/admin-users'
 import { applicationScenarios } from './scenarios/applications'
 import { tenantAdminScenarios } from './scenarios/tenant-admin'
+import { requestVariantScenarios } from './scenarios/request-variants'
 
 export type { ContractContext, ContractScenario } from './helpers'
 
@@ -74,4 +75,6 @@ export const scenarios: ContractScenario[] = [
   ...adminNotificationScenarios,
   // cross-cutting HTTP behavior (media types, Accept, error bodies, paths, links, headers)
   ...httpScenarios,
+  // request variants the spec documents for writes
+  ...requestVariantScenarios,
 ]

@@ -19,6 +19,9 @@ import { clone, toHex } from '../utils'
 import { apiError, checkQuery, paged } from './http'
 
 const TYPES: readonly string[] = ['EXTERNAL', 'HOSTED', 'MICROSERVICE']
+// verified: the spec's enum (MARKET, PRIVATE) plus SHARED, which @c8y/client's
+// ApplicationAvailability lists; anything else answers 422 on create and update
+const AVAILABILITIES: readonly string[] = ['MARKET', 'PRIVATE', 'SHARED']
 
 /**
  * Ids of new applications start after this (the platform's ids are in this range).
@@ -660,6 +663,9 @@ function createApplication(data: TenantData, body: Record<string, unknown>): Res
   if (!TYPES.includes(String(body.type))) {
     return apiError(422, 'undefined/validationError', 'type invalid value')
   }
+  if (body.availability !== undefined && body.availability !== null && !AVAILABILITIES.includes(String(body.availability))) {
+    return apiError(422, 'undefined/validationError', 'availability must match "PRIVATE|MARKET|SHARED"')
+  }
   const visible = visibleApplications(data)
   for (const field of ['name', 'key'] as const) {
     if (visible.some((application) => application[field] === body[field])) {
@@ -689,6 +695,9 @@ function createApplication(data: TenantData, body: Record<string, unknown>): Res
 export function updateApplication(data: TenantData, application: Readonly<StoredDocument>, body: Record<string, unknown>): Response {
   if (body.type !== undefined && body.type !== null) {
     return apiError(422, 'undefined/validationError', 'type is not allowed here')
+  }
+  if (body.availability !== undefined && body.availability !== null && !AVAILABILITIES.includes(String(body.availability))) {
+    return apiError(422, 'undefined/validationError', 'availability must match "PRIVATE|MARKET|SHARED"')
   }
   // verified: the manifest stays as it is
   const { id: _id, owner: _owner, self: _self, type: _type, manifest: _manifest, ...fields } = body

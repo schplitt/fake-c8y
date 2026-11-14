@@ -62,6 +62,28 @@ describe('usage statistics', () => {
     expect(day).toMatchObject({ requestCount: 2, inventoriesCreatedCount: 1 })
   })
 
+  it('counts device requests by path and application key, and leaves out internal endpoints', async () => {
+    const world = createWorld({ now: () => Date.parse('2026-11-07T10:00:00Z') })
+    const send = (method: string, path: string, headers: Record<string, string> = {}, body?: unknown) => world.fetch(new Request(`${world.baseUrl}${path}`, {
+      method,
+      headers: { 'content-type': 'application/json', 'accept': 'application/json', ...headers },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    }))
+    // both counters: any user (not only device_*) outside /user, /tenant, /application
+    await send('GET', '/inventory/managedObjects')
+    await send('GET', '/event/events')
+    // requests only: an application key, or the user, tenant, and application APIs
+    await send('GET', '/inventory/managedObjects', { 'x-cumulocity-application-key': 'cockpit-application-key' })
+    await send('GET', '/user/currentUser')
+    await send('GET', '/tenant/currentTenant')
+    await send('GET', '/application/applications')
+    // neither: the internal endpoints of the statistics FAQ
+    await send('GET', '/application/currentApplication')
+    await send('GET', '/application/currentApplication/subscriptions')
+    await send('POST', '/devicecontrol/deviceCredentials', {}, { id: 'serial-1' })
+    expect(await today(world)).toMatchObject({ requestCount: 6, deviceRequestCount: 2 })
+  })
+
   it('buckets requests by the day of the trial clock', async () => {
     let now = Date.parse('2026-11-06T23:59:00Z')
     const world = createWorld({ now: () => now })
@@ -123,6 +145,33 @@ describe('usage statistics', () => {
     const empty = (await call(world, 'GET', '/tenant/statistics/summary?dateFrom=2020-01-01&dateTo=2020-01-02')).body
     expect(empty).not.toHaveProperty('resources')
     expect(empty.requestCount).toBe(0)
+  })
+
+  it('counts as created only what a request stored', async () => {
+    let now = Date.parse('2026-11-07T10:00:00Z')
+    const world = createWorld({ now: () => now })
+    const pump = world.device({ name: 'Pump' })
+    const resting = world.device({ name: 'Resting', c8y_RequiredAvailability: { responseInterval: 0 } })
+    const send = (method: string, path: string, body: unknown, headers: Record<string, string> = {}) => world.fetch(new Request(`${world.baseUrl}${path}`, {
+      method,
+      headers: { 'content-type': 'application/json', 'accept': 'application/json', ...headers },
+      body: JSON.stringify(body),
+    }))
+    const time = '2026-11-07T09:00:00Z'
+    // a suppressed alarm answers 201 and stores nothing
+    expect((await send('POST', '/alarm/alarms', { source: { id: resting }, type: 'a', text: 'a', severity: 'MAJOR', time })).status).toBe(201)
+    // TRANSIENT and CEP writes are answered, then undone
+    for (const mode of ['TRANSIENT', 'CEP']) {
+      expect((await send('POST', '/event/events', { source: { id: pump }, type: 'e', text: 'e', time }, { 'x-cumulocity-processing-mode': mode })).status).toBe(201)
+      expect((await send('POST', '/inventory/managedObjects', { name: 'gone' }, { 'x-cumulocity-processing-mode': mode })).status).toBe(201)
+    }
+    // a managed object collection counts each object
+    expect((await send('POST', '/inventory/managedObjects', { managedObjects: [{ name: 'a' }, { name: 'b' }, { name: 'c' }] }, { 'content-type': 'application/vnd.com.nsn.cumulocity.managedobjectcollection+json' })).status).toBeLessThan(300)
+    // stored with QUIESCENT: counts
+    expect((await send('POST', '/event/events', { source: { id: pump }, type: 'e', text: 'e', time }, { 'x-cumulocity-processing-mode': 'QUIESCENT' })).status).toBe(201)
+    expect(await today(world)).toMatchObject({ requestCount: 7, alarmsCreatedCount: 0, eventsCreatedCount: 1, inventoriesCreatedCount: 3 })
+    now = Date.parse('2026-11-08T00:00:01Z')
+    expect((await call(world, 'GET', `/tenant/statistics/device/${world.tenant}/daily/2026-11-07`)).body.statistics).toEqual([{ deviceId: pump, count: 1 }])
   })
 
   it('device statistics show a day once it is over', async () => {

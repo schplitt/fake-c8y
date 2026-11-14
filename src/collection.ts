@@ -42,6 +42,15 @@ export interface TouchedEntries<V> {
   recreated: Set<string>
 }
 
+/**
+ * What a collection holds of a key itself (see `Collection.journal()`).
+ */
+interface OwnState<V> {
+  changed?: { value: V }
+  added?: { value: V, order: number }
+  hidden: boolean
+}
+
 export class Collection<V> implements Iterable<[string, V]> {
   readonly #base: Collection<V> | undefined
   readonly #freezeValues: boolean
@@ -93,6 +102,12 @@ export class Collection<V> implements Iterable<[string, V]> {
    * to date by every write.
    */
   #ownSorted = new Map<object, SortedEntries<V>>()
+  /**
+   * The own state of every key written since `journal()` started, before its
+   * first write there (`rollback()` puts it back).
+   */
+  #journal: Map<string, OwnState<V>> | undefined
+  #journalOrder = 0
 
   constructor(entries: Iterable<readonly [string, V]> = [], options: CollectionOptions = {}, base?: Collection<V>) {
     this.#freezeValues = options.freezeValues ?? false
@@ -152,6 +167,7 @@ export class Collection<V> implements Iterable<[string, V]> {
 
   set(key: string, value: V): this {
     this.#writable()
+    this.#record(key)
     if (this.#freezeValues) {
       deepFreeze(value)
     }
@@ -172,6 +188,7 @@ export class Collection<V> implements Iterable<[string, V]> {
 
   delete(key: string): boolean {
     this.#writable()
+    this.#record(key)
     if (this.#added.has(key)) {
       this.#indexOwn(key, false, { value: this.#added.get(key)! }, undefined)
       this.#added.delete(key)
@@ -188,6 +205,102 @@ export class Collection<V> implements Iterable<[string, V]> {
       return true
     }
     return false
+  }
+
+  /**
+   * Starts recording the writes (`set()`, `delete()`, `update()`), so
+   * `rollback()` can undo them, e.g. for a request that must not store
+   * anything (`X-Cumulocity-Processing-Mode: TRANSIENT`).
+   */
+  journal(): void {
+    if (this.#journal) {
+      throw new TypeError('fake-c8y: a journal is already running')
+    }
+    this.#journal = new Map()
+    this.#journalOrder = this.#nextOrder
+  }
+
+  /**
+   * Undoes every write since `journal()` and stops recording: the keys get
+   * their values and positions back, as if the writes never happened.
+   */
+  rollback(): void {
+    const journal = this.#journal
+    if (!journal) {
+      return
+    }
+    this.#journal = undefined
+    if (journal.size === 0) {
+      return
+    }
+    this.#version++
+    let moved = false
+    for (const [key, saved] of journal) {
+      const changed = this.#changed.has(key) ? { value: this.#changed.get(key)! } : undefined
+      if (changed && saved.changed?.value !== changed.value) {
+        this.#indexOwn(key, true, changed, saved.changed)
+      } else if (!changed && saved.changed) {
+        this.#indexOwn(key, true, undefined, saved.changed)
+      }
+      if (saved.changed) {
+        this.#changed.set(key, saved.changed.value)
+      } else {
+        this.#changed.delete(key)
+      }
+      const added = this.#added.has(key) ? { value: this.#added.get(key)! } : undefined
+      if (added && !(saved.added && saved.added.order === this.#addedOrder.get(key))) {
+        // gone, or deleted and set again: back to its own position below
+        this.#indexOwn(key, false, added, undefined)
+        this.#added.delete(key)
+        this.#addedOrder.delete(key)
+      }
+      if (saved.added) {
+        if (this.#added.has(key)) {
+          if (this.#added.get(key) !== saved.added.value) {
+            this.#indexOwn(key, false, { value: this.#added.get(key)! }, saved.added)
+            this.#added.set(key, saved.added.value)
+          }
+        } else {
+          // a key that comes back takes its old insertion number (and the own
+          // indexes are built again, they keep groups in insertion order)
+          this.#addedOrder.set(key, saved.added.order)
+          this.#added.set(key, saved.added.value)
+          moved = true
+        }
+      }
+      if (saved.hidden) {
+        this.#hidden.add(key)
+      } else {
+        this.#hidden.delete(key)
+      }
+    }
+    this.#nextOrder = this.#journalOrder
+    if (moved) {
+      const order = this.#addedOrder
+      this.#added = new Map([...this.#added].sort((a, b) => order.get(a[0])! - order.get(b[0])!))
+      // built again in place: lookups `groupedBy()` handed out keep reading them
+      for (const [grouping, own] of this.#ownGroups) {
+        const by = grouping as (value: V) => string | undefined
+        for (const [groups, values] of [[own.changed, this.#changed], [own.added, this.#added]] as const) {
+          groups.clear()
+          for (const [group, keys] of groupKeys(values, by)) {
+            groups.set(group, keys)
+          }
+        }
+      }
+      this.#ownSorted = new Map()
+    }
+  }
+
+  #record(key: string): void {
+    if (!this.#journal || this.#journal.has(key)) {
+      return
+    }
+    this.#journal.set(key, {
+      ...(this.#changed.has(key) ? { changed: { value: this.#changed.get(key)! } } : {}),
+      ...(this.#added.has(key) ? { added: { value: this.#added.get(key)!, order: this.#addedOrder.get(key)! } } : {}),
+      hidden: this.#hidden.has(key),
+    })
   }
 
   /**

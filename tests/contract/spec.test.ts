@@ -20,7 +20,6 @@ import type { Schema } from './schema'
  * Documented success statuses no request can reach on the fake, with the reason.
  */
 const UNREACHABLE: Record<string, string> = {
-  'POST /inventory/managedObjects 200': 'the platform answers 201 (200 is listed for an upsert the fake does not emulate)',
   'DELETE /inventory/managedObjects/{id} 202': 'the asynchronous (cascading) delete of a large hierarchy',
   'GET /measurement/measurements/{id} 200': 'time series persistence answers 405 (measurement-by-id-405)',
   'PUT /alarm/alarms 202': 'the platform answers 200 for a small bulk update; 202 is the asynchronous one',
@@ -141,6 +140,9 @@ describe('the fake tenant against the OpenAPI spec', { concurrent: false }, () =
     await request('PUT', '/inventory/managedObjects', { managedObjects: [{ id: device.id, c8y_Bulk: {} }] })
     await request('PUT', '/inventory/managedObjects', { managedObjects: [] })
     await request('PUT', '/inventory/managedObjects', { managedObjects: [{ id: '9999' }] })
+    const collection = { 'content-type': 'application/vnd.com.nsn.cumulocity.managedobjectcollection+json' }
+    await request('POST', '/inventory/managedObjects', JSON.stringify({ managedObjects: [{ name: 'Bulk 1' }, { name: 'Bulk 2' }] }), collection)
+    await request('POST', '/inventory/managedObjects', JSON.stringify({ managedObjects: [{ name: 'Bulk 3' }, { name: 'Bulk 4', lastUpdated: at(0) }] }), collection)
     for (const kind of ['childDevices', 'childAssets', 'childAdditions']) {
       await request('POST', `/inventory/managedObjects/${device.id}/${kind}`, { managedObject: { id: child.id } })
       await request('POST', `/inventory/managedObjects/9999/${kind}`, { managedObject: { id: child.id } })
@@ -205,6 +207,7 @@ describe('the fake tenant against the OpenAPI spec', { concurrent: false }, () =
     await request('POST', `/event/events/${event.id}/binaries`, 'hello', { 'content-type': 'text/plain' })
     await request('GET', `/event/events/${event.id}/binaries`)
     await request('PUT', `/event/events/${event.id}/binaries`, 'hello again', { 'content-type': 'text/plain' })
+    await request('PUT', `/event/events/${event.id}/binaries`, new Uint8Array(50 * 1024 * 1024 + 1), { 'content-type': 'application/octet-stream' })
     await request('DELETE', `/event/events/${event.id}/binaries`)
     await request('GET', `/event/events/${event.id}/binaries`)
     await request('DELETE', `/event/events/${event.id}`)
@@ -287,6 +290,11 @@ describe('the fake tenant against the OpenAPI spec', { concurrent: false }, () =
     const { json: binary } = await request('POST', '/inventory/binaries', upload)
     await request('GET', '/inventory/binaries?pageSize=1')
     await request('GET', `/inventory/binaries/${binary.id}`)
+    // binary-range (several ranges answer 422 without a message: not checked
+    // here, see the scenario)
+    for (const range of ['bytes=2-4', 'bytes=2-100', 'items=0-1']) {
+      await request('GET', `/inventory/binaries/${binary.id}`, undefined, { accept: '*/*', range })
+    }
     await request('GET', '/inventory/binaries/9999')
     await request('PUT', `/inventory/binaries/${binary.id}`, 'new content', { 'content-type': 'text/plain' })
     await request('DELETE', `/inventory/binaries/${binary.id}`)

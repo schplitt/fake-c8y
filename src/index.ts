@@ -63,6 +63,30 @@ function specAnswer(method: string, path: string): (Response & { status: 404 | 4
   return undefined
 }
 
+/**
+ * The processing mode of a write (`X-Cumulocity-Processing-Mode`, spec
+ * "Processing mode"), for the POST, PUT, and DELETE endpoints of the data
+ * APIs the spec lists the header on (verified: a TRANSIENT delete answers 204
+ * and deletes nothing); `undefined` for persistent writes and everything
+ * else (unverified: the other APIs ignore the header).
+ * @param method - Request method
+ * @param segments - Decoded path segments
+ * @param header - The header's value
+ */
+function processingMode(method: string, segments: readonly string[], header: string | null): 'TRANSIENT' | 'QUIESCENT' | 'CEP' | undefined {
+  const mode = header?.trim().toUpperCase()
+  if ((method !== 'POST' && method !== 'PUT' && method !== 'DELETE') || (mode !== 'TRANSIENT' && mode !== 'QUIESCENT' && mode !== 'CEP')) {
+    return undefined
+  }
+  const [domain, resource, , sub] = segments
+  const listed = (domain === 'inventory' && resource === 'managedObjects')
+    || (domain === 'measurement' && resource === 'measurements')
+    || (domain === 'event' && resource === 'events' && sub !== 'binaries')
+    || (domain === 'alarm' && resource === 'alarms')
+    || (domain === 'devicecontrol' && (resource === 'operations' || resource === 'newDeviceRequests' || resource === 'bulkoperations'))
+  return listed ? mode : undefined
+}
+
 // Verified: the APIs whose path may not start with a double slash, and the
 // prefixes of first segments the platform routes to the core service
 const NO_DOUBLE_SLASH = new Set(['devicecontrol', 'identity', 'tenant', 'user', 'notification2', 'application'])
@@ -775,6 +799,9 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
   let current: C8yRequest | undefined
   // the restricted caller of the request being answered (roles: 'enforce')
   let access: Access | undefined
+  // the request being answered sends no real-time notifications
+  // (X-Cumulocity-Processing-Mode CEP or QUIESCENT)
+  let quiet = false
   const tenants = new Map<string, TenantData>()
   // the world object below, for callbacks and override handlers
 
@@ -815,7 +842,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         // the request being answered wrote it (handlers run synchronously)
         (current.writes ??= []).push({ collection: WRITE_COLLECTIONS[api], id: document.id, action: WRITE_ACTIONS[action] })
       }
-      if (muted === 0) {
+      if (muted === 0 && !quiet) {
         realtime.publish(data.tenant, api, action, document, sourceId, data.notificationSubscriptions.values())
       }
     },
@@ -1207,7 +1234,11 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
    */
   async function answer(request: Request, recorded: (call: C8yRequest) => void, parent: number | undefined): Promise<Response> {
     const url = new URL(request.url)
-    const method = request.method.toUpperCase()
+    // spec ("Limited HTTP clients"), verified: a POST with `X-HTTP-METHOD`
+    // PUT or DELETE (any case) runs as that method (unverified: other values
+    // are ignored)
+    const emulated = request.method.toUpperCase() === 'POST' ? request.headers.get('x-http-method')?.trim().toUpperCase() : undefined
+    const method = emulated === 'PUT' || emulated === 'DELETE' ? emulated : request.method.toUpperCase()
     let segments: string[] | undefined
     try {
       segments = splitPath(url.pathname).map(decodeURIComponent)
@@ -1295,7 +1326,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         },
       }
       // a copy whose body can still be read
-      const copy = new Request(request.url, { method: request.method, headers: request.headers, ...(bytes.length > 0 ? { body: bytes } : {}) })
+      const copy = new Request(request.url, { method, headers: request.headers, ...(bytes.length > 0 ? { body: bytes } : {}) })
       const result = await entry.handler(copy, context)
       return generation === started ? toResponse(result) : staleAnswer()
     }
@@ -1359,7 +1390,31 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         // the raw pathname (an encoded `/` in a path parameter is not a
         // segment), with repeated slashes collapsed like the platform does
         const specPath = url.pathname.replace(/\/{2,}/g, '/')
-        let response = platformApi(call, segments, tenantData(call.tenant))
+        const data = tenantData(call.tenant)
+        const mode = processingMode(method, segments, request.headers.get('x-cumulocity-processing-mode'))
+        // TRANSIENT and CEP: validated and answered (and notified) like a
+        // persistent write, then every write of the request is undone
+        const transient = mode === 'TRANSIENT' || mode === 'CEP'
+        quiet = mode === 'CEP' || mode === 'QUIESCENT'
+        if (transient) {
+          for (const name of TENANT_COLLECTIONS) {
+            data[name].journal()
+          }
+          data.availability.journal()
+        }
+        let response: Response | undefined
+        try {
+          response = platformApi(call, segments, data)
+        } finally {
+          if (transient) {
+            for (const name of TENANT_COLLECTIONS) {
+              data[name].rollback()
+            }
+            data.availability.rollback()
+            delete call.writes
+          }
+          quiet = false
+        }
         if (response && response.status >= 400 && response.status !== 406 && mediaType(method, segments) === undefined) {
           // verified: a path or method the API does not have answers with an
           // empty body, also where a handler reads it as a resource
@@ -1459,7 +1514,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     const url = new URL(request.url)
     // the microservice sees the path below its context path
     const rest = url.pathname.replace(/^\/service\/[^/]+/, '') || '/'
-    const forwarded = new Request(`${url.origin}${rest}${url.search}`, { method: request.method, headers: request.headers, ...(bytes.length > 0 ? { body: bytes } : {}) })
+    const forwarded = new Request(`${url.origin}${rest}${url.search}`, { method: call.method, headers: request.headers, ...(bytes.length > 0 ? { body: bytes } : {}) })
     let result: Response
     try {
       result = await handler(forwarded, serviceContext(service, name, call, started))

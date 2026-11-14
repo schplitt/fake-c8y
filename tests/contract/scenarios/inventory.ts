@@ -711,6 +711,13 @@ export const inventoryConformanceScenarios: ContractScenario[] = [
         statuses[invalid] = (await client.core.fetch(`/inventory/managedObjects?${query({ query: `$filter=(type eq '${type}' and ${invalid})` })}`)).status
       }
       expect(statuses).toEqual(Object.fromEntries(invalids.map((invalid) => [invalid, 422])))
+      // `=` in a path (what a client sends when it wraps the query parameter
+      // twice) and in a function argument
+      for (const invalid of [`query=name eq 'x'`, 'has(a=b)']) {
+        const answer = await client.core.fetch(`/inventory/managedObjects?${query({ query: invalid })}`)
+        expect(answer.status, invalid).toBe(422)
+        expect(await answer.json()).toEqual({ error: 'inventory/Invalid Data', message: `Find by filter query failed : Query '${invalid}' could not be understood. Please try again.`, info: 'https://cumulocity.com/api/core/' })
+      }
     },
   },
   {
