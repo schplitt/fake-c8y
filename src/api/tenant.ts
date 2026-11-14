@@ -52,6 +52,31 @@ function valueNotText(value: unknown): Response | undefined {
 }
 
 /**
+ * 422 for a value the platform rejects in its category (verified for
+ * `POST /tenant/options`, `PUT /tenant/options/{category}/{key}`, and the bulk
+ * `PUT /tenant/options/{category}`; that one stores nothing here when one value
+ * fails, where the platform may store some of the others): an
+ * `alarm.type.mapping` value needs a `|` (split at the last one, after
+ * trimming the whole value) and a non-empty severity or text part.
+ * @param category - Option category
+ * @param value - The value from the body (missing or `null`: not checked)
+ */
+function optionInvalid(category: string, value: unknown): Response | undefined {
+  if (category !== 'alarm.type.mapping' || value === undefined || value === null) {
+    return undefined
+  }
+  const trimmed = String(value).trim()
+  const separator = trimmed.lastIndexOf('|')
+  if (separator === -1) {
+    return apiError(422, 'options/Invalid Data', `Wrong format: '${String(value)}'!`)
+  }
+  if (separator === 0 && trimmed.length === 1) {
+    return apiError(422, 'options/Invalid Data', 'Priority or text must not be empty in alarm mapping!')
+  }
+  return undefined
+}
+
+/**
  * A JSON value as the platform writes it as text: options set in bulk store
  * objects as `{a=1}` and lists as `[1, a]` (verified).
  * @param value - JSON value
@@ -230,6 +255,10 @@ function options(call: C8yRequest, segments: string[], data: TenantData): Respon
       if (notText) {
         return notText
       }
+      const invalid = optionInvalid(String(newCategory), body?.value)
+      if (invalid) {
+        return invalid
+      }
       // verified: an existing option is overwritten
       const stored = setOption(data, String(newCategory), String(newKey), body?.value)
       return Response.json(renderOption(data, String(newCategory), String(newKey), stored === null ? null : encrypted(String(newKey), stored)))
@@ -255,8 +284,15 @@ function options(call: C8yRequest, segments: string[], data: TenantData): Respon
       checkQuery('PUT /tenant/options/{category}', call, [])
       // verified: `null` stores the option without a value; the response
       // echoes the body as sent
-      for (const [name, value] of Object.entries(body ?? {})) {
-        data.options.set(optionKey(category, name), value === null ? null : javaText(value))
+      const entries = Object.entries(body ?? {}).map(([name, value]) => [name, value === null ? null : javaText(value)] as const)
+      for (const [, value] of entries) {
+        const invalid = optionInvalid(category, value)
+        if (invalid) {
+          return invalid
+        }
+      }
+      for (const [name, value] of entries) {
+        data.options.set(optionKey(category, name), value)
       }
       return Response.json(body ?? {})
     }
@@ -289,6 +325,10 @@ function options(call: C8yRequest, segments: string[], data: TenantData): Respon
     const notText = valueNotText(body?.value)
     if (notText) {
       return notText
+    }
+    const invalid = optionInvalid(category, body?.value)
+    if (invalid) {
+      return invalid
     }
     const stored = setOption(data, category, key, body?.value)
     return Response.json(renderOption(data, category, key, stored === null ? null : encrypted(key, stored)))

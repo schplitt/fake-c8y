@@ -4,11 +4,12 @@ import type { C8yRequest } from '../types'
 import type { C8yEndpoint } from '../capabilities.generated'
 import type { DocumentCollection, StoredDocument, TenantData, ChildKind } from '../store'
 import type { SortedList } from '../collection'
-import { CHILD_KINDS, descendants, parentIds } from '../store'
+import { CHILD_KINDS, descendants, optionKey, parentIds } from '../store'
 import { C8Y_ENDPOINTS, C8Y_ENUMS } from '../capabilities.generated'
 import { apiError, byTime, checkQuery, checkRequired, flag, inRange, paged, parsePlatformDate, raw, sourceId } from './http'
 import { ERROR_INFO } from './media'
 import { moSelf } from './inventory'
+import { deviceExternalIds } from './identity'
 import type { RealtimeApi } from '../realtime'
 import { clone, formatIsoTime, invalidTimeMessage, normalizeIsoTime, parseIsoTime } from '../utils'
 import { updateGeneralStatus } from './bulkoperations'
@@ -288,9 +289,12 @@ function beyondYear9999(time: number): boolean {
  * @param resource - The resource
  * @param body - Request body
  * @param now - Creation time (default: the world's clock)
+ * @param request - Answering a request: alarms go through maintenance
+ * suppression and the tenant's `alarm.type.mapping` options (seeding stores
+ * them as given)
  * @returns The stored document, or an error response
  */
-export function createDocument(data: TenantData, resource: Resource, body: Record<string, unknown>, now: string = data.world.now()): StoredDocument | Response {
+export function createDocument(data: TenantData, resource: Resource, body: Record<string, unknown>, now: string = data.world.now(), request: boolean = false): StoredDocument | Response {
   const endpoint = `POST ${resource.path}` as C8yEndpoint
   if (resource.collection !== 'operations') {
     body = textTime(body)
@@ -361,12 +365,6 @@ export function createDocument(data: TenantData, resource: Resource, body: Recor
     // verified: a number
     return apiError(400, 'Failed to parse JSON string', `Cannot deserialize value of type \`java.lang.Long\` from String "${String(body.bulkOperationId)}": not a valid \`java.lang.Long\` value`)
   }
-  // verified: an empty severity is stored as none, and the new alarm answers
-  // 500 (the active alarm counters fail on it); a deduplicated one answers 201
-  const noSeverity = resource.collection === 'alarms' && body.severity === ''
-  if (noSeverity) {
-    body = omitFields(body, ['severity'])
-  }
   if (resource.collection === 'operations') {
     // verified: at least one property besides the device (the description counts)
     if (Object.keys(body).every((key) => key === 'deviceId')) {
@@ -394,6 +392,30 @@ export function createDocument(data: TenantData, resource: Resource, body: Recor
   if (resource.collection === 'operations' && agent === undefined) {
     // verified against the platform
     return apiError(422, 'devicecontrol/Unprocessable Entity', `Agent for device '${String(source)}' does not exist in inventory!`)
+  }
+
+  if (resource.collection === 'alarms' && request) {
+    const admitted = admitAlarm(data, body, String(source))
+    if (admitted === 'maintenance') {
+      return Response.json(maintenanceAlarm(data, body, String(source)), { status: 201 })
+    }
+    if ('none' in admitted) {
+      // verified: answered like a new alarm (the id is used up), mapped like
+      // any other (the option's severity, its text if not empty), but nothing
+      // is stored
+      const alarm: StoredDocument = { ...omitServerFields(admitted.none, resource), id: data.world.newId(), creationTime: now, lastUpdated: now, source: { id: String(source) } }
+      alarm.status ??= 'ACTIVE'
+      alarm.count = 1
+      return Response.json(renderDocument(data, resource, alarm), { status: 201 })
+    }
+    body = admitted.alarm
+  }
+  // verified: an empty severity is stored as none, and the new alarm answers
+  // 500 (the active alarm counters fail on it); a deduplicated one answers
+  // 201. Decided after the type mapping, which may set a severity.
+  const noSeverity = resource.collection === 'alarms' && body.severity === ''
+  if (noSeverity) {
+    body = omitFields(body, ['severity'])
   }
 
   if (resource.collection === 'alarms') {
@@ -466,6 +488,70 @@ export function createDocument(data: TenantData, resource: Resource, body: Recor
     return apiError(500, 'alarm/Internal Server Error', 'Cannot invoke "com.cumulocity.model.event.Severity.name()" because the return value of "java.util.Map$Entry.getKey()" is null')
   }
   return document
+}
+
+/**
+ * A new alarm sent by a request (`POST /alarm/alarms`, or an upsert that
+ * creates one), after validation (verified): `'maintenance'` when its source
+ * is in maintenance (checked first, so no mapping applies), else after the
+ * tenant option `alarm.type.mapping`/`<type>` (`<SEVERITY>|<TEXT>`). The
+ * whole value is trimmed and split at the last `|`, the parts are not trimmed
+ * (verified); a non-empty part replaces the severity or the text; a severity
+ * part equal to `NONE` in any case suppresses the alarm (`none`: the mapped
+ * alarm, severity as the option gives it, text replaced like any mapping). `NONE ` with a trailing space does not suppress
+ * (verified: stored with that severity). The option API rejects values without a
+ * `|`, so only a seeded one can lack it, and it is ignored.
+ * @param data - Tenant data
+ * @param body - The alarm as sent (validated)
+ * @param source - Source id
+ */
+function admitAlarm(data: TenantData, body: Record<string, unknown>, source: string): 'maintenance' | { none: Record<string, unknown> } | { alarm: Record<string, unknown> } {
+  if (inMaintenance(data.managedObjects.get(source))) {
+    return 'maintenance'
+  }
+  const mapping = data.options.get(optionKey('alarm.type.mapping', String(body.type)))
+  const value = typeof mapping === 'string' ? mapping.trim() : ''
+  const separator = value.lastIndexOf('|')
+  if (separator === -1) {
+    return { alarm: body }
+  }
+  const severity = value.slice(0, separator)
+  const text = value.slice(separator + 1)
+  const alarm = { ...body, ...(severity ? { severity } : {}), ...(text ? { text } : {}) }
+  return severity.toUpperCase() === 'NONE' ? { none: alarm } : { alarm }
+}
+
+/**
+ * Whether a managed object is in maintenance: `c8y_RequiredAvailability`
+ * with a `responseInterval` of 0 or less.
+ * @param document - The managed object
+ */
+function inMaintenance(document: Readonly<StoredDocument> | undefined): boolean {
+  const interval = (document?.c8y_RequiredAvailability as { responseInterval?: unknown } | undefined)?.responseInterval
+  return typeof interval === 'number' && interval <= 0
+}
+
+/**
+ * The answer to `POST /alarm/alarms` for a source in maintenance (verified):
+ * nothing is stored, and the alarm comes back with a `self` ending in
+ * `/null`, type, text, severity, count 1, the source without a name, the
+ * time, and the custom fragments; no id, status, creation time, or last
+ * update.
+ * @param data - Tenant data
+ * @param body - The alarm as sent (validated)
+ * @param source - Source id
+ */
+function maintenanceAlarm(data: TenantData, body: Record<string, unknown>, source: string): Record<string, unknown> {
+  return {
+    self: `${data.world.baseUrl}${RESOURCES.alarm.path}/null`,
+    type: body.type,
+    text: body.text,
+    severity: body.severity,
+    count: 1,
+    source: { self: moSelf(data, source), id: source },
+    time: body.time,
+    ...omitFields(omitServerFields(body, RESOURCES.alarm), ['type', 'text', 'severity', 'status', 'source', 'time']),
+  }
 }
 
 const ALARM_STATUS_KEYS = ['critical', 'major', 'minor', 'warning']
@@ -887,7 +973,7 @@ function list(request: C8yRequest, data: TenantData, resource: Resource, endpoin
     // bulk update, and delete by filter match nothing for one
     const severities = values('severity')!.map(upper)
     const single = endpoint === 'GET /alarm/alarms' || severities.length === 1
-    items = single ? items.filter((document) => severities.includes(upper(document.severity))) : []
+    keep(single ? (document) => severities.includes(upper(document.severity)) : () => false)
   }
   if (query.resolved !== undefined) {
     const resolved = notFalse(call, 'resolved')
@@ -1139,6 +1225,13 @@ export function documents(call: C8yRequest, segments: string[], data: TenantData
           return new Response(null, { status: 204 })
         }
       }
+      // spec: at least one of these is required (status and message as for
+      // alarms, unverified for these endpoints); an empty value counts as
+      // missing, like for alarms
+      const required = resource.collection === 'events' ? ['source', 'createdFrom', 'createdTo', 'dateFrom', 'dateTo'] : ['source', 'dateFrom', 'dateTo']
+      if (required.every((name) => !call.query[name])) {
+        return apiError(422, `${resource.domain}/Unprocessable Entity`, `At least one parameter from [${required.join(', ')}] has to be provided`)
+      }
       let target = call
       const { dateFrom, dateTo } = call.query
       if (resource.collection === 'measurements' && dateFrom !== undefined && dateTo !== undefined && parsePlatformDate(dateFrom) === parsePlatformDate(dateTo)) {
@@ -1197,7 +1290,11 @@ export function documents(call: C8yRequest, segments: string[], data: TenantData
         }
         return paged(data, call, resource.collection, visible(items, listedBy(data, resource)), resource.path, { render: (document) => renderDocument(data, resource, document) })
       }
-      return paged(data, call, resource.collection, visible(list(call, data, resource, `GET ${resource.path}` as C8yEndpoint), listedBy(data, resource)), resource.path, { render: (document) => renderDocument(data, resource, document) })
+      // spec: operations listed by agentId carry their device's external ids
+      const render = resource.collection === 'operations' && call.query.agentId
+        ? (document: StoredDocument) => ({ ...renderDocument(data, resource, document), deviceExternalIDs: deviceExternalIds(data, String(document.deviceId)) })
+        : (document: StoredDocument) => renderDocument(data, resource, document)
+      return paged(data, call, resource.collection, visible(list(call, data, resource, `GET ${resource.path}` as C8yEndpoint), listedBy(data, resource)), resource.path, { render })
     }
     if (method === 'POST') {
       checkQuery(`POST ${resource.path}` as C8yEndpoint, call, [])
@@ -1208,7 +1305,7 @@ export function documents(call: C8yRequest, segments: string[], data: TenantData
       if (resource.collection === 'measurements' && /measurementcollection\+json/i.test(call.headers['content-type'] ?? '')) {
         return postMeasurementCollection(data, body)
       }
-      const result = createDocument(data, resource, body)
+      const result = createDocument(data, resource, body, data.world.now(), true)
       return result instanceof Response ? result : Response.json(renderDocument(data, resource, result), { status: 201 })
     }
     if (method === 'PUT' && resource.collection === 'alarms') {
@@ -1216,6 +1313,17 @@ export function documents(call: C8yRequest, segments: string[], data: TenantData
       const dateError = checkDates(call, 'PUT /alarm/alarms')
       if (dateError) {
         return dateError
+      }
+      // verified: withSource* needs a source (checked first), then one of
+      // the filters the platform knows must be set (an empty value is
+      // missing; `resolved` is unverified). createdFrom and createdTo filter
+      // but do not count; type, fragmentType, and lastUpdatedFrom are
+      // ignored (list() reads only the endpoint's documented parameters)
+      if (!call.query.source && SOURCE_KINDS.some(([name]) => flag(call, name))) {
+        return apiError(422, 'alarm/Invalid Data', 'Cannot fetch children alarms if parameter \'source\' is not specified!')
+      }
+      if (!['source', 'status', 'severity', 'dateFrom', 'dateTo', 'resolved'].some((name) => call.query[name])) {
+        return invalid('Bulk alarm update works only with filter. None known filter is set')
       }
       // verified: the status is mandatory and the only field applied (an
       // unknown source is a no-op, even with withSource*)
@@ -1612,25 +1720,28 @@ function upsertAlarm(call: C8yRequest, data: TenantData): Response {
   const fragments = omitFields(body, ['source', 'type', 'text', 'severity', 'status', 'time', 'self'])
   const existing = openAlarm(data, source, type)
   if (!existing) {
-    const alarm: StoredDocument = {
-      ...fragments,
-      type,
-      text: body.text ?? '',
-      // verified: an empty severity is the default too
-      severity: body.severity === undefined || body.severity === null || body.severity === '' ? 'MAJOR' : body.severity,
-      status: body.status ?? 'ACTIVE',
-      time: time ?? now,
-      id: data.world.newId(),
-      creationTime: now,
-      lastUpdated: now,
-      count: 1,
-      source: { id: source },
+    // verified: a new alarm goes through maintenance and the type mapping
+    // like POST /alarm/alarms; a suppressed one answers 200 with an alarm of
+    // only `self` (ending in `/null`) and `count`, and stores nothing
+    const sent = { ...fragments, type, text: body.text, severity: body.severity, status: body.status ?? 'ACTIVE', time: time ?? now }
+    const admitted = admitAlarm(data, sent, source)
+    if (admitted === 'maintenance' || 'none' in admitted) {
+      const self = `${data.world.baseUrl}${RESOURCES.alarm.path}/null`
+      return Response.json({ alarm: { self, count: 1 }, previousState: null }, { headers: { location: self } })
     }
-    data.alarms.set(alarm.id, alarm)
+    const fields = admitted.alarm
+    const alarm = {
+      ...fields,
+      text: fields.text ?? '',
+      // verified: an empty severity is the default too
+      severity: fields.severity === undefined || fields.severity === null || fields.severity === '' ? 'MAJOR' : fields.severity,
+    }
+    const created: StoredDocument = { ...alarm, id: data.world.newId(), creationTime: now, lastUpdated: now, count: 1, source: { id: source } }
+    data.alarms.set(created.id, created)
     refreshActiveAlarms(data, source)
-    auditAlarmCreated(data, alarm)
-    publish(data, RESOURCES.alarm, 'CREATE', alarm)
-    return Response.json({ alarm: renderDocument(data, RESOURCES.alarm, alarm), previousState: null }, { status: 201 })
+    auditAlarmCreated(data, created)
+    publish(data, RESOURCES.alarm, 'CREATE', created)
+    return Response.json({ alarm: renderDocument(data, RESOURCES.alarm, created), previousState: null }, { status: 201 })
   }
   const updated = clone(existing) as StoredDocument
   for (const field of ['text', 'severity', 'status']) {
@@ -1655,5 +1766,7 @@ function upsertAlarm(call: C8yRequest, data: TenantData): Response {
   refreshActiveAlarms(data, source)
   auditAlarmUpdated(data, existing as StoredDocument, updated, true)
   publish(data, RESOURCES.alarm, 'UPDATE', updated)
-  return Response.json({ alarm: renderDocument(data, RESOURCES.alarm, updated), previousState: renderDocument(data, RESOURCES.alarm, existing as StoredDocument) })
+  const rendered = renderDocument(data, RESOURCES.alarm, updated)
+  // verified: the update names the alarm in a Location header
+  return Response.json({ alarm: rendered, previousState: renderDocument(data, RESOURCES.alarm, existing as StoredDocument) }, { headers: { location: String(rendered.self) } })
 }

@@ -14,6 +14,16 @@ function renderExternalId(data: TenantData, entry: ExternalId) {
 }
 
 /**
+ * The external ids of a managed object as `GET /identity/globalIds/{id}/externalIds`
+ * answers them (also `deviceExternalIDs` of operations listed by `agentId`).
+ * @param data - Tenant data
+ * @param id - Managed object id
+ */
+export function deviceExternalIds(data: TenantData, id: string): { self: string, externalIds: Array<Record<string, unknown>> } {
+  return { self: `${data.world.baseUrl}/identity/globalIds/${id}/externalIds`, externalIds: externalIdsByObject(data)(id).map((entry) => renderExternalId(data, entry)) }
+}
+
+/**
  * Adds an external id. Fails like the platform on unknown objects or duplicates.
  * @param data - Tenant data
  * @param managedObjectId - Managed object id
@@ -96,8 +106,7 @@ export function identity(call: C8yRequest, segments: string[], data: TenantData)
     if (method === 'GET') {
       checkQuery('GET /identity/globalIds/{id}/externalIds', call, [])
       // verified: no paging, and unknown objects have no external ids (200)
-      const externalIds = externalIdsByObject(data)(a).map((entry) => renderExternalId(data, entry))
-      return Response.json({ self: `${data.world.baseUrl}/identity/globalIds/${a}/externalIds`, externalIds })
+      return Response.json(deviceExternalIds(data, a))
     }
     if (method === 'POST') {
       checkQuery('POST /identity/globalIds/{id}/externalIds', call, [])

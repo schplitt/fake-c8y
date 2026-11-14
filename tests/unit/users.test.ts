@@ -223,6 +223,13 @@ describe('user management', () => {
     expect((await world.fetch(new Request(`${world.baseUrl}/user/t999/nope`))).status).toBe(404)
     expect(world.unhandled).toEqual([])
   })
+
+  it('rejects a user name over 1,000 characters', async () => {
+    const world = createWorld()
+    const create = (userName: string) => send(world, 'POST', `/user/${world.tenant}/users`, { userName, email: `${userName.length}@example.com`, password: 'Secret-pass-123!' })
+    expect((await create('u'.repeat(1001))).status).toBe(422)
+    expect((await create('u'.repeat(1000))).status).toBe(201)
+  })
 })
 
 describe('switching the current user', () => {

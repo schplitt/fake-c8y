@@ -55,6 +55,24 @@ const short = (unique: string) => unique.replace(/\W/g, '').slice(-12).toLowerCa
 
 export const applicationScenarios: ContractScenario[] = [
   {
+    name: 'applications: availability outside the enum',
+    verifies: ['application-availability-values'],
+    async run({ client, unique }) {
+      const u = `fk${short(unique)}`
+      await withApplications(client, async (create) => {
+        const invalid = { status: 422, body: { error: 'undefined/validationError', message: 'availability must match "PRIVATE|MARKET|SHARED"' } }
+        expect(await create({ name: `${u}-a`, key: `${u}-a-key`, type: 'HOSTED', contextPath: `${u}-a`, availability: 'PUBLIC' })).toMatchObject(invalid)
+        expect(await create({ name: `${u}-b`, key: `${u}-b-key`, type: 'HOSTED', contextPath: `${u}-b`, availability: 'bogus' })).toMatchObject(invalid)
+        const market = await create({ name: `${u}-m`, key: `${u}-m-key`, type: 'HOSTED', contextPath: `${u}-m`, availability: 'MARKET' })
+        expect(market).toMatchObject({ status: 201, body: { availability: 'MARKET' } })
+        const shared = await create({ name: `${u}-s`, key: `${u}-s-key`, type: 'HOSTED', contextPath: `${u}-s`, availability: 'SHARED' })
+        expect(shared).toMatchObject({ status: 201, body: { availability: 'SHARED' } })
+        expect(await api(client, 'PUT', `/application/applications/${market.body.id}`, { availability: 'PUBLIC' })).toMatchObject(invalid)
+        expect((await api(client, 'GET', `/application/applications/${market.body.id}`)).body.availability).toBe('MARKET')
+      })
+    },
+  },
+  {
     name: 'applications: list order and filters',
     verifies: ['applications-list-order', 'applications-list-filters'],
     async run({ client, tenant, unique }) {

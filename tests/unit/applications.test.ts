@@ -45,6 +45,19 @@ const manifest = {
 }
 
 describe('default applications', () => {
+  it('takes only the availability values of the spec and @c8y/client (MARKET, PRIVATE, SHARED)', async () => {
+    const world = createWorld()
+    const created = await send(world, 'POST', '/application/applications', { name: 'x', key: 'x-key', type: 'HOSTED', contextPath: 'x', availability: 'PUBLIC' })
+    expect(created).toMatchObject({ status: 422, body: { error: 'undefined/validationError' } })
+    const market = await send(world, 'POST', '/application/applications', { name: 'x', key: 'x-key', type: 'HOSTED', contextPath: 'x', availability: 'MARKET' })
+    expect(market).toMatchObject({ status: 201, body: { availability: 'MARKET' } })
+    expect((await send(world, 'PUT', `/application/applications/${market.body.id}`, { availability: 'PUBLIC' })).status).toBe(422)
+    expect((await send(world, 'PUT', `/application/applications/${market.body.id}`, { availability: 'PRIVATE' })).body.availability).toBe('PRIVATE')
+    expect((await send(world, 'PUT', `/application/applications/${market.body.id}`, { availability: 'SHARED' })).body.availability).toBe('SHARED')
+    const shared = await send(world, 'POST', '/application/applications', { name: 's', key: 's-key', type: 'HOSTED', contextPath: 's', availability: 'SHARED' })
+    expect(shared).toMatchObject({ status: 201, body: { availability: 'SHARED' } })
+  })
+
   it('lists the platform applications a standard tenant is subscribed to', async () => {
     const world = createWorld()
     const list = await send(world, 'GET', '/application/applications?pageSize=100')

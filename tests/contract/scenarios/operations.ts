@@ -327,4 +327,30 @@ export const operationsScenarios: ContractScenario[] = [
       expect(partial.statistics).toEqual({ currentPage: 1, pageSize: 3, totalElements: 4 })
     },
   },
+  {
+    name: 'operations: listed by agentId they carry the device\'s external ids',
+    verifies: ['operation-device-external-ids'],
+    async run({ client, unique }) {
+      const { data: agent } = await client.inventory.create({ name: `r1108data-oe-${unique}`, c8y_IsDevice: {}, com_cumulocity_model_Agent: {} } as any)
+      const serial = `oe-${unique}`
+      expect((await api(client, 'POST', `/identity/globalIds/${agent.id}/externalIds`, { type: 'c8y_Serial', externalId: serial })).status).toBe(201)
+      expect((await api(client, 'POST', '/devicecontrol/operations', { deviceId: agent.id, c8y_X: {} })).status).toBe(201)
+      // spec: "The embedded operation object contains deviceExternalIDs only when queried with an agentId parameter"
+      const [byAgent] = (await api(client, 'GET', `/devicecontrol/operations?agentId=${agent.id}`)).body.operations
+      expect(byAgent.deviceExternalIDs).toEqual({
+        self: expect.stringMatching(new RegExp(`/identity/globalIds/${agent.id}/externalIds$`)),
+        externalIds: [{ self: expect.stringMatching(new RegExp(`/identity/externalIds/c8y_Serial/${serial}$`)), externalId: serial, type: 'c8y_Serial', managedObject: { self: expect.stringMatching(new RegExp(`/inventory/managedObjects/${agent.id}$`)), id: agent.id } }],
+      })
+      const [byDevice] = (await api(client, 'GET', `/devicecontrol/operations?deviceId=${agent.id}`)).body.operations
+      expect(byDevice.deviceExternalIDs).toBeUndefined()
+      const [operation] = (await api(client, 'GET', `/devicecontrol/operations?agentId=${agent.id}`)).body.operations
+      expect((await api(client, 'GET', `/devicecontrol/operations/${operation.id}`)).body.deviceExternalIDs).toBeUndefined()
+
+      // a device without external ids: an empty list
+      const { data: bare } = await client.inventory.create({ name: `r1108data-oe2-${unique}`, c8y_IsDevice: {}, com_cumulocity_model_Agent: {} } as any)
+      expect((await api(client, 'POST', '/devicecontrol/operations', { deviceId: bare.id, c8y_X: {} })).status).toBe(201)
+      const [plain] = (await api(client, 'GET', `/devicecontrol/operations?agentId=${bare.id}`)).body.operations
+      expect(plain.deviceExternalIDs).toEqual({ self: expect.stringMatching(new RegExp(`/identity/globalIds/${bare.id}/externalIds$`)), externalIds: [] })
+    },
+  },
 ]

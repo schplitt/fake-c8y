@@ -333,6 +333,10 @@ function checkUserName(userName: unknown): string {
   if (/[\s/\\+$:]/.test(name)) {
     fail(422, 'undefined/validationError', 'userName field cannot contain whitespace, slashes nor any of (+$:) characters.')
   }
+  if (name.length > 1000) {
+    // verified
+    fail(422, 'undefined/validationError', 'userName size must be between 0 and 1000')
+  }
   return name
 }
 

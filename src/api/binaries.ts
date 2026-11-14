@@ -3,6 +3,7 @@ import type { C8yRequest } from '../types'
 import type { BinaryContent, StoredDocument, TenantData } from '../store'
 import { deleteManagedObject } from '../store'
 import { apiError, checkQuery, paged, raw } from './http'
+import { ERROR_INFO } from './media'
 import { createManagedObject, renderManagedObject } from './inventory'
 import { clone, parseMultipart } from '../utils'
 
@@ -57,15 +58,134 @@ function resourceNotFound(id: string): Response {
   return apiError(404, 'inventory/Not Found', `Resource ID [type=com_cumulocity_model_idtype_GId, value=${id}] for this request not found.`)
 }
 
-function download(content: BinaryContent): Response {
-  return new Response(content.bytes.slice(), {
-    headers: {
-      'content-type': content.contentType,
-      'content-length': String(content.bytes.length),
-      'content-disposition': `attachment; filename="${content.name}"`,
-    },
+// RFC 5987 attr-char: what `filename*=` keeps unencoded (verified for
+// letters, digits, `.`, `-`, and `_`; the other marks unverified)
+const ATTR_CHAR = /[\w!#$&+.^`|~-]/
+
+/**
+ * The `Content-Disposition` of a download (verified):
+ * `attachment; filename="<name>"; filename*=UTF-8''<name>`, for every name.
+ * The plain part keeps Latin-1 characters as they are (also `"` and `\`, not
+ * escaped) and turns the others into a space (also control characters, which
+ * cannot be in a header: unverified); `filename*` percent-encodes the UTF-8
+ * bytes with lower-case hex digits (`\` is `%5c`, `€` `%e2%82%ac`).
+ * @param name - The stored file name
+ */
+function contentDisposition(name: string): string {
+  const plain = name.replace(/[^ -~\u0080-ÿ]/gu, ' ')
+  // lone surrogates cannot be encoded
+  const wellFormed = name.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '�')
+  let encoded = ''
+  for (const char of wellFormed) {
+    encoded += ATTR_CHAR.test(char) ? char : [...new TextEncoder().encode(char)].map((byte) => `%${byte.toString(16).padStart(2, '0')}`).join('')
+  }
+  return `attachment; filename="${plain}"; filename*=UTF-8''${encoded}`
+}
+
+/**
+ * A file download (verified): the content with the `Content-Disposition` of
+ * `contentDisposition()`. Inventory binaries also answer `Accept-Ranges:
+ * bytes` and serve a `Range`; event attachments do neither (a `Range` is
+ * ignored).
+ * @param content - The file
+ * @param ranges - Inventory binaries: the request's `Range` header
+ * @param ranges.range - The header, if sent
+ */
+function download(content: BinaryContent, ranges?: { range: string | undefined }): Response {
+  const length = content.bytes.length
+  const headers = {
+    'content-type': content.contentType,
+    'content-length': String(length),
+    'content-disposition': contentDisposition(content.name),
+    ...(ranges ? { 'accept-ranges': 'bytes' } : {}),
+  }
+  const range = ranges?.range
+  if (range === undefined) {
+    return new Response(content.bytes.slice(), { headers })
+  }
+  // verified: one range of bytes; `start-` and `-suffix` count from the end
+  // of the file, a start at or past the end answers an empty 206 (`bytes
+  // 6-5/6`), an end before the start serves from the start to the end of the
+  // file and keeps the given end in Content-Range (`bytes 4-2/6`), an end past
+  // the file answers 416
+  if (!range.startsWith('bytes=')) {
+    return apiError(400, 'general/internalError', `HTTP 400 Bad Request : Range '${range}' does not start with 'bytes='`)
+  }
+  if (range.includes(',')) {
+    // verified: no message
+    return Response.json({ error: 'Only one Range is supported by the resource/Invalid Data', info: ERROR_INFO }, { status: 422 })
+  }
+  const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim())
+  if (!match || (match[1] === '' && match[2] === '')) {
+    // unverified: a range that does not parse is ignored
+    return new Response(content.bytes.slice(), { headers })
+  }
+  // unverified: a suffix longer than the file starts at its first byte
+  const start = match[1] === '' ? Math.max(0, length - Number(match[2])) : Number(match[1])
+  const end = match[1] === '' || match[2] === '' ? length - 1 : Number(match[2])
+  if (end > length) {
+    return apiError(416, 'inventory/Requested Range Not Satisfiable', 'Range parameter "end" is bigger than actual file length')
+  }
+  const bytes = end < start - 1 ? content.bytes.slice(start) : content.bytes.slice(start, end + 1)
+  return new Response(bytes, {
+    status: 206,
+    headers: { ...headers, 'content-length': String(bytes.length), 'content-range': `bytes ${start}-${end}/${length}` },
   })
 }
+
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F]/g
+
+/**
+ * Decodes a percent-encoded `filename*` value in its charset (verified:
+ * UTF-8 and ISO-8859-1; unverified: other charsets read as UTF-8), or
+ * `undefined` when it does not decode.
+ * @param charset - The charset the value names
+ * @param value - The percent-encoded value
+ */
+function decodeExtended(charset: string, value: string): string | undefined {
+  const bytes: number[] = []
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] === '%' && /^[\da-f]{2}$/i.test(value.slice(i + 1, i + 3))) {
+      bytes.push(Number.parseInt(value.slice(i + 1, i + 3), 16))
+      i += 2
+    } else {
+      bytes.push(...new TextEncoder().encode(value[i]!))
+    }
+  }
+  if (/^(?:iso-8859-1|latin1)$/i.test(charset)) {
+    return String.fromCharCode(...bytes)
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(bytes))
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The file name of a `Content-Disposition` header, or `undefined` (verified):
+ * `filename*=<charset>''<encoded>` wins over `filename=`; a quoted `filename`
+ * ends at the next `"` (a backslash escapes nothing: `"a\"b.txt"` is `a\`).
+ * @param header - The header value
+ */
+function dispositionFileName(header: string | undefined): string | undefined {
+  if (!header) {
+    return undefined
+  }
+  const extended = /filename\*\s*=\s*([\w-]+)'[^']*'([^;]+)/i.exec(header)
+  const extendedName = extended ? decodeExtended(extended[1]!, extended[2]!.trim()) : undefined
+  const plain = /filename\s*=\s*(?:"([^"]*)"|([^;]+))/i.exec(header)
+  // control characters are dropped (also a decoded CR or LF)
+  const name = (extendedName || plain?.[1] || plain?.[2]?.trim())?.replace(CONTROL_CHARACTERS, '')
+  return name || undefined
+}
+
+/**
+ * The limit of an event attachment's file (verified: 50 MiB is accepted, more
+ * answers 422; the spec: "configurable, and the default size is 50 MiB").
+ */
+const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 
 /**
  * Creates an inventory binary (a managed object with `c8y_IsBinary`).
@@ -205,7 +325,7 @@ export function inventoryBinaries(call: C8yRequest, segments: string[], data: Te
     }
     // verified: the content type is the object's type when it is a media type
     const type = typeof document.type === 'string' && /^[\w.+-]+\/[\w.+-]+/.test(document.type) ? document.type : 'application/octet-stream'
-    return download({ ...content, contentType: type })
+    return download({ ...content, contentType: type }, { range: call.headers.range })
   }
   if (method === 'PUT') {
     checkQuery('PUT /inventory/binaries/{id}', call, [])
@@ -295,11 +415,19 @@ export function eventBinaries(call: C8yRequest, eventId: string, data: TenantDat
     if (upload instanceof Response) {
       return upload
     }
+    if (upload.content.bytes.length > MAX_ATTACHMENT_BYTES) {
+      // verified for a raw body; a multipart body counts its file part
+      return apiError(422, 'event/Invalid Data', 'File size too big. Max size is 50MB')
+    }
     const multipart = contentType.startsWith('multipart/')
+    // spec (PUT): with application/octet-stream "parameters should be
+    // specified in the Content-Disposition header" (verified for
+    // application/octet-stream; unverified: any raw PUT body)
+    const disposition = method === 'PUT' && !multipart ? dispositionFileName(call.headers['content-disposition']) : undefined
     const content = {
       ...upload.content,
       contentType: contentType ? upload.content.contentType : 'text/plain;charset=UTF-8',
-      name: multipart ? upload.content.name : eventId,
+      name: multipart ? upload.content.name : disposition ?? eventId,
     }
     data.eventBinaries.set(eventId, content)
     // verified: the event describes its attachment in c8y_IsBinary

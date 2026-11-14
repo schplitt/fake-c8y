@@ -685,4 +685,31 @@ export const measurementsConformanceScenarios: ContractScenario[] = [
       expect(minMax[time(0)]).toEqual({ T: { min: 21.5, max: 21.5 }, H: null })
     },
   },
+  {
+    name: 'measurements: delete by filter needs a source or a date; fragment and series names may hold dots, whitespace, and special characters',
+    verifies: ['data-delete-needs-filter', 'measurement-names-any'],
+    async run({ client, unique, settle }) {
+      const { data: device } = await client.inventory.create({ name: `mdr-${unique}`, c8y_IsDevice: {} })
+      const type = `mdr-${unique}`
+      const now = new Date().toISOString()
+      expect((await call(client, 'POST', '/measurement/measurements', { source: { id: device.id }, type, time: now, c8y_T: { T: { value: 1 } } })).status).toBe(201)
+      // spec: "DELETE requires at least one of the following parameters" (type keeps it to this measurement)
+      const fragment = `mdr_${unique.replace(/\W/g, '_')}`
+      for (const query of [`type=${type}`, `fragmentType=${fragment}`]) {
+        expect(await call(client, 'DELETE', `/measurement/measurements?${query}`), query).toMatchObject({ status: 422, json: { error: 'measurement/Unprocessable Entity', message: 'At least one parameter from [source, dateFrom, dateTo] has to be provided' } })
+      }
+      await settle(1000)
+      expect((await call(client, 'GET', `/measurement/measurements?source=${device.id}`)).json.measurements).toHaveLength(1)
+
+      // the spec says fragment and series names must not contain whitespace
+      // nor . , * [ ] ( ) @ $, but the platform stores them
+      const names = [{ 'c8y.T': { T: { value: 1 } } }, { c8y_T: { 'a b': { value: 1 } } }, { c8y_T: { 'T,*': { value: 1 } } }, { c8y_T: { '(T)@$': { value: 1 } } }, { c8y_T: { '[T]': { value: 1 } } }]
+      for (const fragments of names) {
+        expect((await call(client, 'POST', '/measurement/measurements', { source: { id: device.id }, type, time: now, ...fragments })).status, JSON.stringify(fragments)).toBe(201)
+      }
+      await eventually(async () => {
+        expect((await call(client, 'GET', `/measurement/measurements?source=${device.id}&pageSize=100`)).json.measurements).toHaveLength(1 + names.length)
+      })
+    },
+  },
 ]

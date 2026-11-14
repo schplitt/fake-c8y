@@ -579,4 +579,24 @@ export const eventsScenarios: ContractScenario[] = [
       expect(gone.json.message).toBe(`Finding device data from database failed : No event for gid '${second.id}'!`)
     },
   },
+  {
+    name: 'events: delete by filter needs a source, a date, or a creation date',
+    verifies: ['data-delete-needs-filter'],
+    async run({ client, unique, settle }) {
+      const { data: device } = await client.inventory.create({ name: `edr-${unique}`, c8y_IsDevice: {} })
+      const type = `edr-${unique}`
+      const fragment = `edr_${unique.replace(/\W/g, '_')}`
+      expect((await call(client, 'POST', '/event/events', { source: { id: device.id }, type, text: 'x', time: new Date().toISOString(), [fragment]: {} })).status).toBe(201)
+      // spec: "DELETE requires at least one of the following parameters" (type and fragmentType keep it to this event)
+      for (const query of [`type=${type}`, `fragmentType=${fragment}`]) {
+        expect(await call(client, 'DELETE', `/event/events?${query}`), query).toMatchObject({ status: 422, json: { error: 'event/Unprocessable Entity', message: 'At least one parameter from [source, createdFrom, createdTo, dateFrom, dateTo] has to be provided' } })
+      }
+      await settle(1000)
+      expect((await call(client, 'GET', `/event/events?source=${device.id}`)).json.events).toHaveLength(1)
+      expect((await call(client, 'DELETE', `/event/events?source=${device.id}&type=${type}`)).status).toBe(204)
+      await eventually(async () => {
+        expect((await call(client, 'GET', `/event/events?source=${device.id}`)).json.events).toEqual([])
+      })
+    },
+  },
 ]

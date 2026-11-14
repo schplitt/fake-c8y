@@ -30,7 +30,7 @@ type WildcardPattern = ReturnType<typeof boundedRegExp>
  *
  * Function arguments are not validated: a non-numeric group id matches nothing
  * and a quoted fragment name works like an unquoted one. Anything else (`ne`,
- * upper-case operators, paths with `/` or `[`) is rejected with 422 like on the
+ * upper-case operators, paths with `/`, `[`, or `=`) is rejected with 422 like on the
  * platform.
  */
 export interface ParsedQuery {
@@ -47,9 +47,11 @@ type Literal = string | number | boolean | null
 interface Token { kind: 'word' | 'string' | 'punct', value: string }
 
 const COMPARISONS = new Set(['eq', 'gt', 'ge', 'lt', 'le'])
-// A property path or fragment name. The platform rejects `groups/id` and
-// `externalIds["x"].id` (verified); other characters are left alone.
-const PATH = /^[^/[\]]+$/
+// A property path, fragment name, or unquoted function argument. The platform
+// rejects `groups/id`, `externalIds["x"].id`, `query=name eq 'x'` (a query
+// parameter wrapped twice), and `has(a=b)` (verified); other characters are
+// left alone.
+const PATH = /^[^/[\]=]+$/
 /**
  * Standard managed object properties, for which `has()` is "not supported"
  * (verified against the platform: the query matches nothing).

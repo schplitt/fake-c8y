@@ -10,7 +10,7 @@ async function api(client: Client, method: string, path: string, body?: unknown,
   try {
     parsed = text ? JSON.parse(text) : undefined
   } catch {}
-  return { status: res.status, body: parsed }
+  return { status: res.status, body: parsed, location: res.headers.get('location') }
 }
 
 const DAY = 86_400_000
@@ -627,6 +627,160 @@ export const alarmsConformanceScenarios: ContractScenario[] = [
         expect(await count({ dateTo: '2026-01-01T10:00' }), path).toBe(422)
         expect(await count({ dateFrom: 'yesterday' }), path).toBe(422)
         expect(await count({ createdFrom: '2026-01-01T10:00Z' }), path).toBe(422)
+      }
+    },
+  },
+  {
+    name: 'alarms: severity as the only filter applies to the list, the count, and the bulk update; the bulk update needs a known filter',
+    verifies: ['bulk-alarm-known-filters'],
+    async run({ client, unique }) {
+      const { data: device } = await client.inventory.create({ name: `sv-${unique}`, c8y_IsDevice: {} })
+      const now = new Date().toISOString()
+      // a random millisecond in 2001 no other alarm of the tenant has: dateFrom
+      // and dateTo (honored by the list, the count, and the bulk update) run
+      // after the severity filter and keep every request to this scenario's alarms
+      const millisecond = Date.parse('2001-01-01T00:00:00.000Z') + Math.floor(Math.random() * 364 * 24 * 3600 * 1000)
+      const time = new Date(millisecond).toISOString()
+      const major = await api(client, 'POST', '/alarm/alarms', { source: { id: device.id }, type: `sv-major-${unique}`, text: 'major', severity: 'MAJOR', time })
+      const minor = await api(client, 'POST', '/alarm/alarms', { source: { id: device.id }, type: `sv-minor-${unique}`, text: 'minor', severity: 'MINOR', time })
+      expect([major.status, minor.status]).toEqual([201, 201])
+      const window = `dateFrom=${encodeURIComponent(new Date(millisecond - 1).toISOString())}&dateTo=${encodeURIComponent(new Date(millisecond + 1).toISOString())}`
+      // the creation range alone is no known filter for the bulk update
+      const createdTo = new Date(Date.parse(String(minor.body.creationTime)) + 1).toISOString()
+      const range = `createdFrom=${encodeURIComponent(String(device.creationTime))}&createdTo=${encodeURIComponent(createdTo)}`
+
+      const ids = async (query: string) => (await api(client, 'GET', `/alarm/alarms?pageSize=100&${window}&${query}`)).body.alarms.map((alarm: { id: string }) => alarm.id)
+      expect(await ids('severity=MAJOR')).toEqual([major.body.id])
+      expect(await ids('severity=MINOR')).toEqual([minor.body.id])
+      expect((await api(client, 'GET', `/alarm/alarms/count?${window}&severity=MAJOR`)).body).toBe(1)
+      // the count ignores what its spec does not list (the list honors createdFrom)
+      const future = encodeURIComponent('2100-01-01T00:00:00.000Z')
+      expect(await ids(`severity=MAJOR&createdFrom=${future}`)).toEqual([])
+      for (const extra of [`createdFrom=${future}`, `createdTo=${encodeURIComponent('2000-01-01T00:00:00.000Z')}`, 'fragmentType=c8y_Nothing', `lastUpdatedFrom=${future}`]) {
+        expect((await api(client, 'GET', `/alarm/alarms/count?${window}&severity=MAJOR&${extra}`)).body, extra).toBe(1)
+      }
+
+      // without source, status, severity, dateFrom, or dateTo the update is
+      // rejected: the creation range, type, fragmentType, lastUpdatedFrom,
+      // and unknown parameters do not count
+      for (const query of [range, `${range}&type=sv-minor-${unique}`, `${range}&fragmentType=c8y_X`, `${range}&lastUpdatedFrom=${encodeURIComponent(now)}`, `${range}&foo=1`]) {
+        expect(await api(client, 'PUT', `/alarm/alarms?${query}`, { status: 'ACKNOWLEDGED' }), query).toMatchObject({ status: 422, body: { error: 'undefined/validationError', message: 'Bulk alarm update works only with filter. None known filter is set' } })
+      }
+
+      expect((await api(client, 'PUT', `/alarm/alarms?${window}&severity=MINOR`, { status: 'ACKNOWLEDGED' })).status).toBe(200)
+      await eventually(async () => {
+        expect((await api(client, 'GET', `/alarm/alarms/${minor.body.id}`)).body.status).toBe('ACKNOWLEDGED')
+      })
+      expect((await api(client, 'GET', `/alarm/alarms/${major.body.id}`)).body.status).toBe('ACTIVE')
+
+      // type is ignored, also next to a source: every alarm of the source changes
+      expect((await api(client, 'PUT', `/alarm/alarms?source=${device.id}&type=sv-other-${unique}`, { status: 'ACKNOWLEDGED' })).status).toBe(200)
+      await eventually(async () => {
+        expect((await api(client, 'GET', `/alarm/alarms/${major.body.id}`)).body.status).toBe('ACKNOWLEDGED')
+      })
+    },
+  },
+  {
+    name: 'alarms: the bulk update with withSource* needs a source',
+    verifies: ['bulk-alarm-known-filters'],
+    async run({ client, unique }) {
+      const { data: device } = await client.inventory.create({ name: `bs-${unique}`, c8y_IsDevice: {} })
+      // the creation range alone is no known filter, so a platform that
+      // skipped the source check would still change nothing (422 as well);
+      // with status=ACKNOWLEDGED it would set ACKNOWLEDGED alarms created in
+      // the millisecond of this scenario's device to ACKNOWLEDGED
+      const created = Date.parse(String(device.creationTime))
+      const range = `createdFrom=${encodeURIComponent(new Date(created).toISOString())}&createdTo=${encodeURIComponent(new Date(created + 1).toISOString())}`
+      for (const name of ['withSourceDevices', 'withSourceAssets', 'withSourceAdditions', 'withSourceChildren']) {
+        for (const query of [`${range}&${name}=true`, `${range}&status=ACKNOWLEDGED&${name}=true`]) {
+          expect(await api(client, 'PUT', `/alarm/alarms?${query}`, { status: 'ACKNOWLEDGED' }), query).toMatchObject({ status: 422, body: { error: 'alarm/Invalid Data', message: 'Cannot fetch children alarms if parameter \'source\' is not specified!' } })
+        }
+      }
+    },
+  },
+  {
+    name: 'alarms: alarm.type.mapping overrides severity and text, NONE suppresses the alarm',
+    verifies: ['alarm-type-mapping'],
+    async run({ client, unique, settle }) {
+      const { data: device } = await client.inventory.create({ name: `tm-${unique}`, c8y_IsDevice: {} })
+      const types = { both: `tm-both-${unique}`, text: `tm-text-${unique}`, severity: `tm-sev-${unique}`, pipes: `tm-pipes-${unique}`, spaced: `tm-spaced-${unique}`, none: `tm-none-${unique}`, lower: `tm-lower-${unique}`, noneSpace: `tm-nonesp-${unique}`, rejected: `tm-rejected-${unique}`, bulkGood: `tm-bulkgood-${unique}` }
+      const mappings: Array<[string, string]> = [[types.both, 'CRITICAL|mapped text'], [types.text, '|only text'], [types.severity, 'WARNING|'], [types.pipes, 'MAJOR|a|b'], [types.spaced, ' WARNING | spaced '], [types.none, 'NONE|'], [types.lower, 'none|other text'], [types.noneSpace, 'NONE |x']]
+      try {
+        // a value without a pipe, or with both parts empty, is rejected
+        const wrong = (value: string) => ({ status: 422, body: { error: 'options/Invalid Data', message: `Wrong format: '${value}'!` } })
+        const empty = { status: 422, body: { error: 'options/Invalid Data', message: 'Priority or text must not be empty in alarm mapping!' } }
+        for (const value of ['MAJOR', '']) {
+          expect(await api(client, 'POST', '/tenant/options', { category: 'alarm.type.mapping', key: types.rejected, value }), value).toMatchObject(wrong(value))
+          expect(await api(client, 'PUT', `/tenant/options/alarm.type.mapping/${types.rejected}`, { value }), value).toMatchObject(wrong(value))
+        }
+        expect(await api(client, 'POST', '/tenant/options', { category: 'alarm.type.mapping', key: types.rejected, value: '|' })).toMatchObject(empty)
+        expect(await api(client, 'PUT', `/tenant/options/alarm.type.mapping/${types.rejected}`, { value: '|' })).toMatchObject(empty)
+        expect(await api(client, 'POST', '/tenant/options', { category: 'alarm.type.mapping', key: types.rejected, value: ' | ' })).toMatchObject(empty)
+        // the category update rejects a wrong value; whether it stored others first
+        // varies between runs (the values are taken in no fixed order)
+        expect(await api(client, 'PUT', '/tenant/options/alarm.type.mapping', { [types.bulkGood]: 'MAJOR|x', [types.rejected]: 'MAJOR' })).toMatchObject(wrong('MAJOR'))
+        expect((await api(client, 'GET', `/tenant/options/alarm.type.mapping/${types.rejected}`)).status).toBe(404)
+        for (const [key, value] of mappings) {
+          expect((await api(client, 'POST', '/tenant/options', { category: 'alarm.type.mapping', key, value })).status, value).toBe(200)
+        }
+        const create = (type: string) => api(client, 'POST', '/alarm/alarms', { source: { id: device.id }, type, text: 'sent text', severity: 'MINOR', time: new Date().toISOString(), c8y_Custom: { a: 1 } })
+        expect((await create(types.both)).body).toMatchObject({ severity: 'CRITICAL', text: 'mapped text' })
+        expect((await create(types.text)).body).toMatchObject({ severity: 'MINOR', text: 'only text' })
+        expect((await create(types.severity)).body).toMatchObject({ severity: 'WARNING', text: 'sent text' })
+        // split at the last pipe; the whole value is trimmed, the parts are not
+        expect((await create(types.pipes)).body).toMatchObject({ severity: 'MAJOR|a', text: 'b' })
+        expect((await create(types.spaced)).body).toMatchObject({ severity: 'WARNING ', text: ' spaced' })
+        // NONE with a trailing space is no NONE: stored with that severity
+        expect((await create(types.noneSpace)).body).toMatchObject({ severity: 'NONE ', text: 'x' })
+        // NONE in any case: answered like a new alarm, with an id, mapped like
+        // any other (the option's severity, its text if not empty), not stored
+        const suppressed: string[] = []
+        for (const [type, severity, text] of [[types.none, 'NONE', 'sent text'], [types.lower, 'none', 'other text']] as const) {
+          const answer = await create(type)
+          expect(answer, type).toMatchObject({ status: 201, body: { type, text, severity, status: 'ACTIVE', count: 1, source: { id: device.id }, c8y_Custom: { a: 1 } } })
+          expect(answer.body.self).toMatch(new RegExp(`/alarm/alarms/${answer.body.id}$`))
+          expect(answer.location).toBe(answer.body.self)
+          expect([typeof answer.body.creationTime, typeof answer.body.lastUpdated]).toEqual(['string', 'string'])
+          suppressed.push(answer.body.id)
+        }
+        const upsert = await api(client, 'POST', '/alarm/alarms/upsert', { source: { id: device.id }, type: types.none, text: 'x', severity: 'MINOR' })
+        expect(upsert).toMatchObject({ status: 200, body: { alarm: { self: expect.stringMatching(/\/alarm\/alarms\/null$/), count: 1 }, previousState: null }, location: expect.stringMatching(/\/alarm\/alarms\/null$/) })
+        expect(Object.keys(upsert.body.alarm).sort()).toEqual(['count', 'self'])
+        await settle(1000)
+        for (const id of suppressed) {
+          expect((await api(client, 'GET', `/alarm/alarms/${id}`)).status).toBe(404)
+        }
+        const listed = (await api(client, 'GET', `/alarm/alarms?source=${device.id}&pageSize=100`)).body.alarms.map((alarm: { type: string }) => alarm.type).sort()
+        expect(listed).toEqual([types.both, types.severity, types.text, types.pipes, types.spaced, types.noneSpace].sort())
+      } finally {
+        for (const [key] of [...mappings, [types.rejected], [types.bulkGood]]) {
+          await api(client, 'DELETE', `/tenant/options/alarm.type.mapping/${key}`)
+        }
+      }
+    },
+  },
+  {
+    name: 'alarms: a source in maintenance suppresses new alarms',
+    verifies: ['alarm-maintenance-suppressed'],
+    async run({ client, unique, settle }) {
+      const { data: device } = await client.inventory.create({ name: `mt-${unique}`, c8y_IsDevice: {}, c8y_RequiredAvailability: { responseInterval: -1 } } as any)
+      const type = `mt-${unique}`
+      try {
+        // checked before the type mapping: the answer shows what was sent
+        expect((await api(client, 'POST', '/tenant/options', { category: 'alarm.type.mapping', key: type, value: 'CRITICAL|mapped' })).status).toBe(200)
+        const time = new Date().toISOString()
+        const created = await api(client, 'POST', '/alarm/alarms', { source: { id: device.id }, type, text: 'x', severity: 'MINOR', time, c8y_Custom: { a: 1 } })
+        expect(created).toMatchObject({ status: 201, location: expect.stringMatching(/\/alarm\/alarms\/null$/) })
+        expect(created.body).toEqual({ self: expect.stringMatching(/\/alarm\/alarms\/null$/), type, text: 'x', severity: 'MINOR', count: 1, source: { self: expect.stringMatching(new RegExp(`/inventory/managedObjects/${device.id}$`)), id: device.id }, time, c8y_Custom: { a: 1 } })
+        // validation comes first
+        expect(await api(client, 'POST', '/alarm/alarms', { source: { id: device.id }, type, text: 'x', time })).toMatchObject({ status: 422, body: { error: 'undefined/validationError', message: 'post.alarmRepresentation.severity: is required' } })
+        const upsert = await api(client, 'POST', '/alarm/alarms/upsert', { source: { id: device.id }, type, text: 'x', severity: 'MINOR' })
+        expect(upsert).toMatchObject({ status: 200, body: { alarm: { self: expect.stringMatching(/\/alarm\/alarms\/null$/), count: 1 }, previousState: null }, location: expect.stringMatching(/\/alarm\/alarms\/null$/) })
+        expect(Object.keys(upsert.body.alarm).sort()).toEqual(['count', 'self'])
+        await settle(1000)
+        expect((await api(client, 'GET', `/alarm/alarms?source=${device.id}`)).body.alarms).toEqual([])
+      } finally {
+        await api(client, 'DELETE', `/tenant/options/alarm.type.mapping/${type}`)
       }
     },
   },
