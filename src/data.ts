@@ -203,6 +203,14 @@ export interface C8yUserInput {
   inventoryAssignments?: Array<{ managedObject: C8yIdInput, roles: Array<string | number> }>
   customProperties?: Record<string, unknown>
   /**
+   * Tenant to store the user in. Defaults to the seed's tenant. A user of
+   * another tenant also gets the seed's custom `roles` in that tenant's
+   * role catalogue; it cannot have `groups` or `inventoryAssignments`,
+   * which would be looked up in the seed's tenant (seed it with
+   * `{ tenant }` instead). Not stored as a user field.
+   */
+  tenant?: string
+  /**
    * Any other user fields: `firstName`, `lastName`, `phone`, `owner`, `enabled`, `devicePermissions`, ...
    */
   [field: string]: unknown
@@ -330,7 +338,7 @@ export interface C8ySeedResult {
   inventoryRoles?: string[]
   groups?: string[]
   /**
-   * The user names, as given.
+   * The user names, as given (each in its own `tenant`, else the seed's).
    */
   users?: string[]
   measurements?: string[]
@@ -490,7 +498,34 @@ function seedInto(data: TenantData, collection: Exclude<DocumentCollection, 'man
   return result.id
 }
 
-function seedUsers(data: TenantData, seed: C8ySeed, result: C8ySeedResult): void {
+/**
+ * The tenant of each seeded user (its own `tenant`, else the seed's),
+ * checked before anything is written: a user of another tenant cannot
+ * reference the seed's groups or inventory roles, which are seeded in the
+ * seed's tenant.
+ * @param data - The seed's tenant
+ * @param seed - Data to seed
+ * @returns The tenant of each user, in input order
+ */
+function userTenants(data: TenantData, seed: C8ySeed): string[] {
+  return (seed.users ?? []).map((input) => {
+    const { tenant } = input
+    if (tenant === undefined || tenant === data.tenant) {
+      return data.tenant
+    }
+    if (typeof tenant !== 'string' || tenant === '') {
+      throw new TypeError(`seed(): invalid user ${input.userName}: tenant must be a non-empty string`)
+    }
+    for (const field of ['groups', 'inventoryAssignments'] as const) {
+      if (input[field]?.length) {
+        throw new TypeError(`seed(): user ${input.userName} has tenant ${tenant}, but the seed is for ${data.tenant} and its ${field} would be looked up there: seed it with { tenant: '${tenant}' }`)
+      }
+    }
+    return tenant
+  })
+}
+
+function seedUsers(data: TenantData, seed: C8ySeed, result: C8ySeedResult, tenants: string[], tenantOf: (tenant: string) => TenantData): void {
   const attempt = <T>(what: string, write: () => T): T => {
     try {
       return write()
@@ -499,10 +534,14 @@ function seedUsers(data: TenantData, seed: C8ySeed, result: C8ySeedResult): void
     }
   }
   if (seed.roles) {
-    result.roles = seed.roles.map((role) => {
-      data.roles.set(role, role)
-      return role
-    })
+    // users of other tenants may have the seed's custom roles too
+    for (const name of new Set([data.tenant, ...tenants])) {
+      const target = name === data.tenant ? data : tenantOf(name)
+      for (const role of seed.roles) {
+        target.roles.set(role, role)
+      }
+    }
+    result.roles = [...seed.roles]
   }
   if (seed.inventoryRoles) {
     result.inventoryRoles = seed.inventoryRoles.map((role) => attempt(`inventory role ${role.name}`, () => createInventoryRole(data, { ...role })).id)
@@ -513,18 +552,20 @@ function seedUsers(data: TenantData, seed: C8ySeed, result: C8ySeedResult): void
   if (seed.users) {
     result.users = seed.users.map((input) => input.userName)
   }
-  for (const input of seed.users ?? []) {
-    const { roles = [], groups = [], inventoryAssignments = [], ...fields } = input
+  for (const [index, input] of (seed.users ?? []).entries()) {
+    const target = tenants[index] === data.tenant ? data : tenantOf(tenants[index]!)
+    // the tenant picks where the user is stored; it is not a user field
+    const { roles = [], groups = [], inventoryAssignments = [], tenant: _tenant, ...fields } = input
     attempt(`user ${input.userName}`, () => {
       const email = input.email ?? (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.userName) ? input.userName : `${input.userName}@example.com`)
       // the password only passes validation; the fake does not keep it
       // verified (user-default-roles): every new user starts with the two OWN roles
-      createUser(data, { ...fields, email, password: 'Seeded-Password-1' }, [...new Set([...NEW_USER_ROLES, ...roles])], { seeding: true })
-      data.users.update(input.userName, (user) => {
-        user.groups = [...new Set(groups.map((group) => groupId(data, group)))]
+      createUser(target, { ...fields, email, password: 'Seeded-Password-1' }, [...new Set([...NEW_USER_ROLES, ...roles])], { seeding: true })
+      target.users.update(input.userName, (user) => {
+        user.groups = [...new Set(groups.map((group) => groupId(target, group)))]
       })
       for (const assignment of inventoryAssignments) {
-        createAssignment(data, input.userName, { managedObject: resolveId(assignment.managedObject), roles: assignment.roles.map((role) => ({ id: inventoryRoleId(data, role) })) })
+        createAssignment(target, input.userName, { managedObject: resolveId(assignment.managedObject), roles: assignment.roles.map((role) => ({ id: inventoryRoleId(target, role) })) })
       }
     })
   }
@@ -536,11 +577,13 @@ function seedUsers(data: TenantData, seed: C8ySeed, result: C8ySeedResult): void
  * @param data - Tenant to seed
  * @param seed - Data to seed
  * @param user - User of seeded audit records and new device requests that name none
+ * @param tenantOf - The data of another tenant, for users with their own `tenant`
  * @returns The ids per seeded list, in input order
  */
-export function applySeed(data: TenantData, seed: C8ySeed, user: string): C8ySeedResult {
+export function applySeed(data: TenantData, seed: C8ySeed, user: string, tenantOf: (tenant: string) => TenantData): C8ySeedResult {
+  const tenants = userTenants(data, seed)
   const result: C8ySeedResult = {}
-  seedUsers(data, seed, result)
+  seedUsers(data, seed, result, tenants, tenantOf)
   if (seed.measurements) {
     result.measurements = seed.measurements.map((measurement) => seedInto(data, 'measurements', measurement))
   }

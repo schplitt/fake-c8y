@@ -102,6 +102,14 @@ A user you switch to with `setUser()` or `apply({ user })` is stored in its tena
 
 Seeded users get the two roles every new user gets on the platform, `ROLE_USER_MANAGEMENT_OWN_READ` and `ROLE_USER_MANAGEMENT_OWN_ADMIN`, plus the `roles` you give.
 
+A user input with its own `tenant` (like a `C8yUser`) is stored in that tenant, not in the seed's, and `tenant` is not kept as a user field. The seed's custom `roles` are added to that tenant's role catalogue too, so one seed can hold callers of several tenants. Such a user cannot have `groups` or `inventoryAssignments`, since they are looked up in the seed's tenant: `seed()` throws a `TypeError` before writing anything, and you seed the user with `{ tenant }` instead.
+
+```ts
+const world = createWorld({ tenant: 't12345' })
+world.seed({ roles: ['ROLE_PUMP_ADMIN'], users: [{ userName: 'anna', roles: ['ROLE_PUMP_ADMIN'] }, { userName: 'eve', roles: ['ROLE_PUMP_ADMIN'], tenant: 't99999' }] })
+world.db.tenant('t99999').users.get('eve') // stored in t99999
+```
+
 ```ts
 const world = createWorld()
 const pump = world.device({ name: 'Pump' })

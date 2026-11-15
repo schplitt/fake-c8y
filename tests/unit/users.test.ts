@@ -131,6 +131,72 @@ describe('user management', () => {
     expect(() => world.seed({ groups: [{ name: 'X', roles: ['ROLE_NOPE'] }] })).toThrow(/The Given Role does not exist/)
   })
 
+  it('seeds a user with its own tenant into that tenant, with the seed\'s custom roles', async () => {
+    const world = createWorld({ tenant: 't12345' })
+    const result = world.seed({
+      roles: ['ROLE_PUMP_ADMIN'],
+      users: [
+        { userName: 'anna', roles: ['ROLE_PUMP_ADMIN'] },
+        { userName: 'eve', roles: ['ROLE_PUMP_ADMIN', 'ROLE_ALARM_READ'], tenant: 't99999' },
+        { userName: 'otto', tenant: 't12345' },
+      ],
+    })
+    expect(result.users).toEqual(['anna', 'eve', 'otto'])
+    expect(result.roles).toEqual(['ROLE_PUMP_ADMIN'])
+    expect(world.db.users.get('eve')).toBeUndefined()
+    expect(world.db.users.get('anna')).toBeDefined()
+    const eve = world.db.tenant('t99999').users.get('eve')!
+    expect(eve).toBeDefined()
+    // the tenant is where the user lives, not a user field
+    expect(eve).not.toHaveProperty('tenant')
+    expect(world.db.users.get('otto')).not.toHaveProperty('tenant')
+    expect(world.db.tenant('t99999').users.effectiveRoles('eve')).toEqual(expect.arrayContaining(['ROLE_PUMP_ADMIN', 'ROLE_ALARM_READ']))
+    expect(world.db.tenant('t99999').roles.get('ROLE_PUMP_ADMIN')).toBeDefined()
+    expect(world.db.roles.get('ROLE_PUMP_ADMIN')).toBeDefined()
+    // the user API of its tenant answers for it
+    const answer = await world.fetch(new Request(`${world.baseUrl}/user/currentUser`, { headers: { authorization: `Basic ${btoa('t99999/eve:x')}`, accept: 'application/json' } }))
+    expect((await answer.json()).effectiveRoles.map((role: any) => role.id)).toContain('ROLE_PUMP_ADMIN')
+  })
+
+  it('rejects a user of another tenant with groups or inventory assignments before writing anything', () => {
+    const world = createWorld({ tenant: 't12345' })
+    const pump = world.device({ name: 'Pump' })
+    const before = world.snapshot()
+    expect(() => world.seed({
+      roles: ['ROLE_PUMP_ADMIN'],
+      groups: [{ name: 'Operators' }],
+      users: [{ userName: 'anna' }, { userName: 'eve', tenant: 't99999', groups: ['Operators'] }],
+    })).toThrow(new TypeError('seed(): user eve has tenant t99999, but the seed is for t12345 and its groups would be looked up there: seed it with { tenant: \'t99999\' }'))
+    expect(() => world.seed({
+      users: [{ userName: 'eve', tenant: 't99999', inventoryAssignments: [{ managedObject: pump, roles: ['Reader'] }] }],
+    })).toThrow(/user eve has tenant t99999.*inventoryAssignments.*seed it with \{ tenant: 't99999' \}/)
+    expect(() => world.seed({ users: [{ userName: 'eve', tenant: 42 as unknown as string }] })).toThrow(/invalid user eve: tenant must be a non-empty string/)
+    expect(world.db.users.get('anna')).toBeUndefined()
+    expect(world.db.roles.get('ROLE_PUMP_ADMIN')).toBeUndefined()
+    expect(world.db.groups.find({ name: 'Operators' })).toEqual([])
+    expect(world.diff(before)).toEqual(world.diff(world.snapshot()))
+    // empty lists reference nothing
+    world.seed({ users: [{ userName: 'eve', tenant: 't99999', groups: [], inventoryAssignments: [] }] })
+    expect(world.db.tenant('t99999').users.get('eve')).toBeDefined()
+  })
+
+  it('seeds users of other tenants into a fork only, and throws on a frozen base', () => {
+    const base = createWorld({ tenant: 't12345' })
+    base.seed({ users: [{ userName: 'eve', tenant: 't99999' }] })
+    const fork = base.fork()
+    expect(() => base.seed({ users: [{ userName: 'mallory', tenant: 't99999' }] })).toThrow(/this world is frozen/)
+    fork.seed({ users: [{ userName: 'mallory', tenant: 't99999' }, { userName: 'zoe', tenant: 't55555' }] })
+    expect(fork.db.tenant('t99999').users.get('eve')).toBeDefined()
+    expect(fork.db.tenant('t99999').users.get('mallory')).toBeDefined()
+    expect(fork.db.tenant('t55555').users.get('zoe')).toBeDefined()
+    expect(base.db.tenant('t99999').users.get('mallory')).toBeUndefined()
+    expect(base.db.tenant('t55555').users.get('zoe')).toBeUndefined()
+    expect(base.fork().db.tenant('t99999').users.get('mallory')).toBeUndefined()
+    fork.reset()
+    expect(fork.db.tenant('t99999').users.get('eve')).toBeDefined()
+    expect(fork.db.tenant('t99999').users.get('mallory')).toBeUndefined()
+  })
+
   it('keeps relations in snapshots and reports them in diffs', async () => {
     const world = createWorld()
     world.seed({ users: [{ userName: 'eva', groups: ['business'] }] })
