@@ -22,6 +22,12 @@ export interface C8yUser<Role extends string = string> {
    */
   tenant?: string
   /**
+   * Password of the stored user, checked with `passwords: 'check'` for
+   * requests with Basic auth of this user (never rendered). Without one (or
+   * with `''`), any password works. Requests without Basic auth are this user regardless.
+   */
+  password?: string
+  /**
    * Groups the user is a member of, by name or id (e.g. `['admins']`). Their
    * roles add to the effective roles.
    */

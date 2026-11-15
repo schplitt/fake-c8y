@@ -25,7 +25,7 @@ import { diffSnapshots, diffWorld, restoreTenants, snapshotOptions, snapshotTena
 import { advanceBulkOperations } from './api/bulkoperations'
 import { advanceAvailability } from './availability'
 import { clone, decodeBase64, parseIsoTime } from './utils'
-import { renderCurrentUser, upsertWorldUser } from './api/users'
+import { PASSWORD, renderCurrentUser, upsertWorldUser } from './api/users'
 import { C8Y_SPEC_PATHS } from './capabilities.generated'
 import { checkServiceSeed, defineService, serviceStateKey, serviceStore, toJson } from './services'
 import type { C8yMicroserviceManifest } from './api/applications'
@@ -305,16 +305,44 @@ export interface WorldOptions extends C8yWorldState {
    * what the caller may see: global roles (own and from groups), ownership,
    * and inventory roles on an object and its parents. Requests without Basic
    * auth, as the world's `user`, or as a user the tenant does not store stay
-   * unrestricted. See docs/roles.md.
+   * unrestricted (`unknownUsers: 'unauthorized'` answers the last with 401).
+   * See docs/roles.md.
    * @default 'enforce'
    */
   roles?: 'enforce' | 'off'
+  /**
+   * How a request with Basic auth of a user name the caller's tenant does not
+   * know is answered. `'allow'` (the default) runs it unrestricted like a
+   * request without Basic auth. `'unauthorized'` answers 401
+   * `security/Unauthorized` like the platform, so a test catches a service
+   * that sends wrong credentials. Known are the world's `user`, its
+   * `bootstrapUser` and `subscriptions` users (in their tenants), the stored
+   * users of the tenant, and the bootstrap and service users of registered
+   * services. Requests without Basic auth stay the world's `user`. See
+   * docs/roles.md.
+   * @default 'allow'
+   */
+  unknownUsers?: 'allow' | 'unauthorized'
+  /**
+   * Whether the password in Basic auth is checked. `'off'` (the default)
+   * accepts any password. With `'check'`, a known user with a password
+   * answers 401 `security/Unauthorized` for a wrong one: a stored user with
+   * a password (seeded `password`, the world `user`'s `password`, or the
+   * password it was created with or last set through the API), the
+   * `subscriptions` users, and the bootstrap and service users of registered
+   * services. A stored user without a password and the world's
+   * `bootstrapUser` accept any password; unknown users follow
+   * `unknownUsers`. Requests without Basic auth are not affected. See
+   * docs/roles.md.
+   * @default 'off'
+   */
+  passwords?: 'off' | 'check'
 }
 
 /**
  * What a fork can set for itself; everything else comes from its base.
  */
-export type ForkOptions = Pick<WorldOptions, 'now' | 'clock' | 'schedule' | 'unsupported' | 'overrideHint' | 'onUnsupported' | 'onChange' | 'roles'>
+export type ForkOptions = Pick<WorldOptions, 'now' | 'clock' | 'schedule' | 'unsupported' | 'overrideHint' | 'onUnsupported' | 'onChange' | 'roles' | 'unknownUsers' | 'passwords'>
 
 /**
  * Where a tenant option lives. Defaults: own settings category, deployed tenant.
@@ -754,14 +782,17 @@ function defaultSubscription(tenant: string): C8ySubscription {
   return { tenant, user: `service_${tenant}`, password: DEFAULTS.subscriptionPassword }
 }
 
-function parseBasicAuth(header: string | null): { tenant?: string, user: string } | undefined {
+function parseBasicAuth(header: string | null): { tenant?: string, user: string, password: string } | undefined {
   if (!header?.startsWith('Basic ')) {
     return undefined
   }
   const decoded = new TextDecoder().decode(decodeBase64(header.slice(6)))
-  const login = decoded.slice(0, decoded.indexOf(':'))
+  const colon = decoded.indexOf(':')
+  // credentials without `:` are all user name, with an empty password
+  const login = colon === -1 ? decoded : decoded.slice(0, colon)
+  const password = colon === -1 ? '' : decoded.slice(colon + 1)
   const slash = login.indexOf('/')
-  return slash === -1 ? { user: login } : { tenant: login.slice(0, slash), user: login.slice(slash + 1) }
+  return slash === -1 ? { user: login, password } : { tenant: login.slice(0, slash), user: login.slice(slash + 1), password }
 }
 
 /**
@@ -1329,6 +1360,57 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
   }
 
   /**
+   * The password a login with Basic auth must have: `null` for a known user
+   * that accepts any password (none, or an empty one), `undefined` for a user the tenant does not
+   * know. The same order as `callerAccess()`: the world's user, the world's
+   * microservice users, a registered service's users, a stored user.
+   * @param call - The recorded request
+   */
+  function loginPassword(call: C8yRequest): string | null | undefined {
+    const name = call.user!
+    const stored = tenants.get(call.tenant)?.users.get(name)
+    if (user && name === user.userName && call.tenant === (user.tenant ?? tenant)) {
+      // the stored copy has the password set through the API; a world user
+      // deleted through the API keeps its own
+      return (stored ? stored[PASSWORD] as string | undefined : user.password) || null
+    }
+    if (name === bootstrapUser && call.tenant === tenant) {
+      return null
+    }
+    const subscription = subscriptions.find((entry) => entry.user === name && entry.tenant === call.tenant)
+    if (subscription) {
+      return subscription.password || null
+    }
+    const own = applicationOfCredentials(tenants.values(), call.tenant, name)
+    if (own) {
+      return own.password || null
+    }
+    // an empty password counts as none
+    return stored ? (stored[PASSWORD] as string | undefined) || null : undefined
+  }
+
+  /**
+   * The 401 for wrong credentials (`unknownUsers: 'unauthorized'`,
+   * `passwords: 'check'`), or `undefined` when they pass.
+   * @param call - The recorded request
+   * @param password - The password from Basic auth
+   */
+  function rejectCredentials(call: C8yRequest, password: string): Response | undefined {
+    const unknownUsers = options.unknownUsers ?? 'allow'
+    const passwords = options.passwords ?? 'off'
+    if (unknownUsers === 'allow' && passwords === 'off') {
+      return undefined
+    }
+    const expected = loginPassword(call)
+    if ((expected === undefined && unknownUsers === 'unauthorized') || (typeof expected === 'string' && passwords === 'check' && password !== expected)) {
+      // unverified against a real tenant: the body of the verified 401 for
+      // credentials of an unknown tenant
+      return apiError(401, 'security/Unauthorized', 'Invalid credentials!')
+    }
+    return undefined
+  }
+
+  /**
    * Platform endpoints a microservice relies on: the current user and the
    * microservice's subscriptions.
    * @param call - The recorded request
@@ -1354,9 +1436,10 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       if (call.user !== undefined && (call.user !== user?.userName || call.tenant !== (user.tenant ?? tenant))) {
         // Basic auth of another user (by name or tenant): that user of the
         // caller's tenant, with its roles. A user the tenant does not store
-        // gets the world's user, as before stored users answered here (the
-        // fake checks no passwords, so a forwarded header naming another user
-        // keeps working)
+        // gets the world's user, as before stored users answered here (by
+        // default the fake checks no credentials, so a forwarded header naming
+        // another user keeps working; `unknownUsers: 'unauthorized'` answers
+        // such a request 401 before it gets here)
         const data = context.tenantData?.(call.tenant)
         const stored = data?.users.get(call.user)
         if (data && stored) {
@@ -1372,7 +1455,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         return Response.json(renderCurrentUser(data, stored))
       }
       // the user was deleted through the API: answer with the world's user
-      const { roles = [], tenant: _tenant, groups: _groups, ...rest } = user
+      const { roles = [], tenant: _tenant, groups: _groups, password: _password, ...rest } = user
       return Response.json({
         id: user.userName,
         ...rest,
@@ -1582,6 +1665,10 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       // verified: credentials of a tenant the platform does not have answer
       // 401; a request never creates a tenant
       return apiError(401, 'security/Unauthorized', 'Invalid credentials!')
+    }
+    const rejected = caller && rejectCredentials(call, caller.password)
+    if (rejected) {
+      return rejected
     }
     // verified: every request of a disabled user answers 401 (also one that
     // would enable it again); a request without credentials is the world's user

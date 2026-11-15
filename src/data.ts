@@ -25,7 +25,7 @@ import { serviceStateKey, serviceStore, toJson } from './services'
 import type { C8yApplicationInput } from './api/applications'
 import { renderApplication, seedApplications, visibleApplications } from './api/applications'
 import { DEFAULT_ROLES } from './user-defaults'
-import { createAssignment, createGroup, createInventoryRole, createUser, effectiveRoles, groupId, inventoryRoleId, NEW_USER_ROLES, renderAssignment, renderGroup, renderInventoryRole, renderRole, renderUser, UserApiError } from './api/users'
+import { createAssignment, createGroup, createInventoryRole, createUser, effectiveRoles, groupId, inventoryRoleId, NEW_USER_ROLES, PASSWORD, renderAssignment, renderGroup, renderInventoryRole, renderRole, renderUser, UserApiError } from './api/users'
 
 /**
  * A managed object id, or an object with its `id` (e.g. a test framework's
@@ -202,6 +202,12 @@ export interface C8yUserInput<Role extends string = string> {
    * Inventory roles (by name or id) on managed objects.
    */
   inventoryAssignments?: Array<{ managedObject: C8yIdInput, roles: Array<string | number> }>
+  /**
+   * Password the user logs in with, checked with `passwords: 'check'`
+   * (never rendered; not validated against the platform's password rules).
+   * Without one (or with `''`), any password works.
+   */
+  password?: string
   customProperties?: Record<string, unknown>
   /**
    * Tenant to store the user in. `undefined`, `null`, or the seed's tenant
@@ -592,14 +598,19 @@ function seedUsers(data: TenantData, seed: C8ySeed, result: C8ySeedResult, tenan
   for (const [index, input] of (seed.users ?? []).entries()) {
     const target = tenants[index] === data.tenant ? data : tenantOf(tenants[index]!)
     // the tenant picks where the user is stored; it is not a user field
-    const { roles = [], groups = [], inventoryAssignments = [], tenant: _tenant, ...fields } = input
+    const { roles = [], groups = [], inventoryAssignments = [], tenant: _tenant, password, ...fields } = input
     attempt(`user ${input.userName}`, () => {
       const email = input.email ?? (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.userName) ? input.userName : `${input.userName}@example.com`)
-      // the password only passes validation; the fake does not keep it
+      // `createUser()` requires a password but does not keep one while
+      // seeding: this placeholder only passes that check. The input's own
+      // `password` (if not empty) is stored below.
       // verified (user-default-roles): every new user starts with the two OWN roles
       createUser(target, { ...fields, email, password: 'Seeded-Password-1' }, [...new Set([...NEW_USER_ROLES, ...roles])], { seeding: true })
       target.users.update(input.userName, (user) => {
         user.groups = [...new Set(groups.map((group) => groupId(target, group)))]
+        if (password !== undefined && password !== '') {
+          user[PASSWORD] = password
+        }
       })
       for (const assignment of inventoryAssignments) {
         createAssignment(target, input.userName, { managedObject: resolveId(assignment.managedObject), roles: assignment.roles.map((role) => ({ id: inventoryRoleId(target, role) })) })
