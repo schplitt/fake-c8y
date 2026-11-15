@@ -416,15 +416,17 @@ export interface World {
   /**
    * Waits until the world is idle: no request in flight and no callback
    * scheduled (Notification 2.0 deliveries, socket connects and events), for
-   * a few consecutive checks on the real timers. Notifications delivered and
-   * not yet acknowledged do not count; `realtime.settled()` waits for those.
-   * Only this world's own work counts: a fork waits for its own requests, a
-   * base for its own.
+   * `quietMs` on the real timers. Notifications delivered and not yet
+   * acknowledged do not count; `realtime.settled()` waits for those. Only
+   * this world's own work counts: a fork waits for its own requests, a base
+   * for its own. A custom `schedule` that never runs its callbacks keeps the
+   * world from being idle until the next `reset()` or `restore()`.
    * @param options - Options
    * @param options.timeout - Milliseconds to wait before rejecting (default 5000)
+   * @param options.quietMs - Milliseconds the world must stay idle without interruption (default 20)
    * @throws {SettleTimeoutError} when the world is not idle within the timeout
    */
-  idle: (options?: { timeout?: number }) => Promise<void>
+  idle: (options?: { timeout?: number, quietMs?: number }) => Promise<void>
   /**
    * Notification 2.0 state (consumer sockets: `fake-c8y/realtime`).
    */
@@ -2266,8 +2268,8 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     get inflight() {
       return inflight
     },
-    async idle({ timeout = 5000 } = {}) {
-      const { quiet } = await waitForQuiet(() => inflight === 0 && realtime.status().scheduled === 0, { timeout })
+    async idle({ timeout = 5000, quietMs = 20 } = {}) {
+      const { quiet } = await waitForQuiet(() => inflight === 0 && realtime.status().scheduled === 0, { timeout, quietMs })
       if (!quiet) {
         throw new SettleTimeoutError('world.idle()', timeout, { inflight, scheduled: realtime.status().scheduled })
       }
@@ -2598,7 +2600,7 @@ export type { C8yCredentials } from './auth'
 export { interceptFetch } from './intercept'
 export type { InterceptFetchOptions, WorldSource } from './intercept'
 export { CONSUMER_REMOVED, Realtime, SOCKET_STATE } from './realtime'
-export type { CloseConsumersOptions, NotificationFrame, NotificationSocket, NotificationSubscription, NotificationToken, RealtimeApi, RealtimeOptions, RealtimeSettledOptions, RealtimeStatus } from './realtime'
+export type { CloseConsumersOptions, NotificationFrame, NotificationSocket, NotificationSubscription, NotificationToken, RealtimeApi, RealtimeOptions, RealtimeSettledOptions, RealtimeSettledResult, RealtimeStatus } from './realtime'
 export { SettleTimeoutError } from './timers'
 export type * from './types'
 export type { C8yAlarmInput, C8yAuditRecordInput, C8yBinaryContent, C8yBinaryInput, C8yDb, C8yDbCollection, C8yDbFilter, C8yEventInput, C8yGroupInput, C8yIdInput, C8yInventoryRoleInput, C8yManagedObjectInput, C8yMeasurementInput, C8yNewDeviceRequestInput, C8yOperationInput, C8yRetentionRuleInput, C8ySeed, C8ySeedResult, C8ySeedResultFor, C8yUserInput } from './data'

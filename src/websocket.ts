@@ -173,6 +173,11 @@ export interface RealtimeStartupOptions {
    * @default 'return'
    */
   onTimeout?: 'return' | 'throw'
+  /**
+   * Milliseconds startup must stay done without interruption.
+   * @default 15
+   */
+  quietMs?: number
 }
 
 /**
@@ -207,7 +212,7 @@ export interface RealtimeStartupResult {
  * request in flight, no callback scheduled (also no socket connecting), and
  * every minted token has a connected socket of its consumer (the same tenant,
  * subscription, and subscriber: a client that reconnected uses a newer
- * token), for a few consecutive checks.
+ * token), for `quietMs` (default 15 ms).
  *
  * Runs on the real timers captured when fake-c8y was loaded, so fake timers
  * (`vi.useFakeTimers()`) do not stop it. On timeout it resolves with
@@ -218,13 +223,13 @@ export interface RealtimeStartupResult {
  * @param options - Milliseconds to wait at most (default 3000), or options
  */
 export async function waitForRealtimeStartup(realtime: Realtime, inflight: () => number, options: number | RealtimeStartupOptions = {}): Promise<RealtimeStartupResult> {
-  const { timeout = 3000, onTimeout = 'return' } = typeof options === 'number' ? { timeout: options } : options
+  const { timeout = 3000, onTimeout = 'return', quietMs = 15 } = typeof options === 'number' ? { timeout: options } : options
   const consumer = (token: NotificationToken) => `${token.tenant}\u0000${token.subscription}\u0000${token.subscriber}`
   const unconnected = () => {
     const connected = new Set([...realtime.sockets].flatMap((socket) => socket.token ? [consumer(socket.token)] : []))
     return [...realtime.tokens.values()].filter((token) => !connected.has(consumer(token)))
   }
-  const { quiet, waitedMs } = await waitForQuiet(() => inflight() === 0 && realtime.status().scheduled === 0 && unconnected().length === 0, { timeout, interval: 5 })
+  const { quiet, waitedMs } = await waitForQuiet(() => inflight() === 0 && realtime.status().scheduled === 0 && unconnected().length === 0, { timeout, quietMs, interval: 5 })
   const result: RealtimeStartupResult = { settled: quiet, waitedMs, inflight: inflight(), status: realtime.status(), unconnectedTokens: quiet ? [] : unconnected() }
   if (!quiet && onTimeout === 'throw') {
     const detail = result.unconnectedTokens.length > 0
