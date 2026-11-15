@@ -1790,7 +1790,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     if (application && deployed && contextPath === deployed.contextPath && application.owner === tenant) {
       // the microservice under test: the world does not run it
       call.service = contextPath
-      return unhandledAnswer(call, `the deployed microservice ${contextPath} is not emulated (answer it with world.override('/service/${contextPath}/**', ...))`, 'feature')
+      return unhandledAnswer(call, `the deployed microservice ${contextPath} is not run`, 'feature')
     }
     if (application && application.owner === 'management') {
       // a microservice of the platform the world does not emulate
