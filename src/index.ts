@@ -10,7 +10,7 @@ import type { Access } from './api/access'
 import type { C8yService, C8yServiceContext, C8yServiceDefinition, C8yServiceHandler, C8yServiceOptions } from './services'
 import { DEFAULTS } from './defaults'
 import { withReasonPhrase } from './reason-phrases'
-import { compileRoute, matchesCall, matchRoute, splitPath } from './router'
+import { compileRoute, copyCall, matchesCall, matchRoute, splitPath, withSegments } from './router'
 import { emptyTenant, forkTenant, freezeTenant, optionKey, TENANT_COLLECTIONS } from './store'
 import { Realtime, SOCKET_STATE } from './realtime'
 import { platformApi, UnsupportedRequestError } from './api'
@@ -22,7 +22,7 @@ import { applySeed, createBinaryFromInput, createDb, createFromInput } from './d
 import { diffSnapshots, diffWorld, restoreTenants, snapshotOptions, snapshotTenants, touchedSnapshots } from './snapshot'
 import { advanceBulkOperations } from './api/bulkoperations'
 import { advanceAvailability } from './availability'
-import { decodeBase64, encodeBase64, parseIsoTime } from './utils'
+import { clone, decodeBase64, encodeBase64, parseIsoTime } from './utils'
 import { renderCurrentUser, upsertWorldUser } from './api/users'
 import { C8Y_SPEC_PATHS } from './capabilities.generated'
 import { checkServiceSeed, defineService, serviceStateKey, serviceStore, toJson } from './services'
@@ -1212,9 +1212,24 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
   const unhandledOf = new WeakMap<C8yRequest, C8yUnhandledRequest>()
   // the TypeErrors send() rejected with for a network error (Response.error())
   const networkErrors = new WeakSet<object>()
+  // the status the emulation answered a call with (below its overrides)
+  const emulatedStatus = new WeakMap<C8yRequest, number>()
+
+  /**
+   * The network error (from `send()`) an exception is or wraps (`cause`).
+   * @param error - What a service handler threw
+   */
+  function networkErrorIn(error: unknown): TypeError | undefined {
+    for (let current = error, depth = 0; typeof current === 'object' && current !== null && depth < 10; current = (current as { cause?: unknown }).cause, depth++) {
+      if (networkErrors.has(current)) {
+        return current as TypeError
+      }
+    }
+    return undefined
+  }
 
   function recordUnhandled(call: C8yRequest, reason: string, kind: C8yUnhandledRequest['kind']): C8yUnhandledRequest {
-    const unhandled: C8yUnhandledRequest = { ...call, reason, kind }
+    const unhandled: C8yUnhandledRequest = copyCall(call, { reason, kind })
     unhandledRequests.push(unhandled)
     // a copy of the call: dispatch() sets its status and duration too
     unhandledOf.set(call, unhandled)
@@ -1291,6 +1306,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       tenant: caller?.tenant ?? tenant,
       user: caller?.user,
     }
+    withSegments(call, segments)
     calls.push(call)
     recorded(call)
     rawRequests.set(call, { bytes, contentType, params: url.searchParams })
@@ -1323,11 +1339,15 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       const callCount = (callCounts.get(entry) ?? 0) + 1
       callCounts.set(entry, callCount)
       let passed = false
+      let copied: C8yRequest | undefined
       const context: C8yOverrideContext = {
         tenant: call.tenant,
         user: call.user,
         params,
-        call,
+        get call() {
+          copied ??= withSegments(clone(call), segments)
+          return copied
+        },
         world,
         callCount,
         next: async () => {
@@ -1350,7 +1370,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       if (fallback) {
         uncounted.add(call)
         if (fallback.status === 404 || fallback.status === 405) {
-          platformErrors.push({ ...call, status: fallback.status })
+          platformErrors.push(copyCall(call, { status: fallback.status as 404 | 405 }))
         }
         return fallback
       }
@@ -1439,7 +1459,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         }
         const specResponse = specAnswer(method, specPath)
         if (specResponse) {
-          platformErrors.push({ ...call, status: specResponse.status })
+          platformErrors.push(copyCall(call, { status: specResponse.status as 404 | 405 }))
           return specResponse
         }
       } catch (error) {
@@ -1474,7 +1494,9 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
           return answerOverride(entry, params, () => route(i))
         }
       }
-      return emulate()
+      const emulated = await emulate()
+      emulatedStatus.set(call, emulated.status)
+      return emulated
     }
 
     return route(stack.length)
@@ -1509,7 +1531,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     // longer subscribed to, and a subscribed one without an uploaded binary
     // (not running) are a platform 404 (answer one with
     // world.override('/service/<name>/**', ...))
-    platformErrors.push({ ...call, status: 404 })
+    platformErrors.push(copyCall(call, { status: 404 as const }))
     return apiError(404, 'microservice/Not Found', `Microservice ${contextPath} not found.`)
   }
 
@@ -1539,10 +1561,14 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       if (unhandled) {
         return unsupportedAnswer(unhandled)
       }
-      if (networkErrors.has(error as object)) {
+      const network = networkErrorIn(error)
+      if (network) {
         // the service did not catch a network error of ctx.fetch(): it fails
         // like a microservice would, without making the trial invalid
-        return apiError(500, 'general/Internal Server Error', 'fetch failed')
+        const cause = network.cause instanceof Error ? network.cause.message : network.message
+        return unsupported === 'developer'
+          ? apiError(500, 'fake-c8y/error', `${call.method} ${call.path}: the service did not handle a network error: ${cause}`)
+          : apiError(500, 'general/Internal Server Error', 'Internal server error')
       }
       throw error
     }
@@ -1884,7 +1910,9 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         }
       }
       if (call && generation === started && !uncounted.has(call)) {
-        usage.record(call, status, clock(), tenants.get(call.tenant))
+        // a network error after next(): the statistics count what the
+        // platform answered and stored, like for any other answer
+        usage.record(call, call.networkError ? emulatedStatus.get(call) ?? status : status, clock(), tenants.get(call.tenant))
       }
     }
   }

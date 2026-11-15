@@ -59,17 +59,51 @@ export function matchRoute(route: CompiledRoute, method: string, segments: strin
 }
 
 /**
+ * Where the world keeps a recorded call's path segments, split before
+ * decoding (`%2F` and `%3F` stay inside their segment), so recorded calls
+ * match patterns exactly like `override()` matched the request. Not
+ * enumerable: it does not show in the call log.
+ */
+export const CALL_SEGMENTS: unique symbol = Symbol('fake-c8y.segments')
+
+/**
+ * Remembers a call's path segments for `matchesCall()`.
+ * @param call - A recorded call (or a copy of one)
+ * @param segments - Its decoded path segments
+ * @returns The call
+ */
+export function withSegments<T extends object>(call: T, segments: readonly string[] | undefined): T {
+  if (segments) {
+    Object.defineProperty(call, CALL_SEGMENTS, { value: segments, enumerable: false })
+  }
+  return call
+}
+
+/**
+ * A copy of a recorded call with more fields (an unhandled request, a
+ * platform error), keeping its path segments for `matchesCall()`.
+ * @param call - The recorded call
+ * @param fields - Fields to add or replace
+ * @returns The copy
+ */
+export function copyCall<T extends object, F extends object>(call: T, fields: F): T & F {
+  return withSegments({ ...call, ...fields }, (call as { [CALL_SEGMENTS]?: string[] })[CALL_SEGMENTS])
+}
+
+/**
  * Whether a recorded call matches a route pattern (the syntax of
- * `world.override()`), e.g. to count the calls to an endpoint. The call's
- * decoded `path` is split at `/`, so a `%2F` inside a segment counts as a
- * separator here.
+ * `world.override()`), e.g. to count the calls to an endpoint. A call from
+ * `world.calls`, `unhandled`, or `coverage()` matches exactly as the request
+ * matched `override()` (also with an encoded `/` or `?` in a segment); for
+ * another object the decoded `path` is split at `/`.
  * @param pattern - Route pattern (`"[METHOD ]/path"`), or a compiled one
- * @param call - A recorded call (`world.calls`): its `method` and `path`
+ * @param call - A recorded call: its `method` and `path`
  * @param call.method - The call's method
  * @param call.path - The call's path (without query)
  * @returns Whether the call matches
  */
 export function matchesCall(pattern: string | CompiledRoute, call: { method: string, path: string }): boolean {
   const route = typeof pattern === 'string' ? compileRoute(pattern) : pattern
-  return matchRoute(route, call.method.toUpperCase(), splitPath(call.path)) !== undefined
+  const recorded = (call as { [CALL_SEGMENTS]?: string[] })[CALL_SEGMENTS]
+  return matchRoute(route, call.method.toUpperCase(), recorded ?? call.path.split('/').filter(Boolean)) !== undefined
 }

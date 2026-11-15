@@ -3,7 +3,7 @@
  * request on with `ctx.next()`, and count their requests (`ctx.callCount`).
  */
 import { describe, expect, it } from 'vitest'
-import { createWorld, matchesCall, UnsupportedRequestError } from '../../src'
+import { compileRoute, createWorld, matchesCall, UnsupportedRequestError } from '../../src'
 import type { World } from '../../src'
 
 const json = { 'accept': 'application/json', 'content-type': 'application/json' }
@@ -272,6 +272,72 @@ describe('network errors (Response.error())', () => {
     expect(world.calls).toHaveLength(1)
   })
 
+  it('counts what next() stored in the usage statistics', async () => {
+    const world = createWorld({ now: () => Date.parse('2026-11-07T10:00:00Z') })
+    const pump = world.device({ name: 'Pump' })
+    world.override('POST /alarm/alarms', async (_request, ctx) => {
+      const response = await ctx.next()
+      expect(response.status).toBe(201)
+      return Response.error()
+    })
+    await expect(send(world, 'POST', '/alarm/alarms', alarm(pump))).rejects.toBeInstanceOf(TypeError)
+    const statistics = await (await send(world, 'GET', '/tenant/statistics?pageSize=2000')).json() as { usageStatistics: Array<{ alarmsCreatedCount: number }> }
+    expect(statistics.usageStatistics.at(-1)?.alarmsCreatedCount).toBe(1)
+  })
+
+  it('returns the response from next() (nothing thrown) when an older override fails', async () => {
+    const world = createWorld()
+    const outcomes: string[] = []
+    world.override('GET /inventory/managedObjects', () => Response.error())
+    world.override('GET /inventory/managedObjects', async (_request, ctx) => {
+      const response = await ctx.next()
+      outcomes.push(`${response.type} ${response.status}`)
+      return { recovered: true }
+    })
+    expect(await (await send(world, 'GET', '/inventory/managedObjects')).json()).toEqual({ recovered: true })
+    expect(outcomes).toEqual(['error 0'])
+    expect(world.calls[0]).toMatchObject({ status: 200 })
+    expect(world.calls[0]!.networkError).toBeUndefined()
+  })
+
+  it('makes a second next() a 500 of kind error, also after a network error below', async () => {
+    const world = createWorld()
+    world.override('GET /inventory/managedObjects', () => Response.error())
+    world.override('GET /inventory/managedObjects', async (_request, ctx) => {
+      await ctx.next()
+      return ctx.next()
+    })
+    expect((await send(world, 'GET', '/inventory/managedObjects')).status).toBe(500)
+    expect(world.unhandled).toMatchObject([{ kind: 'error', reason: expect.stringContaining('next() was called twice') }])
+  })
+
+  it('rejects with the abort reason, unsent, for an already aborted signal', async () => {
+    const world = createWorld()
+    world.override('GET /inventory/managedObjects', () => Response.error())
+    const controller = new AbortController()
+    controller.abort(new Error('early'))
+    await expect(world.fetch(new Request(`${world.baseUrl}/inventory/managedObjects`, { signal: controller.signal }))).rejects.toThrow('early')
+    expect(world.calls).toEqual([])
+  })
+
+  it('works on a fork: its own calls, counts, and a base service fetching there', async () => {
+    const base = createWorld({ roles: 'off' })
+    base.override('GET /inventory/managedObjects', (_request, ctx) => (ctx.callCount === 1 ? Response.error() : ctx.next()))
+    base.service('proxy', async (_request, ctx) => {
+      try {
+        return await ctx.fetch('/inventory/managedObjects')
+      } catch (error) {
+        return Response.json({ failed: error instanceof TypeError })
+      }
+    })
+    const fork = base.fork()
+    expect(await (await send(fork, 'GET', '/service/proxy/x')).json()).toEqual({ failed: true })
+    expect((await send(fork, 'GET', '/service/proxy/x')).status).toBe(200)
+    expect(fork.callsTo('GET /inventory/managedObjects').map((call) => [call.parent, call.networkError ?? false])).toEqual([[1, true], [3, false]])
+    expect(base.calls).toEqual([])
+    expect(fork.coverage().valid).toBe(true)
+  })
+
   it('keeps a throwing handler a 500 of kind error', async () => {
     const world = createWorld()
     world.override('GET /inventory/managedObjects', () => {
@@ -297,6 +363,7 @@ describe('network errors (Response.error())', () => {
     expect(await (await send(world, 'GET', '/service/caught/x')).json()).toEqual({ caught: true })
     const response = await send(world, 'GET', '/service/uncaught/x')
     expect(response.status).toBe(500)
+    expect(await response.json()).toMatchObject({ error: 'fake-c8y/error', message: expect.stringContaining('GET /inventory/managedObjects was answered with a network error') })
     expect(world.coverage().valid).toBe(true)
     expect(world.calls.map((call) => [call.path, call.status, call.networkError ?? false])).toEqual([
       ['/service/caught/x', 200, false],
@@ -304,6 +371,22 @@ describe('network errors (Response.error())', () => {
       ['/service/uncaught/x', 500, false],
       ['/inventory/managedObjects', 0, true],
     ])
+  })
+
+  it('recognizes a wrapped network error; the platform mode hides the cause', async () => {
+    const world = createWorld({ unsupported: 'platform' })
+    world.override('GET /inventory/managedObjects', () => Response.error())
+    world.service('wrapping', async (_request, ctx) => {
+      try {
+        return await ctx.fetch('/inventory/managedObjects')
+      } catch (error) {
+        throw new Error('inventory unavailable', { cause: error })
+      }
+    })
+    const response = await send(world, 'GET', '/service/wrapping/x')
+    expect(response.status).toBe(500)
+    expect(await response.json()).toMatchObject({ error: 'general/Internal Server Error', message: 'Internal server error' })
+    expect(world.coverage().valid).toBe(true)
   })
 
   it('lets a service handler answer with a network error', async () => {
@@ -352,6 +435,64 @@ describe('world.callsTo() and matchesCall()', () => {
     expect(matchesCall('GET /inventory/managedObjects', world.calls[3]!)).toBe(true)
   })
 
+  it('matches encoded / and ? inside a segment like override() does', async () => {
+    const world = createWorld()
+    const matched: string[] = []
+    world.override('GET /custom/:id/c', (_request, ctx) => {
+      matched.push(ctx.params.id!)
+      return {}
+    })
+    await send(world, 'GET', '/custom/a%2Fb/c')
+    await send(world, 'GET', '/custom/a%3Fb/c')
+    expect(matched).toEqual(['a/b', 'a?b'])
+    expect(world.callsTo('GET /custom/:id/c')).toHaveLength(2)
+    expect(world.callsTo('GET /custom/:id')).toEqual([])
+    expect(world.callsTo('GET /custom/a/b/c')).toEqual([])
+    expect(matchesCall('GET /custom/*/c', world.calls[1]!)).toBe(true)
+  })
+
+  it('matches :param and * mid-path, compiled routes, and calls of network errors and aborts', async () => {
+    const world = createWorld()
+    world.override('GET /custom/fail/**', () => Response.error())
+    world.override('GET /custom/slow', async () => {
+      await new Promise((resolve) => {
+        setTimeout(resolve, 5)
+      })
+      return {}
+    })
+    await send(world, 'GET', '/custom/fail/x/y').catch(() => undefined)
+    const controller = new AbortController()
+    const slow = world.fetch(new Request(`${world.baseUrl}/custom/slow`, { signal: controller.signal })).catch(() => undefined)
+    controller.abort()
+    await slow
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20)
+    })
+    expect(world.callsTo('GET /custom/:what/x/*')).toMatchObject([{ networkError: true }])
+    expect(world.callsTo('/custom/*')).toMatchObject([{ aborted: true }])
+    const route = compileRoute('GET /custom/:what/*/y')
+    expect(world.calls.filter((call) => matchesCall(route, call))).toHaveLength(1)
+  })
+
+  it('matches unhandled requests and platform errors too', async () => {
+    const world = createWorld()
+    await send(world, 'GET', '/application/applications/1/versions')
+    await send(world, 'GET', '/inventory/nothing/here')
+    const { unhandled, platformErrors } = world.coverage()
+    expect(matchesCall('GET /application/applications/:id/versions', unhandled[0]!)).toBe(true)
+    expect(platformErrors.filter((call) => matchesCall('/inventory/**', call))).toHaveLength(1)
+  })
+
+  it('counts per fork', async () => {
+    const base = createWorld()
+    await send(base, 'GET', '/inventory/managedObjects')
+    const fork = base.fork()
+    await send(fork, 'GET', '/inventory/managedObjects')
+    await send(fork, 'GET', '/inventory/managedObjects')
+    expect(base.callsTo('/inventory/**')).toHaveLength(1)
+    expect(fork.callsTo('/inventory/**')).toHaveLength(2)
+  })
+
   it('starts over after a reset', async () => {
     const world = createWorld()
     await send(world, 'GET', '/inventory/managedObjects')
@@ -365,15 +506,41 @@ describe('ctx.call', () => {
     const world = createWorld()
     let seen: unknown
     world.override('/custom/**', (_request, ctx) => {
-      seen = { call: ctx.call, same: ctx.call === world.calls.at(-1), status: ctx.call.status }
+      seen = { call: ctx.call, same: ctx.call === world.calls.at(-1), hasStatus: 'status' in ctx.call }
       return {}
     })
-    await world.fetch(new Request(`${world.baseUrl}/custom/a%20b?x=1&x=2&y=3`, { method: 'POST', headers: { ...json, 'x-http-method': 'PUT' }, body: JSON.stringify({ n: 1 }) }))
+    await world.fetch(new Request(`${world.baseUrl}/custom/a%20b?x=1&x=2&y=3`, { method: 'POST', headers: { ...json, 'x-http-method': 'PUT', 'X-Mixed-Case': 'v' }, body: JSON.stringify({ n: 1 }) }))
     expect(seen).toMatchObject({
-      call: { method: 'PUT', path: '/custom/a b', query: { x: '1', y: '3' }, body: { n: 1 }, headers: { 'content-type': 'application/json' } },
-      same: true,
-      status: undefined,
+      call: { id: 1, method: 'PUT', path: '/custom/a b', query: { x: '1', y: '3' }, body: { n: 1 }, headers: { 'content-type': 'application/json', 'x-mixed-case': 'v' } },
+      same: false,
+      hasStatus: false,
     })
+  })
+
+  it('is a copy: changing it leaves the call log as it was', async () => {
+    const world = createWorld()
+    world.override('POST /custom/x', (_request, ctx) => {
+      ctx.call.query.y = 'changed'
+      ctx.call.headers.added = 'yes'
+      ;(ctx.call.body as { n: number }).n = 2
+      return {}
+    })
+    await world.fetch(new Request(`${world.baseUrl}/custom/x?y=1`, { method: 'POST', headers: json, body: JSON.stringify({ n: 1 }) }))
+    expect(world.calls[0]).toMatchObject({ query: { y: '1' }, body: { n: 1 } })
+    expect(world.calls[0]!.headers.added).toBeUndefined()
+  })
+
+  it('has the text of a text body and no body for multipart', async () => {
+    const world = createWorld()
+    const bodies: unknown[] = []
+    world.override('POST /custom/**', (_request, ctx) => {
+      bodies.push(ctx.call.body)
+      return {}
+    })
+    await world.fetch(new Request(`${world.baseUrl}/custom/text`, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: 'hello' }))
+    const multipart = '--b\r\nContent-Disposition: form-data; name="file"; filename="a.txt"\r\nContent-Type: text/plain\r\n\r\nhi\r\n--b--\r\n'
+    await world.fetch(new Request(`${world.baseUrl}/custom/multipart`, { method: 'POST', headers: { 'content-type': 'multipart/form-data; boundary=b' }, body: multipart }))
+    expect(bodies).toEqual(['hello', undefined])
   })
 
   it('has no body for binary uploads; the request copy has the bytes', async () => {

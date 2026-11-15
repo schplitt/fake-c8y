@@ -212,13 +212,14 @@ export interface C8yOverrideContext {
    */
   readonly params: Record<string, string>
   /**
-   * The request as the world recorded it: the same object as in
-   * `world.calls`, with the method (after `X-HTTP-METHOD`), the decoded path,
-   * the query, the parsed JSON or text body (`undefined` for multipart and
-   * binary bodies: read the bytes from the request copy), and the headers.
-   * `status` is set after the answer. Read it, do not change it.
+   * The request as the world recorded it, as a copy of its `world.calls`
+   * entry taken when first read (changing it changes nothing): the method
+   * (after `X-HTTP-METHOD`), the decoded path, the query, the parsed JSON or
+   * text body (`undefined` for multipart and binary bodies: read the bytes
+   * from the request copy), and the headers with lower-case names. It has
+   * no `status` yet. `matchesCall()` matches it like the request.
    */
-  readonly call: Readonly<C8yRequest>
+  readonly call: C8yRequest
   /**
    * The world answering the request: the fork it was sent to, also for an
    * override registered on the base.

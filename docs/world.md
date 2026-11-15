@@ -128,7 +128,7 @@ The handler gets a copy of the request whose body it can read, and a context:
 | Field            | What It Is                                                                                                                                             |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `params`         | What the pattern captured.                                                                                                                             |
-| `call`           | The request as the world recorded it, the same object as in `world.calls`. See [The recorded call](#the-recorded-call).                                |
+| `call`           | The request as the world recorded it: a copy of its `world.calls` entry. See [The recorded call](#the-recorded-call).                                  |
 | `tenant`, `user` | The caller's tenant and user name (`user` is `undefined` without Basic auth).                                                                          |
 | `world`          | The world that got the request: the fork, also for an override registered on the base.                                                                 |
 | `callCount`      | How many requests this override got, this one included: `2` is its second. A fork counts on its own, and `reset()` starts over.                        |
@@ -169,9 +169,9 @@ world.override('POST /alarm/alarms', async (request, ctx) => {
 | `query`   | The query parameters. A repeated parameter has its first value, like on the platform.               |
 | `body`    | The parsed JSON body, else the text, else `undefined`. Multipart and binary bodies are `undefined`. |
 | `headers` | The request headers, with lower-case names.                                                         |
-| `id`      | The call's number in `world.calls`. `status` is set after the answer.                               |
+| `id`      | The call's number in `world.calls`. The copy has no `status`: the request is not answered yet.      |
 
-For the bytes of a multipart or binary body, read the request copy: `new Uint8Array(await request.arrayBuffer())`. Do not change `ctx.call`: it is the call log entry.
+`ctx.call` is a copy, taken when the handler first reads it, so changing it leaves the call log as it was. For the bytes of a multipart or binary body, read the request copy: `new Uint8Array(await request.arrayBuffer())`.
 
 ```ts
 world.override('POST /alarm/alarms', (request, ctx) => {
@@ -190,9 +190,9 @@ world.override('GET /inventory/**', (request, ctx) => (ctx.callCount === 1 ? Res
 ```
 
 - The call is recorded with `networkError: true` and `status: 0`. It is not unhandled, so `coverage()` stays valid.
-- Combined with `next()`, the platform answers and writes, and the client still sees a failure (`await ctx.next(); return Response.error()`).
-- `ctx.next()` of an outer override returns the network-error response as it is, so `return ctx.next()` passes it on. Calling `response.json()` on it fails, check `response.type === 'error'` first.
-- A service's `ctx.fetch()` rejects with the `TypeError` too. If the service does not catch it, its request answers 500, and the trial stays valid. A service handler can also return `Response.error()` itself.
+- Combined with `next()`, the platform answers and writes, and the client still sees a failure (`await ctx.next(); return Response.error()`). The call keeps its `writes`, and the usage statistics count what the platform answered and stored.
+- When an older override answers with `Response.error()`, `ctx.next()` of a newer one returns that response (`type: 'error'`, `status: 0`) and throws nothing, so `return ctx.next()` passes it on. Its body is empty: check `response.type === 'error'` before reading it. Returning another answer instead recovers the request (no `networkError` on the call).
+- A service's `ctx.fetch()` rejects with the `TypeError` too. If the service does not catch it (also when it throws an error with it as `cause`), its request answers 500 like a handler error (the message names the failed request with `unsupported: 'developer'`, the platform's generic 500 otherwise), and the trial stays valid. A service handler can also return `Response.error()` itself.
 - If the request's signal fires first, the caller gets the abort reason, and the call has both `aborted: true` and `networkError: true`.
 
 A handler that throws is still a 500 of kind `'error'`, which makes the trial invalid.
@@ -232,7 +232,7 @@ h3 answers errors it throws in its own JSON shape, not the platform's.
 | `muted(fn)`                           | Runs `fn` without publishing Notification 2.0 messages. An async `fn` mutes the whole world until its promise settles.                  |
 | `tenant`, `user`, `subscriptions`     | The current deployed tenant, current user, and subscriptions.                                                                           |
 
-`matchesCall(pattern, call)` (exported) tells whether one recorded call matches a pattern, e.g. to filter `calls` of several worlds or to count calls in a custom matcher. It matches the call's decoded `path`, so an encoded `%2F` inside a segment counts as a separator there, unlike in `override()`.
+`matchesCall(pattern, call)` (exported) tells whether one recorded call matches a pattern (a string or a `compileRoute()` result), e.g. to filter `calls` of several worlds, `unhandled`, or `coverage().platformErrors`. Both match a recorded call exactly as `override()` matched its request, also with an encoded `/` or `?` inside a segment. For an object the world did not record, `matchesCall()` splits its `path` at `/`.
 
 `db` collections have `get(id)` and `find(filter?)`; a filter is a partial object or a predicate. `db.measurements.find()` builds every matching generated document, so filter it by `source`.
 
