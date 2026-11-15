@@ -5,7 +5,7 @@
  * checkpoint, as a client does on every reconnect).
  */
 import { describe, expect, it } from 'vitest'
-import { createWorld } from '../../src'
+import { CONSUMER_REMOVED, createWorld } from '../../src'
 import type { C8yResetOptions, World } from '../../src'
 import { createFakeWebSocket, waitForRealtimeStartup } from '../../src/realtime-entry'
 
@@ -38,10 +38,12 @@ async function consumer(world: World, run: () => void, subscription: string) {
   const WebSocket = createFakeWebSocket(world.realtime)
   const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
   const received: string[] = []
-  const state = { closed: false }
+  const state = { closed: false, code: undefined as unknown, reason: undefined as unknown }
   socket.on('message', (text: string) => received.push(text))
-  socket.on('close', () => {
+  socket.on('close', (code: unknown, reason: unknown) => {
     state.closed = true
+    state.code = code
+    state.reason = reason
   })
   run()
   expect(socket.readyState).toBe(1)
@@ -216,7 +218,34 @@ describe('reset({ to, consumers })', () => {
     world.reset({ to: startup, consumers: 'keep' })
     expect(kept.state.closed).toBe(false)
     expect(dropped.state.closed).toBe(true)
+    expect([dropped.state.code, dropped.state.reason]).toEqual([CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason])
     expect((await call(world, 'GET', '/notification2/subscriptions')).body.subscriptions.map((item: { subscription: string }) => item.subscription)).toEqual(['startup'])
+  })
+
+  it('keeps a consumer open with keep when its subscription was deleted since the checkpoint', async () => {
+    const { world, run } = manualWorld()
+    const id = (await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })).body.id
+    const open = await consumer(world, run, 'startup')
+    const startup = world.checkpoint()
+    expect((await call(world, 'DELETE', `/notification2/subscriptions/${id}`)).status).toBe(204)
+    // deleting the subscription through the API closes nothing
+    expect(open.state.closed).toBe(false)
+    world.reset({ to: startup, consumers: 'keep' })
+    expect(open.state.closed).toBe(false)
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'after reset' })
+    run()
+    expect(open.received).toHaveLength(1)
+  })
+
+  it('closes a consumer whose subscription the checkpoint has not, though its token stays', async () => {
+    const { world, run } = manualWorld()
+    const id = (await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })).body.id
+    const open = await consumer(world, run, 'startup')
+    expect((await call(world, 'DELETE', `/notification2/subscriptions/${id}`)).status).toBe(204)
+    const startup = world.checkpoint()
+    expect(world.realtime.tokens.has(open.token)).toBe(true)
+    world.reset({ to: startup })
+    expect([open.state.code, open.state.reason]).toEqual([CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason])
   })
 
   it('closes consumers whose token the checkpoint lacks by default', async () => {
@@ -228,6 +257,7 @@ describe('reset({ to, consumers })', () => {
     world.reset({ to: startup })
     expect(early.state.closed).toBe(false)
     expect(late.state.closed).toBe(true)
+    expect(late.state.code).toBe(CONSUMER_REMOVED.code)
   })
 
   it('drops undelivered frames but keeps delivering to the kept socket', async () => {

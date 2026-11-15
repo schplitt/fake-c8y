@@ -12,7 +12,7 @@ import { DEFAULTS } from './defaults'
 import { withReasonPhrase } from './reason-phrases'
 import { compileRoute, matchRoute, splitPath } from './router'
 import { emptyTenant, forkTenant, freezeTenant, optionKey, TENANT_COLLECTIONS } from './store'
-import { Realtime, SOCKET_STATE } from './realtime'
+import { Realtime, SOCKET_STATE, tokenOf } from './realtime'
 import { platformApi, UnsupportedRequestError } from './api'
 import { UsageLog } from './api/statistics'
 import { applicationAccess, authorize, userAccess } from './api/access'
@@ -978,7 +978,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     const open: Array<[string, NotificationToken]> = []
     // also sockets still connecting (a client that reconnects right now)
     for (const socket of [...realtime.sockets, ...realtime.connecting]) {
-      const value = new URL(socket.url).searchParams.get('token') ?? ''
+      const value = tokenOf(socket)
       const token = socket.readyState === SOCKET_STATE.CLOSED ? undefined : stored.get(value)
       if (token) {
         open.push([value, token])
@@ -2233,8 +2233,8 @@ export { UnsupportedRequestError } from './api'
 export { compileRoute, matchRoute, splitPath } from './router'
 export type { CompiledRoute } from './router'
 export { DEFAULTS } from './defaults'
-export { Realtime, SOCKET_STATE } from './realtime'
-export type { NotificationFrame, NotificationSocket, NotificationSubscription, NotificationToken, RealtimeApi, RealtimeOptions } from './realtime'
+export { CONSUMER_REMOVED, Realtime, SOCKET_STATE } from './realtime'
+export type { CloseConsumersOptions, NotificationFrame, NotificationSocket, NotificationSubscription, NotificationToken, RealtimeApi, RealtimeOptions } from './realtime'
 export type * from './types'
 export type { C8yAlarmInput, C8yAuditRecordInput, C8yBinaryContent, C8yBinaryInput, C8yDb, C8yDbCollection, C8yDbFilter, C8yEventInput, C8yGroupInput, C8yIdInput, C8yInventoryRoleInput, C8yManagedObjectInput, C8yMeasurementInput, C8yNewDeviceRequestInput, C8yOperationInput, C8yRetentionRuleInput, C8ySeed, C8ySeedResult, C8ySeedResultFor, C8yUserInput } from './data'
 export { DEFAULT_ROLES } from './user-defaults'

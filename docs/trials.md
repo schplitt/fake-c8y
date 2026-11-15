@@ -31,7 +31,7 @@ A fork costs a few microseconds and a few kilobytes, whatever the size of the ba
 
 ## Reset
 
-`world.reset(options?)` goes back to the baseline (or, with `to`, to a [checkpoint](#checkpoints)): data (also service state, Notification 2.0 subscriptions and tokens), tenant options, overrides, call log, and ids. Registered services stay, and a root world installs them and applies their definition seeds again ([Services](services.md#seeding)). Undelivered notifications are dropped, and sockets whose token is gone are closed. A request still in flight answers 503 and changes nothing.
+`world.reset(options?)` goes back to the baseline (or, with `to`, to a [checkpoint](#checkpoints)): data (also service state, Notification 2.0 subscriptions and tokens), tenant options, overrides, call log, and ids. Registered services stay, and a root world installs them and applies their definition seeds again ([Services](services.md#seeding)). Undelivered notifications are dropped, and sockets whose token or subscription is gone are closed with code `4410` (`CONSUMER_REMOVED`, see [Close codes](world.md#close-codes)), so a client can tell that it should not reconnect. A request still in flight answers 503 and changes nothing.
 
 On a fork, `reset()` goes back to the state the fork started in: its own writes, ids, overrides, and call log are dropped. A clock the fork got as a copy of the base's goes back to the fork's start time, so a replay gets the same ids and times. A clock you passed to `fork({ clock })` stays where it is. The state fields of `options` are applied on top.
 
@@ -48,7 +48,7 @@ beforeEach(() => {
 })
 ```
 
-- `consumers: 'keep'` keeps every open (or still connecting) socket whose subscription the checkpoint has, with its token, also a token minted after the checkpoint (clients mint a new one on every reconnect). Tokens of the same subscription and subscriber that have no socket and are older than a kept token are dropped (a reconnect replaced them), so `waitForRealtimeStartup()` does not wait for them; newer tokens that are not connected yet stay if the checkpoint has them. Subscriptions created after the checkpoint are deleted and their sockets closed. The default, `'close'`, closes every socket whose token the checkpoint does not have. Undelivered notifications are dropped either way.
+- `consumers: 'keep'` keeps every open (or still connecting) socket whose subscription the checkpoint has, with its token, also a token minted after the checkpoint (clients mint a new one on every reconnect). Tokens of the same subscription and subscriber that have no socket and are older than a kept token are dropped (a reconnect replaced them), so `waitForRealtimeStartup()` does not wait for them; newer tokens that are not connected yet stay if the checkpoint has them. Subscriptions created after the checkpoint are deleted and their sockets closed. The default, `'close'`, closes every socket whose token or subscription the checkpoint does not have. Either way the closed sockets get code `4410` (`CONSUMER_REMOVED`). Sockets still connecting are not closed by the reset: with `'close'`, one whose token is gone fails when it connects (`1008`, like any unknown token). Undelivered notifications are dropped either way.
 - With `to`, state fields (`tenant`, `user`, `subscriptions`, `tenantOptions`) apply on top without changing the baseline; a plain `reset()` still goes back to the baseline.
 - Services registered after the checkpoint stay registered and are installed again; the applications of services removed since are deleted.
 - The clock is not part of a checkpoint and stays where it is.
@@ -59,7 +59,7 @@ beforeEach(() => {
 
 ## Snapshots and diffs
 
-`world.snapshot()` returns the data and platform state as plain JSON, with Notification 2.0 subscriptions and tokens, but without overrides and sockets. `world.restore(snapshot)` puts it back. You can store a snapshot as a fixture.
+`world.snapshot()` returns the data and platform state as plain JSON, with Notification 2.0 subscriptions and tokens, but without overrides and sockets. `world.restore(snapshot)` puts it back, and closes sockets whose token or subscription the snapshot does not have with `CONSUMER_REMOVED`. You can store a snapshot as a fixture.
 
 `world.diff(snapshot)` lists what changed since a snapshot, per tenant (`tenants`) and for tenant options (`options`):
 

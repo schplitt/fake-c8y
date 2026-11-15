@@ -24,7 +24,7 @@ src/
 ├── data.ts                     # Seed input, db views
 ├── snapshot.ts                 # JSON snapshots, restore, diff (also from a fork's touched keys: touchedSnapshots)
 ├── generators.ts               # generated measurement history: compiled generators, tombstones, GeneratedView (merged list, paging, series points, supportedSeries)
-├── realtime.ts                 # Notification 2.0 sockets and frames per world (Realtime class); subscriptions and tokens are tenant data (notificationSubscriptions, notificationTokens)
+├── realtime.ts                 # Notification 2.0 sockets and frames per world (Realtime class; resets close removed consumers with CONSUMER_REMOVED 4410, closeConsumers() injects server-side closes); subscriptions and tokens are tenant data (notificationSubscriptions, notificationTokens)
 ├── websocket.ts                # createFakeWebSocket(), waitForRealtimeStartup()
 ├── router.ts                   # override() pattern matcher (`[METHOD ]/path` with `:name`, `*`, `**`)
 ├── services.ts                 # service emulations: defineService(), C8yServiceDefinition/Seed, C8yServiceContext/Handler types, serviceStore() over TenantData.serviceState, key helpers
