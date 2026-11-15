@@ -1362,6 +1362,8 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     }
     return undefined
   }
+  // requests whose override handler threw (not an error passed through next())
+  const thrownByOverride = new WeakSet<C8yRequest>()
 
   function recordUnhandled(call: C8yRequest, reason: string, kind: C8yUnhandledRequest['kind']): C8yUnhandledRequest {
     const unhandled: C8yUnhandledRequest = copyCall(call, { reason, kind })
@@ -1384,9 +1386,12 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     if (kind !== 'error') {
       return unsupportedAnswer(unhandled)
     }
-    return unsupported === 'developer'
-      ? apiError(500, 'fake-c8y/error', `${call.method} ${call.path}: the fake Cumulocity platform failed: ${reason}. If an override handler threw to answer with an error, return a Response with that status instead.`)
-      : apiError(500, 'general/Internal Server Error', 'Internal server error')
+    if (unsupported !== 'developer') {
+      return apiError(500, 'general/Internal Server Error', 'Internal server error')
+    }
+    return thrownByOverride.has(call)
+      ? apiError(500, 'fake-c8y/error', `${call.method} ${call.path}: an override handler threw ${reason.replace(/\.+$/, '')}. To answer with an error on purpose, return a Response with that status instead.`)
+      : apiError(500, 'fake-c8y/error', `${call.method} ${call.path}: the fake Cumulocity platform failed: ${reason}`)
   }
 
   /**
@@ -1476,6 +1481,8 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       callCounts.set(entry, callCount)
       let passed = false
       let copied: C8yRequest | undefined
+      // what next() threw: passed through the handler, not the handler's own failure
+      let belowError: unknown
       const context: C8yOverrideContext = {
         tenant: call.tenant,
         user: call.user,
@@ -1491,12 +1498,25 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
             throw new TypeError(`fake-c8y: next() was called twice for ${method} ${path}`)
           }
           passed = true
-          return withReasonPhrase(generation === started ? await below() : staleAnswer())
+          try {
+            return withReasonPhrase(generation === started ? await below() : staleAnswer())
+          } catch (error) {
+            belowError = error
+            throw error
+          }
         },
       }
       // a copy whose body can still be read
       const copy = new Request(request.url, { method, headers: request.headers, ...(bytes.length > 0 ? { body: bytes } : {}) })
-      const result = await entry.handler(copy, context)
+      let result: unknown
+      try {
+        result = await entry.handler(copy, context)
+      } catch (error) {
+        if (error !== belowError) {
+          thrownByOverride.add(call)
+        }
+        throw error
+      }
       return generation === started ? toResponse(result) : staleAnswer()
     }
 

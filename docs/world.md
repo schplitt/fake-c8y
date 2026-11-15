@@ -134,7 +134,9 @@ import { installFetchClient } from 'fake-c8y/c8y-client'
 const uninstall = installFetchClient(FetchClient, () => world)
 ```
 
-`interceptFetch()` replaces `globalThis.fetch`: requests to the world's origin (the origin of `world.baseUrl`, or `origin`) go to the world, everything else to the `fetch` that was there before. It uses no Node APIs. Restore in reverse order: a restore does nothing once `globalThis.fetch` was replaced again.
+`interceptFetch()` replaces `globalThis.fetch`: requests to the world's origin (the origin of `world.baseUrl`, or `origin`) go to the world, everything else to the `fetch` that was there before. Relative URLs pass through too. With `origin`, the world (or its getter) is read only for requests to that origin, so a lazy getter is not called for unrelated requests. It uses no Node APIs.
+
+Both helpers stack: the newest install answers (for `interceptFetch()`, the newest one whose origin matches), and they can be undone in any order. Once all are undone, the original `fetch` is back, unless other code replaced it meanwhile, which is left alone.
 
 ```ts
 import { interceptFetch } from 'fake-c8y'

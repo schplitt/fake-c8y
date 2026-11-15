@@ -5,7 +5,7 @@
  * expose overrides under their own name.
  */
 import { Buffer } from 'node:buffer'
-import { BasicAuth, Client, FetchClient } from '@c8y/client'
+import { BasicAuth, Client, EventBinaryService, FetchClient } from '@c8y/client'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWorld, interceptFetch } from '../../src'
 import type { World } from '../../src'
@@ -42,9 +42,19 @@ describe('installFetchClient()', () => {
   it('sends uploads of the Node form-data package as multipart bytes', async () => {
     const world = createWorld()
     cleanups.push(installFetchClient(FetchClient, world))
-    const { data, res } = await client(world).inventoryBinary.create(Buffer.from('file content'), { name: 'report.txt', type: 'text/plain' } as any)
+    const { data, res } = await client(world).inventoryBinary.create(Buffer.from('{"a":1}'), { name: 'report', fileName: 'report.json', type: 'text/plain' } as any)
     expect(res.status).toBe(201)
-    expect(world.db.binaries.content(data.id!)?.text()).toBe('file content')
+    // the platform takes the content type from the file name, the type from the metadata
+    expect(data).toMatchObject({ name: 'report', type: 'text/plain', contentType: 'application/json', length: 7 })
+    expect(world.db.binaries.content(data.id!)?.text()).toBe('{"a":1}')
+
+    // an event attachment, also sent with form-data
+    const pump = world.device({ name: 'Pump' })
+    const { events: [event] } = world.seed({ events: [{ source: pump, type: 'door_open', text: 'Door' }] })
+    const auth = new BasicAuth({ tenant: world.tenant, user: 'test-user', password: 'secret' })
+    const attached = await new EventBinaryService(new FetchClient(auth, world.baseUrl)).upload(Buffer.from('attached'), event!)
+    expect(attached.res.status).toBe(201)
+    expect(world.db.events.attachment(event!)?.text()).toBe('attached')
     expect(world.unhandled).toEqual([])
   })
 
@@ -68,6 +78,32 @@ describe('installFetchClient()', () => {
     expect(FetchClient.prototype.fetch).not.toBe(original)
     expect((await client(world).user.current()).data.userName).toBe('test-user')
     uninstall()
+    expect(FetchClient.prototype.fetch).toBe(original)
+  })
+
+  it('unwinds stacked installs in any order', async () => {
+    const original = FetchClient.prototype.fetch
+    const a = createWorld({ tenant: 't1' })
+    const b = createWorld({ tenant: 't2' })
+    const uninstallA = installFetchClient(FetchClient, a)
+    const uninstallB = installFetchClient(FetchClient, b)
+    // without a tenant in the auth, each world answers with its deployed tenant
+    const anyWorld = new Client(new BasicAuth({ user: 'test-user', password: 'secret' }), a.baseUrl)
+    const current = async () => (await anyWorld.tenant.current()).data.name
+    // the newest install answers
+    expect(await current()).toBe('t2')
+    uninstallA()
+    expect(await current()).toBe('t2')
+    uninstallA()
+    expect(await current()).toBe('t2')
+    uninstallB()
+    expect(FetchClient.prototype.fetch).toBe(original)
+
+    const uninstallC = installFetchClient(FetchClient, a)
+    const uninstallD = installFetchClient(FetchClient, b)
+    uninstallD()
+    expect(await current()).toBe('t1')
+    uninstallC()
     expect(FetchClient.prototype.fetch).toBe(original)
   })
 })
@@ -112,6 +148,59 @@ describe('interceptFetch()', () => {
     await fetch(`${world.baseUrl}/user/currentUser`)
     expect(passed).toEqual([`${world.baseUrl}/user/currentUser`])
   })
+
+  it('reads a lazy world only for its origin, and passes relative URLs on', async () => {
+    const passed = stubFetch()
+    let created = 0
+    cleanups.push(interceptFetch(() => {
+      created++
+      throw new Error('no world yet')
+    }, { origin: 'https://platform.example.test' }))
+    expect(await (await fetch('https://example.test/x')).text()).toBe('network')
+    expect(await (await fetch('/relative')).text()).toBe('network')
+    expect(passed).toEqual(['https://example.test/x', '/relative'])
+    expect(created).toBe(0)
+  })
+
+  it('reads the world per request, so it follows a new fork', async () => {
+    stubFetch()
+    const base = createWorld()
+    let current = base.fork()
+    cleanups.push(interceptFetch(() => current))
+    await fetch(`${base.baseUrl}/user/currentUser`)
+    const first = current
+    current = base.fork()
+    await fetch(`${base.baseUrl}/user/currentUser`)
+    expect(first.calls).toHaveLength(1)
+    expect(current.calls).toHaveLength(1)
+  })
+
+  it('unwinds stacked interceptions in any order', async () => {
+    const passed = stubFetch()
+    const stub = globalThis.fetch
+    const a = createWorld()
+    const b = createWorld()
+    const restoreA = interceptFetch(a)
+    const restoreB = interceptFetch(b)
+    await fetch(`${a.baseUrl}/user/currentUser`)
+    // the newest interception answers
+    expect([a.calls.length, b.calls.length]).toEqual([0, 1])
+    restoreA()
+    await fetch(`${a.baseUrl}/user/currentUser`)
+    expect([a.calls.length, b.calls.length]).toEqual([0, 2])
+    restoreB()
+    expect(globalThis.fetch).toBe(stub)
+
+    const restoreC = interceptFetch(a)
+    const restoreD = interceptFetch(b, { origin: 'https://other.example.test' })
+    restoreD()
+    await fetch(`${a.baseUrl}/user/currentUser`)
+    await fetch('https://other.example.test/user/currentUser')
+    expect([a.calls.length, b.calls.length]).toEqual([1, 2])
+    expect(passed).toEqual(['https://other.example.test/user/currentUser'])
+    restoreC()
+    expect(globalThis.fetch).toBe(stub)
+  })
 })
 
 describe('createFakeWebSocket({ flavor })', () => {
@@ -135,14 +224,16 @@ describe('createFakeWebSocket({ flavor })', () => {
     run()
     await post('/inventory/managedObjects', { name: 'Pump' })
     // the frame is encoded on delivery: take Buffer away only there (undici needs it)
-    const buffer: unknown = Reflect.get(globalThis, 'Buffer')
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'Buffer')
     if (withoutBuffer) {
       Reflect.deleteProperty(globalThis, 'Buffer')
     }
     try {
       run()
     } finally {
-      Reflect.set(globalThis, 'Buffer', buffer)
+      if (withoutBuffer && descriptor) {
+        Object.defineProperty(globalThis, 'Buffer', descriptor)
+      }
     }
     socket.close()
     run()
@@ -163,7 +254,10 @@ describe('createFakeWebSocket({ flavor })', () => {
     expect(Buffer.isBuffer(data)).toBe(true)
     expect(String(data)).toContain('"name":"Pump"')
     expect(isBinary).toBe(false)
-    expect(Buffer.isBuffer(closes[0]![1])).toBe(true)
+    const [code, reason] = closes[0]!
+    expect(code).toBe(1000)
+    expect(Buffer.isBuffer(reason)).toBe(true)
+    expect((reason as Buffer).length).toBe(0)
   })
 
   it('uses UTF-8 bytes where the runtime has no Buffer', async () => {
@@ -209,7 +303,27 @@ describe('overrideHint', () => {
     })
     const response = await get(world, '/custom')
     expect(response.status).toBe(500)
-    expect((await response.json()).message).toContain('return a Response with that status instead')
+    const { message } = await response.json()
+    expect(message).toBe('GET /custom: an override handler threw Error: boom. To answer with an error on purpose, return a Response with that status instead.')
     expect(world.unhandled).toMatchObject([{ kind: 'error' }])
+
+    // a trailing period is not doubled
+    world.override('GET /dotted', () => {
+      throw new Error('boom.')
+    })
+    expect((await (await get(world, '/dotted')).json()).message).toContain('threw Error: boom. To answer')
+  })
+
+  it('leaves the hint out where the override did not throw itself', async () => {
+    const world = createWorld()
+    world.service('broken', () => {
+      throw new Error('service failed')
+    })
+    world.override('GET /service/broken/**', (_request, ctx) => ctx.next())
+    const response = await get(world, '/service/broken/x')
+    expect(response.status).toBe(500)
+    const { message } = await response.json()
+    expect(message).toContain('the fake Cumulocity platform failed: Error: service failed')
+    expect(message).not.toContain('override')
   })
 })

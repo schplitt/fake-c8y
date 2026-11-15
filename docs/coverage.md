@@ -31,11 +31,21 @@ The `kind` of an unhandled request:
 
 The `unsupported` option of `createWorld()` and `fork()` sets the answer:
 
-- `'developer'` (default): a 501 that names the request and the reason, with a hint to answer it with `world.override()`. A wrapper that exposes overrides under its own name sets `overrideHint`: `createWorld({ overrideHint: (request) => \`c8y.override('${request.method} ${request.path}', ...)\` })` changes only the hint.
+- `'developer'` (default): a 501 that names the request and the reason, with a hint to answer it with `world.override()`. A wrapper that exposes overrides under its own name sets `overrideHint` (see below).
 - `'platform'`: a neutral 501 without hints, for clients that must not notice the fake, such as an agent under evaluation.
 - a function `(request, world) => Response`: your own answer.
 
 In every case the request is recorded in `world.unhandled` and passed to `onUnsupported`.
+
+`overrideHint` changes only the call the developer 501 names, for a wrapper with its own override API:
+
+```ts
+const world = createWorld({
+  overrideHint: (request) => `c8y.override('${request.method} ${request.path}', ...)`,
+})
+```
+
+When an override handler throws (kind `'error'`), the developer 500 says so and suggests returning a `Response` with the error status instead. Other failures (of the fake or a service handler) answer without that hint.
 
 For one agent turn, or one test on a shared world, read the unhandled requests of a [log window](world.md#log-windows) instead of the whole trial: a turn is valid while `world.unhandledSince(turnStart)` is empty. A request belongs to the turn in which it started, also when it fails after the next turn began:
 
