@@ -33,7 +33,7 @@ const alarm = await response.json()
 
 ## Guides
 
-- [The world](https://github.com/schplitt/fake-c8y/blob/main/docs/world.md): `createWorld()` options, seeding, requests, overrides, and reading the data.
+- [The world](https://github.com/schplitt/fake-c8y/blob/main/docs/world.md): `createWorld()` options, seeding, requests, overrides, log windows, and reading the data.
 - [Trials](https://github.com/schplitt/fake-c8y/blob/main/docs/trials.md): forks, reset, snapshots, diffs, and the trial clock.
 - [The coverage gate](https://github.com/schplitt/fake-c8y/blob/main/docs/coverage.md): telling a faithful trial from one that hit a request the fake does not emulate.
 - [Services](https://github.com/schplitt/fake-c8y/blob/main/docs/services.md): emulating the tenant's own microservices with `defineService()` and `world.service()`.

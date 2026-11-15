@@ -167,7 +167,7 @@ The handler gets a copy of the request whose body it can read, and a context:
 | `call`           | The request as the world recorded it: a copy of its `world.calls` entry. See [The recorded call](#the-recorded-call).                                  |
 | `tenant`, `user` | The caller's tenant and user name (`user` is `undefined` without Basic auth).                                                                          |
 | `world`          | The world that got the request: the fork, also for an override registered on the base.                                                                 |
-| `callCount`      | How many requests this override got, this one included: `2` is its second. A fork counts on its own, and `reset()` starts over.                        |
+| `callCount`      | How many requests this override got, this one included: `2` is its second. A fork counts on its own, `reset()` starts over, and a log mark does not.   |
 | `next()`         | Answers the request as if this override did not exist (the next older matching override, else a service or the emulation) and returns that `Response`. |
 
 The handler returns a `Response`, another value (200 with it as JSON), or nothing (204). `Response.error()` simulates a network failure, see [Network errors](#network-errors). It can throw `UnsupportedRequestError` (exported) to report the request as not emulated (kind `'feature'`). Any other exception answers 500 and is recorded in `unhandled` with kind `'error'`: a broken override, not a simulated failure.
@@ -265,12 +265,45 @@ h3 answers errors it throws in its own JSON shape, not the platform's.
 | `apply(state)`, `setUser(user)`       | Change the tenant, user, subscriptions, or tenant options.                                                                              |
 | `calls`, `unhandled`, `inflight`      | Requests answered and requests not emulated since the last reset, and the number of requests being answered now.                        |
 | `callsTo(pattern)`                    | The calls since the last reset that match an `override()` pattern, in order: `world.callsTo('POST /alarm/alarms')`.                     |
+| `mark()`, `callsSince(mark)`, …       | Windows of the call log without a reset, see [Log windows](#log-windows).                                                               |
 | `muted(fn)`                           | Runs `fn` without publishing Notification 2.0 messages. An async `fn` mutes the whole world until its promise settles.                  |
 | `tenant`, `user`, `subscriptions`     | The current deployed tenant, current user, and subscriptions.                                                                           |
 
 `matchesCall(pattern, call)` (exported) tells whether one recorded call matches a pattern (a string or a `compileRoute()` result), e.g. to filter `calls` of several worlds, `unhandled`, or `coverage().platformErrors`. Both match a recorded call exactly as `override()` matched its request, also with an encoded `/` or `?` inside a segment. For an object the world did not record, `matchesCall()` splits its `path` at `/`.
 
 `db` collections have `get(id)` and `find(filter?)`; a filter is a partial object or a predicate. `db.measurements.find()` builds every matching generated document, so filter it by `source`.
+
+## Log windows
+
+`world.calls` and `world.unhandled` hold everything since the last reset. For the requests of one test or one agent turn, mark a point of the log and read the window since it:
+
+```ts
+const turn = world.mark()
+await runTurn(world)
+const calls = world.callsSince(turn) // C8yRequest[]
+const unhandled = world.unhandledSince(turn) // C8yUnhandledRequest[]
+turn.release()
+```
+
+| Member                                       | What It Does                                                                                                                                                                   |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `mark()`                                     | Marks the current point of the log. O(1). `mark.release()` ends it.                                                                                                            |
+| `callsSince(from, until?, options?)`         | The requests that started after `from` and not after `until` (another mark), in the order they were recorded. `options.except` lists ranges (`{ from, until? }`) to leave out. |
+| `unhandledSince(from, until?, options?)`     | The unhandled entries of the requests of that window, without those taken by `takeUnhandledSince()`.                                                                           |
+| `takeUnhandledSince(from, until?, options?)` | Like `unhandledSince()`, and takes the entries: later windows of any mark leave them out. Taking the same window again returns only what came late. Calls are never taken.     |
+
+The rules:
+
+- A request belongs to the window in which `fetch()` was called. A request a service sends with `ctx.fetch()` belongs to the window of the request the service was answering, so a window never shows a child without its parent. A request still in flight when the next mark is taken is recorded later (its call after its body is read, its unhandled entry when it finishes), but it stays in the window it started in, so `unhandledSince(test, nextTest)` still finds it after the next test began.
+- `from === until` and an `until` before `from` give an empty window.
+- Reading a window changes nothing; taking unhandled entries changes neither `calls`, `unhandled`, nor `coverage()`. Assigning `world.calls = []` or `world.unhandled = []` changes no window.
+- Request ids (`C8yRequest.id`), override call counts (`ctx.callCount`), and usage statistics count on across marks: they are per reset, not per window. To count an override's requests in a window, filter `callsSince(mark)` with `matchesCall(pattern, call)`, or register the override for the window and remove it afterwards.
+- A mark belongs to its world and its log: a fork has its own log, and a mark of another world (also of the fork's base) throws a `TypeError`. `restore()` keeps the log and its marks. `reset()` (also `reset({ to })`) starts a new log, and marks from before it throw a `TypeError` (as `from`, `until`, or in `except`): take new marks after a reset. Requests still in flight across a reset answer 503 and never show in a window.
+- A released mark throws when used; releasing twice, or a mark ended by a reset, does nothing.
+
+**Retention.** The world keeps the calls and unhandled entries of the requests that started after its oldest live mark, and nothing while no mark is live. Releasing a mark drops what only it needed, and taken unhandled entries are dropped at once. Release the marks you no longer need: a world that is never reset and keeps an old mark keeps every request since. A window costs O(entries kept since its `from` mark).
+
+Assigning new arrays to `calls` and `unhandled` still works, but it is only a partial reset: ids, override call counts, and usage statistics keep counting, a request in flight lands in the new array, and entries kept for live marks stay. Prefer marks.
 
 ## Ids
 
