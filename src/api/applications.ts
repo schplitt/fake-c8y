@@ -389,9 +389,10 @@ export function seedApplications(data: TenantData, inputs: readonly C8yApplicati
  * @param serviceUser - Name of the service user (default `service_<name>`)
  * @param refresh - Bring an existing subscription up to date (service user,
  *   roles, settings defaults) instead of leaving it as it is
+ * @param password - Password of the service user (default: derived from its name)
  * @returns `false` if the tenant was subscribed already
  */
-export function subscribe(data: TenantData, application: Readonly<StoredDocument>, serviceUser?: string, refresh = false): boolean {
+export function subscribe(data: TenantData, application: Readonly<StoredDocument>, serviceUser?: string, refresh = false, password?: string): boolean {
   const existing = data.applicationSubscriptions.get(application.id)
   if (existing && !refresh) {
     return false
@@ -403,7 +404,7 @@ export function subscribe(data: TenantData, application: Readonly<StoredDocument
   const subscription: StoredDocument = { id: application.id, owner: application.owner }
   if (application.type === 'MICROSERVICE') {
     subscription.serviceUser = serviceUser ?? `service_${application.name as string}`
-    subscription.password = applicationPassword(subscription.serviceUser as string)
+    subscription.password = password ?? applicationPassword(subscription.serviceUser as string)
     for (const role of (application.roles ?? []) as string[]) {
       if (!data.roles.has(role)) {
         data.roles.set(role, role)
@@ -417,7 +418,7 @@ export function subscribe(data: TenantData, application: Readonly<StoredDocument
       }
     }
   }
-  if (!existing || existing.owner !== subscription.owner || existing.serviceUser !== subscription.serviceUser) {
+  if (!existing || existing.owner !== subscription.owner || existing.serviceUser !== subscription.serviceUser || existing.password !== subscription.password) {
     data.applicationSubscriptions.set(application.id, subscription)
   }
   return !existing
@@ -455,7 +456,19 @@ export function deleteApplication(data: TenantData, id: string): boolean {
   return true
 }
 
-const bootstrapName = (application: Readonly<StoredDocument>): string => `servicebootstrap_${application.name as string}`
+/**
+ * Field of a stored microservice with a bootstrap user name other than the
+ * platform's (the world's deployed microservice). Hidden from the API.
+ */
+export const BOOTSTRAP_USER = '__bootstrapUser'
+
+/**
+ * The bootstrap user name of a microservice: `servicebootstrap_<name>`
+ * (verified), or the name the world's deployed microservice was given
+ * (`createWorld({ manifest, bootstrapUser })`, kept in `__bootstrapUser`).
+ * @param application - The microservice
+ */
+const bootstrapName = (application: Readonly<StoredDocument>): string => (application[BOOTSTRAP_USER] as string | undefined) ?? `servicebootstrap_${application.name as string}`
 
 /**
  * The application whose own credentials a request uses: its bootstrap user
@@ -478,11 +491,10 @@ export function applicationOfCredentials(tenants: Iterable<TenantData>, tenant: 
         }
       }
     }
-    if (user.startsWith('servicebootstrap_')) {
-      for (const application of data.applications.values()) {
-        if (application.owner === tenant && application.type === 'MICROSERVICE' && bootstrapName(application) === user) {
-          return { data, application, bootstrap: true }
-        }
+    // any name: the world's deployed microservice may have its own
+    for (const application of data.applications.values()) {
+      if (application.owner === tenant && application.type === 'MICROSERVICE' && bootstrapName(application) === user) {
+        return { data, application, bootstrap: true }
       }
     }
   }

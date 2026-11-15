@@ -31,9 +31,10 @@ await world.fetch(new Request(`${world.baseUrl}/tenant/options`, { headers: asOp
 | A user the caller's tenant stores                                       | Its global roles (own and from its groups), ownership, inventory roles, and device permissions. |
 | A registered service's service user (`world.service()`)                 | The manifest's `requiredRoles` and `ROLE_SYSTEM`.                                               |
 | A registered service's bootstrap user                                   | `ROLE_SYSTEM` only.                                                                             |
-| A name the tenant does not store, the world's own `subscriptions` users | Unrestricted (the fake checks no passwords).                                                    |
+| The world's own `subscriptions` and `bootstrapUser` with a `manifest`   | As a registered service's service and bootstrap user (`createWorld({ manifest })`).             |
+| A name the tenant does not store, the world's own `subscriptions` users | Unrestricted (the fake checks no passwords). With a `manifest`, see the row above.              |
 
-So under enforcement only stored users and a service's bootstrap and service users are restricted. Requests without Basic auth, the world's own `user`, and user names the tenant does not store keep full access, so tests that send no credentials work unchanged.
+So under enforcement only stored users and a service's bootstrap and service users (also those of the deployed microservice with a `manifest`, see [The deployed microservice](services.md#the-deployed-microservice)) are restricted. Requests without Basic auth, the world's own `user`, and user names the tenant does not store keep full access, so tests that send no credentials work unchanged.
 
 Every new user gets `ROLE_USER_MANAGEMENT_OWN_READ` and `ROLE_USER_MANAGEMENT_OWN_ADMIN`, like on the platform: users seeded with `world.seed({ users })` (in addition to the `roles` you give) and users created with `POST /user/{tenant}/users`. Without `OWN_READ`, `GET /user/currentUser` answers 403; delete the role through the API to test that. The world's `user` keeps exactly its `roles`, since it is unrestricted anyway. A user is unrestricted only while it is the world's `user`: after `setUser()` switches away, it is restricted by what the tenant stores for it, which is what was there before the switch.
 

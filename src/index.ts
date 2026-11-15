@@ -28,7 +28,7 @@ import { renderCurrentUser, upsertWorldUser } from './api/users'
 import { C8Y_SPEC_PATHS } from './capabilities.generated'
 import { checkServiceSeed, defineService, serviceStateKey, serviceStore, toJson } from './services'
 import type { C8yMicroserviceManifest } from './api/applications'
-import { applicationOfCredentials, applicationSettings, deleteApplication, microserviceFromManifest, renderApplication, renderApplicationUser, settingsCategoryOf, subscribe, subscribedMicroservice, unsubscribe, updateApplication } from './api/applications'
+import { applicationOfCredentials, applicationSettings, BOOTSTRAP_USER, deleteApplication, microserviceFromManifest, renderApplication, renderApplicationUser, settingsCategoryOf, subscribe, subscribedMicroservice, unsubscribe, updateApplication } from './api/applications'
 
 // The spec's endpoints, to tell "not emulated" (501) from "the platform does not
 // have this endpoint" (404) or "not this method" (405).
@@ -215,15 +215,29 @@ export interface WorldOptions extends C8yWorldState {
   baseUrl?: string
   /**
    * Bootstrap user of the microservice: may address `/application/currentApplication`.
-   * @default 'servicebootstrap_test'
+   * @default 'servicebootstrap_test', with a `manifest` `servicebootstrap_<name>`
    */
   bootstrapUser?: string
   /**
    * The microservice's own tenant option category: `tenantOptions` live there,
-   * and its `credentials.*` options read decrypted.
-   * @default 'service'
+   * and its `credentials.*` options read decrypted. With a `manifest` it must
+   * be the manifest's settings category, if given.
+   * @default 'service', with a `manifest` its `settingsCategory`, else its context path, else its name
    */
   settingsCategory?: string
+  /**
+   * The deployed microservice's `cumulocity.json`. With it, the microservice
+   * is a MICROSERVICE application owned by the deployed tenant, like a
+   * registered service (`world.service()`): `subscriptions` subscribe their
+   * tenants to it (with their service user names and passwords), its `roles`
+   * join the subscribed tenants' role catalogue, its `settings` defaults
+   * become tenant options, and under `roles: 'enforce'` its service users
+   * get its `requiredRoles` (plus `ROLE_SYSTEM`) and its bootstrap user
+   * `ROLE_SYSTEM`. Its context path is `contextPath`, else `name`.
+   * Without it, the microservice has no application and its users are
+   * unrestricted. See docs/services.md.
+   */
+  manifest?: C8yMicroserviceManifest
   /**
    * Clock for timestamps, in epoch milliseconds.
    * @default Date.now
@@ -700,6 +714,26 @@ function microserviceOf(data: TenantData, contextPath: string): Readonly<StoredD
   return undefined
 }
 
+/**
+ * The deployed microservice of a world created with a `manifest`: its
+ * context path, settings category, and bootstrap user name.
+ * @param manifest - The manifest
+ * @param options - The world's options (`settingsCategory`, `bootstrapUser`)
+ */
+function deployedMicroservice(manifest: C8yMicroserviceManifest, options: WorldOptions): { manifest: C8yMicroserviceManifest, contextPath: string, settingsCategory: string, bootstrapUser: string } {
+  const contextPath = [manifest.contextPath, manifest.name].find((value): value is string => typeof value === 'string' && value.trim() !== '')
+  if (contextPath === undefined) {
+    throw new TypeError('fake-c8y: createWorld({ manifest }): the manifest needs a contextPath or a name')
+  }
+  const name = manifest.name ?? contextPath
+  // like the platform: settingsCategory, else the context path (else the name)
+  const settingsCategory = typeof manifest.settingsCategory === 'string' && manifest.settingsCategory.trim() !== '' ? manifest.settingsCategory : contextPath
+  if (options.settingsCategory !== undefined && options.settingsCategory !== settingsCategory) {
+    throw new TypeError(`fake-c8y: createWorld({ manifest }): settingsCategory '${options.settingsCategory}' differs from the manifest's settings category '${settingsCategory}'`)
+  }
+  return { manifest: { ...manifest }, contextPath, settingsCategory, bootstrapUser: options.bootstrapUser ?? `servicebootstrap_${name}` }
+}
+
 function defaultSubscription(tenant: string): C8ySubscription {
   return { tenant, user: `service_${tenant}`, password: DEFAULTS.subscriptionPassword }
 }
@@ -870,8 +904,9 @@ function copyUser(user: C8yUser | null): C8yUser | null {
 
 function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
   const baseUrl = (options.baseUrl ?? DEFAULTS.baseUrl).replace(/\/+$/, '')
-  const bootstrapUser = options.bootstrapUser ?? DEFAULTS.bootstrapUser
-  const settingsCategory = options.settingsCategory ?? DEFAULTS.settingsCategory
+  const deployed = options.manifest ? deployedMicroservice(options.manifest, options) : undefined
+  const bootstrapUser = deployed?.bootstrapUser ?? options.bootstrapUser ?? DEFAULTS.bootstrapUser
+  const settingsCategory = deployed?.settingsCategory ?? options.settingsCategory ?? DEFAULTS.settingsCategory
   const clock = options.clock?.now ?? options.now ?? Date.now
   const unsupported = options.unsupported ?? 'developer'
   // a fork's reset() goes back to this time on its own clock
@@ -1171,6 +1206,8 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
 
   function apply(state: Partial<C8yWorldState>): void {
     writable()
+    const previousTenant = tenant
+    const previousSubscriptions = subscriptions
     if (state.tenant !== undefined) {
       tenant = state.tenant
     }
@@ -1185,7 +1222,53 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     for (const [key, value] of Object.entries(state.tenantOptions ?? {})) {
       worldOptions.set(key, value)
     }
+    if (deployed && (state.subscriptions !== undefined || tenant !== previousTenant)) {
+      // after the tenant options: explicit values win over settings defaults
+      deploy(previousTenant, previousSubscriptions)
+    }
     options.onChange?.(world)
+  }
+
+  /**
+   * Brings the deployed microservice's application (`manifest`) in line with
+   * the deployed tenant and `subscriptions`: moves it to a new deployed
+   * tenant, creates it when it is missing, unsubscribes the tenants the
+   * previous subscriptions had and the current ones do not, and subscribes
+   * the current ones with their service users and passwords. Subscriptions
+   * that are up to date are left as they are (no writes).
+   * @param previousTenant - The deployed tenant before the change
+   * @param previousSubscriptions - The subscriptions before the change
+   */
+  function deploy(previousTenant: string, previousSubscriptions: readonly C8ySubscription[]): void {
+    const { contextPath, manifest } = deployed!
+    if (previousTenant !== tenant) {
+      // the microservice moves with the deployed tenant
+      const former = context.tenantData?.(previousTenant)
+      const application = former && microserviceOf(former, contextPath)
+      if (former && application) {
+        deleteApplication(former, application.id)
+      }
+    }
+    const data = tenantData(tenant)
+    let application = microserviceOf(data, contextPath)
+    if (!application) {
+      application = microserviceFromManifest(data, contextPath, manifest)
+      if (bootstrapUser !== `servicebootstrap_${application.name as string}`) {
+        application = { ...application, [BOOTSTRAP_USER]: bootstrapUser }
+      }
+      data.applications.set(application.id, application)
+    }
+    for (const former of previousSubscriptions) {
+      if (!subscriptions.some((subscription) => subscription.tenant === former.tenant)) {
+        const subscriber = context.tenantData?.(former.tenant)
+        if (subscriber && subscriber.applicationSubscriptions.get(application.id)?.owner === application.owner) {
+          unsubscribe(subscriber, application.id)
+        }
+      }
+    }
+    for (const subscription of subscriptions) {
+      subscribe(tenantData(subscription.tenant), application, subscription.user, true, subscription.password)
+    }
   }
 
   /**
@@ -1284,7 +1367,8 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       return apiError(401, 'security/Unauthorized', 'Invalid credentials!')
     }
     const own = applicationOfCredentials(tenants.values(), call.tenant, call.user)
-    const legacy = !own && (call.user === bootstrapUser || subscriptions.some((subscription) => subscription.user === call.user))
+    // the deployed microservice without a manifest has no application
+    const legacy = !own && !deployed && (call.user === bootstrapUser || subscriptions.some((subscription) => subscription.user === call.user))
     if (!own && !legacy && formerApplicationUser(call)) {
       return apiError(401, 'security/Unauthorized', 'Invalid credentials!')
     }
@@ -1328,7 +1412,9 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
    * @param call - The recorded request
    */
   function formerApplicationUser(call: C8yRequest): boolean {
-    return /^service(?:bootstrap)?_/.test(call.user ?? '') && call.user !== bootstrapUser && !subscriptions.some((subscription) => subscription.user === call.user)
+    const deployedUser = call.user === bootstrapUser || subscriptions.some((subscription) => subscription.user === call.user)
+    // with a manifest the deployed microservice's users are application users too
+    return (deployed ? /^service(?:bootstrap)?_/.test(call.user ?? '') || deployedUser : /^service(?:bootstrap)?_/.test(call.user ?? '') && !deployedUser)
       // a user of the tenant may have such a name too
       && !tenantData(call.tenant).users.has(call.user!)
   }
@@ -1679,6 +1765,11 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       }
       return answerService(service, service.handler, contextPath, call, request, bytes, started)
     }
+    if (application && deployed && contextPath === deployed.contextPath && application.owner === tenant) {
+      // the microservice under test: the world does not run it
+      call.service = contextPath
+      return unhandledAnswer(call, `the deployed microservice ${contextPath} is not emulated (answer it with world.override('/service/${contextPath}/**', ...))`, 'feature')
+    }
     if (application && application.owner === 'management') {
       // a microservice of the platform the world does not emulate
       return unhandledAnswer(call, `microservice ${contextPath} is subscribed but not emulated (register it with world.service('${contextPath}', ...))`, 'outside-spec')
@@ -1840,6 +1931,9 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
    */
   function registerService(source: object, definition: C8yService, handler: C8yServiceHandler | undefined): () => void {
     const { contextPath } = definition
+    if (contextPath === deployed?.contextPath) {
+      throw new TypeError(`fake-c8y: service ${contextPath}: the context path of the deployed microservice (createWorld({ manifest }))`)
+    }
     const previous = services.get(contextPath)
     if (previous?.source === source) {
       const own = removers.get(previous)

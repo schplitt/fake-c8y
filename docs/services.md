@@ -248,6 +248,38 @@ Every call of the short form is a new definition, so registering the same contex
 
 Permissions are enforced by default. A service's requests through `ctx.fetch()` get the manifest's `requiredRoles` (and `ROLE_SYSTEM`), like on the platform: a service user without `ROLE_EVENT_READ` gets 403 `Access is denied` on `/event/events`. This catches an incomplete `requiredRoles` in tests, so declare every role the service needs, for example `ROLE_OPTION_MANAGEMENT_READ` to read tenant options. A service registered without a manifest has no required roles. `createWorld({ roles: 'off' })` gives every caller full access. See [Roles](roles.md).
 
+## The deployed microservice
+
+The world's own microservice, the one a test harness runs against the world, is described by `createWorld({ subscriptions, bootstrapUser, settingsCategory })`. Without a manifest it has no application: its bootstrap and service users read `/application/currentApplication/**` and are unrestricted. With `createWorld({ manifest })` it becomes a MICROSERVICE application like a registered service, so tests see its roles and settings and catch an incomplete `requiredRoles`:
+
+```ts
+const world = createWorld({
+  tenant: 't100',
+  manifest, // { name: 'pump-service', contextPath: 'pumps', requiredRoles: ['ROLE_INVENTORY_READ'], roles: ['ROLE_PUMP_READ'], settings: [{ key: 'interval', defaultValue: '5' }] }
+  subscriptions: [
+    { tenant: 't100', user: 'service_t100', password: 'pw-100' },
+    { tenant: 't200', user: 'service_t200', password: 'pw-200' },
+  ],
+})
+world.options.get('interval', { tenant: 't200' }) // '5'
+// as t200/service_t200: GET /event/events answers 403 (not in requiredRoles)
+// as t100/servicebootstrap_pump-service: GET /application/currentApplication/subscriptions
+//   { users: [{ tenant: 't100', name: 'service_t100', password: 'pw-100' }, { tenant: 't200', ... }] }
+```
+
+What differs from `world.service()`:
+
+- **Owner.** The deployed tenant (`tenant`). `apply({ tenant })` moves the application there: it is deleted in the old tenant (which ends its subscriptions) and created in the new one.
+- **Context path.** `manifest.contextPath`, else `manifest.name`. One of them is required. `world.service()` with the same context path throws.
+- **Subscriptions.** `world.subscriptions`, each tenant with its own service user name and password, as `GET /application/currentApplication/subscriptions` answers them. A baseline (`createWorld()`, `reset({ subscriptions })`) and `apply({ subscriptions })` subscribe the tenants it lists and unsubscribe the ones the previous subscriptions listed and it does not. A changed user or password replaces the subscription's. `apply()` without `subscriptions` leaves the subscriptions as they are, also ones the API ended.
+- **Bootstrap user.** The `bootstrapUser` option, else `servicebootstrap_<name>`.
+- **Settings category.** The manifest's, like a registered service: `settingsCategory`, else the context path. A `settingsCategory` option must name the same category. `tenantOptions` go there and win over the `settings` defaults.
+- **No handler.** The world does not run the microservice under test: `/service/<contextPath>/**` answers 501 (kind `'feature'`) in subscribed tenants and 404 elsewhere. Answer it with `world.override()` if needed.
+
+Everything else is as for a registered service: the manifest `roles` join each subscribed tenant's catalogue and stay after an unsubscription, `settings` defaults become tenant options where none exist, and under `roles: 'enforce'` the service users get the `requiredRoles` plus `ROLE_SYSTEM` and the bootstrap user `ROLE_SYSTEM` (see [Roles](roles.md#who-is-checked)). A service user whose tenant is no longer subscribed, and the bootstrap user of a deleted application, answer 401 on `/user/currentUser` and `/application/currentApplication/**`.
+
+The application and subscriptions are data: a fork inherits them (its diff starts empty), `reset()` and `reset({ to })` bring back the baseline's or the checkpoint's, `snapshot()`/`restore()` keep them as they are, and `diff()` shows what `apply({ subscriptions })` changed under `applicationSubscriptions` and `roles`. The `manifest` itself is an option of the world, not state: forks share it, and `apply()` and `reset()` do not change it.
+
 ## Use from an evals host
 
 A host registers each service definition on the base without a handler (`base.service(definition)`), which installs its application, roles, and seed, and supplies the handler per trial (`trial.service(definition, { handler })`). The handler forwards the request into the service's iso4 isolate with the `C8yServiceContext` as host bindings. The isolate gets the request with the path below the context path and the caller's tenant and user, and calls back through `ctx.fetch()` as its service user.
