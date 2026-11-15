@@ -2131,7 +2131,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
           throw new TypeError(`fake-c8y: seed(): service ${service} is not registered (register it with world.service() first)`)
         }
       }
-      return applySeed(tenantData(seed.tenant ?? tenant), seed, owner()) as C8ySeedResultFor<typeof seed>
+      return applySeed(tenantData(seed.tenant ?? tenant), seed, owner(), { existing: (name) => tenants.get(name) ?? base?.tenants.get(name), data: tenantData }) as C8ySeedResultFor<typeof seed>
     },
 
     tick,
