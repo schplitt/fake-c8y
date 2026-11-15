@@ -42,7 +42,7 @@ const world = createWorld({
 | `passwords`        | `'off'`                                  | `'check'` answers 401 for a known user's wrong password. See [Roles](#roles).                                                               |
 | `freezeDocuments`  | `false`                                  | Deep-freezes every stored document, so code that changes one in place throws. For tests of fake-c8y itself; it makes writes slower.         |
 
-`DEFAULTS` (exported) holds the default values, plus passwords for credentials a harness builds: `subscriptionPassword` (`'service-password'`, the default subscription's service user), `bootstrapPassword` (`'bootstrap-password'`), and `userPassword` (`'test-password'`). The fake checks no passwords; these only spare wrappers their own copies. The light entry `fake-c8y/defaults` exports `DEFAULTS` and nothing else, so a Vite or Vitest config (or any code that must not load the engine) can import it:
+`DEFAULTS` (exported) holds the default values, plus passwords for credentials a harness builds: `subscriptionPassword` (`'service-password'`, the default subscription's service user), `bootstrapPassword` (`'bootstrap-password'`), and `userPassword` (`'test-password'`). By default the fake checks no passwords; these only spare wrappers their own copies. With `passwords: 'check'`, `subscriptionPassword` is the default subscription's password, and the other two pass only for users without a password (see [Roles](roles.md#wrong-credentials)). The light entry `fake-c8y/defaults` exports `DEFAULTS` and nothing else, so a Vite or Vitest config (or any code that must not load the engine) can import it:
 
 ```ts
 import { DEFAULTS } from 'fake-c8y/defaults'

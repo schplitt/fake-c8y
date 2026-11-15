@@ -1,7 +1,9 @@
 /**
  * Values a world uses when its options leave them out, and the passwords
- * harnesses put into credentials. The fake checks no passwords: any value
- * passes, these only keep wrappers from inventing their own.
+ * harnesses put into credentials. By default the fake checks no passwords:
+ * any value passes, these only keep wrappers from inventing their own. With
+ * `passwords: 'check'`, `subscriptionPassword` is the default subscription's
+ * real password; the others pass only for users without a password.
  *
  * Also exported from the light `fake-c8y/defaults` entry, which imports
  * nothing else (safe in a Vite or Vitest config). Keep this module free of
