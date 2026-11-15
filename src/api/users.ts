@@ -11,6 +11,15 @@ import { clone } from '../utils'
  */
 export const NEW_USER_ROLES: readonly string[] = ['ROLE_USER_MANAGEMENT_OWN_READ', 'ROLE_USER_MANAGEMENT_OWN_ADMIN']
 
+/**
+ * The password a stored user logs in with (`passwords: 'check'`): the one it
+ * was created or seeded with, or last set. The platform never answers it, so
+ * renders leave it out, diffs show it redacted, snapshots keep it (restore
+ * needs it). A user without one (an empty one counts as none) accepts any
+ * password.
+ */
+export const PASSWORD = '__password'
+
 const PROFILE_FIELDS = ['firstName', 'lastName', 'phone', 'email', 'displayName', 'enabled', 'newsletter', 'owner', 'delegatedBy']
 const PERMISSION_LEVELS = ['ADMIN', 'READ', '*']
 const PERMISSION_SCOPES = ['ALARM', 'AUDIT', 'EVENT', 'MANAGED_OBJECT', 'MEASUREMENT', 'OPERATION', '*']
@@ -134,7 +143,7 @@ export function renderGroup(data: TenantData, group: StoredDocument, query = '')
  */
 export function renderUser(data: TenantData, user: StoredDocument, options: { subusersCount?: boolean, query?: string } = {}): Record<string, unknown> {
   const base = userBase(data, user.userName as string)
-  const { id: _id, userName, roles, groups, customProperties, devicePermissions, passwordStrength, shouldResetPassword, enabled, lastPasswordChange, ...fields } = user
+  const { id: _id, userName, roles, groups, customProperties, devicePermissions, passwordStrength, shouldResetPassword, enabled, lastPasswordChange, [PASSWORD]: _password, ...fields } = user
   const rendered: Record<string, unknown> = {
     // verified: `self` encodes the user name, the nested links do not
     self: `${data.world.baseUrl}/user/${data.tenant}/users/${encodeURIComponent(userName as string)}`,
@@ -182,7 +191,7 @@ export function effectiveRoles(data: TenantData, user: StoredDocument): string[]
  * @param user - Stored user
  */
 export function renderCurrentUser(data: TenantData, user: StoredDocument): Record<string, unknown> {
-  const { id: _id, userName, roles: _roles, groups: _groups, customProperties: _custom, devicePermissions: _permissions, passwordStrength: _strength, enabled: _enabled, owner: _owner, shouldResetPassword, lastPasswordChange, ...fields } = user
+  const { id: _id, userName, roles: _roles, groups: _groups, customProperties: _custom, devicePermissions: _permissions, passwordStrength: _strength, enabled: _enabled, owner: _owner, shouldResetPassword, lastPasswordChange, [PASSWORD]: _password, ...fields } = user
   return {
     self: `${data.world.baseUrl}/user/currentUser`,
     id: userName,
@@ -425,6 +434,9 @@ export function createUser(data: TenantData, body: Record<string, unknown>, role
     groups: [],
     lastPasswordChange: data.world.now(),
   })
+  if (typeof password === 'string' && password !== '' && !options.seeding) {
+    user[PASSWORD] = password
+  }
   data.users.set(user.id, user)
   auditUser(data, user.id, 'created')
   return user
@@ -460,6 +472,7 @@ function updateUser(data: TenantData, user: StoredDocument, body: Record<string,
       fail(422, 'undefined/validationError', 'Cannot change password for another user.')
     }
     checkPassword(body.password)
+    user[PASSWORD] = body.password
     user.lastPasswordChange = data.world.now()
     user.shouldResetPassword = false
   }
@@ -1318,7 +1331,7 @@ function inventoryRoles(call: C8yRequest, data: TenantData, id: string | undefin
  * @param input - The world's user
  */
 export function upsertWorldUser(data: TenantData, input: C8yUser): void {
-  const { userName, roles = [], tenant: _tenant, groups, ...fields } = input
+  const { userName, roles = [], tenant: _tenant, groups, password, ...fields } = input
   const stored = data.users.get(userName)
   const user: StoredDocument = stored
     ? clone(stored)
@@ -1332,6 +1345,9 @@ export function upsertWorldUser(data: TenantData, input: C8yUser): void {
   user.roles = [...new Set(roles)]
   if (groups !== undefined) {
     user.groups = groups.map((group) => groupId(data, group))
+  }
+  if (password !== undefined && password !== '') {
+    user[PASSWORD] = password
   }
   data.users.set(userName, user)
 }

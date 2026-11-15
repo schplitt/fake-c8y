@@ -32,13 +32,52 @@ await world.fetch(new Request(`${world.baseUrl}/tenant/options`, { headers: asOp
 | A registered service's service user (`world.service()`)                 | The manifest's `requiredRoles` and `ROLE_SYSTEM`.                                                                           |
 | A registered service's bootstrap user                                   | `ROLE_SYSTEM` only.                                                                                                         |
 | The world's own `subscriptions` and `bootstrapUser` with a `manifest`   | Like a registered service's: `requiredRoles` and `ROLE_SYSTEM` for the service users, `ROLE_SYSTEM` for the bootstrap user. |
-| A name the tenant does not store, the world's own `subscriptions` users | Unrestricted (the fake checks no passwords). With a `manifest`, see the row above.                                          |
+| A name the tenant does not store, the world's own `subscriptions` users | Unrestricted (by default; see [Wrong credentials](#wrong-credentials)). With a `manifest`, see the row above.               |
 
 So under enforcement only stored users and a service's bootstrap and service users (also those of the deployed microservice with a `manifest`, see [The deployed microservice](services.md#the-deployed-microservice)) are restricted. With a manifest, declare every role the service uses in `requiredRoles`, for example `ROLE_OPTION_MANAGEMENT_READ` to read the tenant options of its own settings category through `/tenant/options/**`. Requests without Basic auth, the world's own `user`, and user names the tenant does not store keep full access, so tests that send no credentials work unchanged.
 
 Every new user gets `ROLE_USER_MANAGEMENT_OWN_READ` and `ROLE_USER_MANAGEMENT_OWN_ADMIN`, like on the platform: users seeded with `world.seed({ users })` (in addition to the `roles` you give) and users created with `POST /user/{tenant}/users`. Without `OWN_READ`, `GET /user/currentUser` answers 403; delete the role through the API to test that. The world's `user` keeps exactly its `roles`, since it is unrestricted anyway. A user is unrestricted only while it is the world's `user`: after `setUser()` switches away, it is restricted by what the tenant stores for it, which is what was there before the switch.
 
 A fork takes the option of its base unless it sets its own: `base.fork({ roles: 'off' })`.
+
+## Wrong credentials
+
+By default the fake accepts any credentials: a user name the tenant does not know runs unrestricted, and no password is checked. Two opt-in options answer wrong credentials with 401, so a test catches a service that sends them (for example the wrong tenant's service user, or a stale password):
+
+```ts
+const world = createWorld({ unknownUsers: 'unauthorized', passwords: 'check' })
+world.seed({ users: [{ userName: 'operator', password: 'Operator-Secret-1' }] })
+const login = (password: string) => ({ authorization: `Basic ${btoa(`${world.tenant}/operator:${password}`)}` })
+await world.fetch(new Request(`${world.baseUrl}/user/currentUser`, { headers: login('Operator-Secret-1') })) // 200
+await world.fetch(new Request(`${world.baseUrl}/user/currentUser`, { headers: login('wrong') })) // 401 security/Unauthorized
+```
+
+- **`unknownUsers: 'unauthorized'`** (default `'allow'`). A request with Basic auth of a user name the caller's tenant does not know answers 401. Known are: the world's `user` (in its tenant), the world's `bootstrapUser` (in the deployed tenant) and `subscriptions` users (in their tenants), the users the tenant stores (seeded, created through the API, not yet deleted), and the bootstrap and service users of registered services (`world.service()`).
+- **`passwords: 'check'`** (default `'off'`). A known user with a password answers 401 for a wrong one. The passwords:
+
+  | User                                    | Password                                                                                                                         |
+  | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+  | A seeded user                           | Its `password` in `world.seed({ users })`; without one, any password works.                                                      |
+  | The world's `user`                      | Its `password` in `createWorld({ user })` / `setUser()`; without one, any password works.                                        |
+  | A user created through the API          | The `password` it was created with; created without one (password reset by email), any password works.                           |
+  | Any stored user that set a new password | The one it set with `PUT /user/{tenant}/users/{user}`.                                                                           |
+  | The world's `subscriptions` users       | Their `password`.                                                                                                                |
+  | The world's `bootstrapUser`             | Any, also with a `manifest` (the world has no password option for it; `DEFAULTS.bootstrapPassword` is not checked).              |
+  | A registered service's users            | The passwords the platform hands out: `GET .../bootstrapUser`, `currentApplication/subscriptions`. Its `ctx.fetch()` sends them. |
+
+  `basicAuth()` without a `password` sends `DEFAULTS.userPassword`, which passes only for users without a password. An unknown user is answered by `unknownUsers`, not by `passwords`, and an empty password (`''`) counts as none. The password is everything after the first `:` of the Basic credentials, so it may contain `:`; credentials without `:` have an empty password.
+
+Both answer `{ error: 'security/Unauthorized', message: 'Invalid credentials!', info }`. Requests without Basic auth are never affected: they stay the world's `user` (the platform's gateway never forwards an anonymous caller to a microservice). Both options are fork options too: `base.fork({ unknownUsers: 'unauthorized', passwords: 'check' })`.
+
+- **Order.** The check runs after the 401 for credentials of an unknown tenant and before everything else: the 401 of a disabled user (so a disabled user with a wrong password gets `Invalid credentials!`), overrides, and services. An override therefore cannot accept credentials the world does not know: seed the users an override hands out (for example device credentials from an override of an unemulated flow), with their `password`, or keep `unknownUsers: 'allow'` for such a test.
+- **Where the password is kept.** In the stored user, never rendered: not by the user API, `currentUser` (also not as the world's `user` after the API deleted it), or `world.db.users`. `world.diff()` shows it as `'[redacted]'` under `__password` in `users` (created, updated, deleted); a password change shows as an update. Snapshots keep it in plain text (`__password`), since `restore()` needs it; forks, `reset()`, and checkpoints keep it like any other field.
+- **The call log.** `world.calls` records each request's headers as sent, including the `authorization` header with the password in Basic auth.
+
+Unverified against a real tenant:
+
+- The 401 body for an unknown user and for a wrong password of a stored, subscription, or service user. The fake answers the body it answers (verified) for credentials of an unknown tenant.
+- That a new password takes effect on the next request and the old one stops working at once.
+- That a wrong password of a disabled user answers `Invalid credentials!` rather than `User account is locked`.
 
 ## How a request is checked
 

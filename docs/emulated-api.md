@@ -78,8 +78,8 @@ world.db.inventoryAssignments.find({ user: 'anna@example.com' })
 ```
 
 - The world's `user` is a stored user of its tenant: `roles` are its own global roles, `groups` (names or ids) its memberships, and `GET /user/currentUser` answers with its effective roles (its own plus its groups'). Changes through the API show there. `setUser()` creates or updates the stored user and never deletes one. If the stored user is deleted through the API, `currentUser` answers with the world's `user` as given.
-- A request with Basic auth of another stored user gets that user in `currentUser`, with its own effective roles, so several users with different roles can share one world. A user the tenant does not store gets the world's `user`, so a forwarded header that names another user keeps working.
-- Every new user starts with `ROLE_USER_MANAGEMENT_OWN_READ` and `ROLE_USER_MANAGEMENT_OWN_ADMIN`, like on the platform: seeded users get them in addition to the roles given, and so do users created through the API. The email defaults to the user name if it is an email address, else `<userName>@example.com`. Passwords are validated but not kept.
+- A request with Basic auth of another stored user gets that user in `currentUser`, with its own effective roles, so several users with different roles can share one world. A user the tenant does not store gets the world's `user`, so a forwarded header that names another user keeps working (with `unknownUsers: 'unauthorized'` it answers 401 instead, see [Roles](roles.md#wrong-credentials)).
+- Every new user starts with `ROLE_USER_MANAGEMENT_OWN_READ` and `ROLE_USER_MANAGEMENT_OWN_ADMIN`, like on the platform: seeded users get them in addition to the roles given, and so do users created through the API. The email defaults to the user name if it is an email address, else `<userName>@example.com`. Passwords are validated and kept (never rendered); only `passwords: 'check'` checks them, see [Roles](roles.md#wrong-credentials).
 
 ## Audit records
 

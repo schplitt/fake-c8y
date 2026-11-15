@@ -11,6 +11,7 @@ import type { C8yJson } from './services'
 import { splitServiceStateKey } from './services'
 import type { StoredUsageDay } from './api/statistics'
 import type { StoredTrustedCertificate } from './api/tenant-admin'
+import { PASSWORD } from './api/users'
 
 /**
  * File content in a snapshot.
@@ -468,6 +469,27 @@ export function restoreTenants(snapshots: TenantSnapshot[], world: WorldContext,
 
 const NONE: ReadonlySet<string> = new Set()
 
+/**
+ * What a diff shows for a stored user's password (`PASSWORD`).
+ */
+const REDACTED_PASSWORD = '[redacted]'
+
+const redactUser = (user: StoredDocument): StoredDocument => (PASSWORD in user ? { ...user, [PASSWORD]: REDACTED_PASSWORD } : user)
+
+/**
+ * A users diff with every password replaced by `REDACTED_PASSWORD`. The
+ * comparison ran on the real values, so a password change still shows as an
+ * update (with a new `lastPasswordChange`).
+ * @param diff - Diff of the users collection
+ */
+function redactUsers(diff: CollectionDiff): CollectionDiff {
+  return {
+    created: diff.created.map(redactUser),
+    updated: diff.updated.map(({ before, after }) => ({ before: redactUser(before), after: redactUser(after) })),
+    deleted: diff.deleted.map(redactUser),
+  }
+}
+
 function diffCollection(before: StoredDocument[], after: StoredDocument[], recreated: ReadonlySet<string> = NONE): CollectionDiff {
   const previous = new Map(before.map((document) => [document.id, document]))
   const current = new Map(after.map((document) => [document.id, document]))
@@ -579,7 +601,7 @@ export function diffWorld(before: Pick<WorldSnapshot, 'tenants' | 'options'>, af
         created: current.externalIds.filter((entry) => !oldIds.has(key(entry)) || again(entry)),
         deleted: old.externalIds.filter((entry) => !currentIds.has(key(entry)) || again(entry)),
       },
-      users: documents('users'),
+      users: redactUsers(documents('users')),
       groups: documents('groups'),
       roles: {
         created: (current.roles ?? []).filter((role) => !(old.roles ?? []).includes(role) || recreated('roles').has(role)),

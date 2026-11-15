@@ -475,12 +475,12 @@ const bootstrapName = (application: Readonly<StoredDocument>): string => (applic
 /**
  * The application whose own credentials a request uses: its bootstrap user
  * (in the owner tenant, also without a subscription) or its service user in
- * a subscribed tenant.
+ * a subscribed tenant, with that user's password.
  * @param tenants - All tenants of the world
  * @param tenant - Caller's tenant
  * @param user - Caller's user name
  */
-export function applicationOfCredentials(tenants: Iterable<TenantData>, tenant: string, user: string): { data: TenantData, application: Readonly<StoredDocument>, bootstrap: boolean } | undefined {
+export function applicationOfCredentials(tenants: Iterable<TenantData>, tenant: string, user: string): { data: TenantData, application: Readonly<StoredDocument>, bootstrap: boolean, password: string } | undefined {
   for (const data of tenants) {
     if (data.tenant !== tenant) {
       continue
@@ -489,14 +489,14 @@ export function applicationOfCredentials(tenants: Iterable<TenantData>, tenant: 
       if (subscription.serviceUser === user) {
         const application = findApplication(data, subscription.id)
         if (application) {
-          return { data, application, bootstrap: false }
+          return { data, application, bootstrap: false, password: subscription.password as string }
         }
       }
     }
     // any name: the world's deployed microservice may have its own
     for (const application of data.applications.values()) {
       if (application.owner === tenant && application.type === 'MICROSERVICE' && bootstrapName(application) === user) {
-        return { data, application, bootstrap: true }
+        return { data, application, bootstrap: true, password: applicationPassword(user) }
       }
     }
   }

@@ -3,7 +3,7 @@ import { encodeBase64 } from './utils'
 
 /**
  * Credentials of a user of a world: the user name, its tenant, and a
- * password (the fake checks none). A `C8ySubscription` fits as it is.
+ * password (checked only with `passwords: 'check'`). A `C8ySubscription` fits as it is.
  */
 export interface C8yCredentials {
   tenant: string
