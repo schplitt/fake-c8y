@@ -12,7 +12,9 @@ It must run in any JavaScript runtime with `fetch` types: Node, workers, and iso
 src/
 ├── index.ts                    # Main entry: createWorld() (request dispatch, overrides, built-in routes, seeding, snapshots, forks) and all public exports
 ├── collection.ts               # Collection: the keyed store every collection lives in (copy-on-write forks, tombstones, freezing, journal/rollback)
-├── defaults.ts                 # DEFAULTS: tenant, base URL, user, bootstrap user, settings category
+├── defaults.ts                 # DEFAULTS: tenant, base URL, user, bootstrap user, settings category, harness passwords; imports only types
+├── defaults-entry.ts           # `fake-c8y/defaults` entry: DEFAULTS only, no engine (safe in a Vite/Vitest main process); keep defaults.ts free of runtime imports
+├── auth.ts                     # basicAuth(): Basic auth header value of a world user (UTF-8, via utils' encodeBase64)
 ├── reason-phrases.ts           # standard HTTP reason phrases for statusText (withReasonPhrase)
 ├── clock.ts                    # createClock(): the trial clock shared by a world, the agent's sandbox, and the grader
 ├── availability.ts             # availability monitoring by the clock (UNAVAILABLE, c8y_UnavailabilityAlarm), run by tick()
@@ -200,7 +202,7 @@ When you update `README.md`, `AGENTS.md`, or a guide, call out the changes at th
 
 1. **Run the gate** after changes: `pnpm lint:fix && pnpm typecheck && pnpm test:run && pnpm build`. Prefer `pnpm lint:fix` over fixing lint issues by hand.
 2. **Update this file** when adding modules or APIs or changing architecture.
-3. **Keep exports in `src/index.ts`**: all public API is exported from the main entry point (`fake-c8y/realtime` is the only other entry).
+3. **Keep exports in `src/index.ts`**: all public API is exported from the main entry point (the other entries are `fake-c8y/realtime` and `fake-c8y/defaults`, which re-export from their modules). Public types a wrapper narrows (`C8yUser`, `C8yWorldState`, the role-taking seed inputs) take type parameters whose defaults keep the wide types; narrowed values must stay assignable to the wide ones.
 4. **Add tests** for new functionality in `tests/`.
 5. **Record learnings**: when the user corrects a recurring mistake or explains how something should be done, add it to "Project Context & Learnings" below.
 6. **Git workflow**: use available MCP or devtools first, else the `gh` CLI. Branch names use conventional prefixes (`feat/`, `fix/`, `chore/`, `docs/`, `refactor/`, `test/`, `build/`, `types/`, `style/`, `perf/`, `examples/`, `ci/`); commit subjects and PR titles use conventional-commit style.

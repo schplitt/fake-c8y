@@ -3,14 +3,18 @@ import type { World } from './index'
 /**
  * The user calling the platform (returned by `GET /user/currentUser`). The
  * world stores it as a user of its tenant, so the user API sees it too.
+ *
+ * `Role` narrows the role names, e.g. to a service's known roles. Add
+ * `(string & {})` to the union to keep other names allowed while editors
+ * still suggest the known ones.
  */
-export interface C8yUser {
+export interface C8yUser<Role extends string = string> {
   userName: string
   /**
    * Global roles assigned to the user directly. Its effective roles are these
    * plus the roles of its `groups`.
    */
-  roles?: string[]
+  roles?: Role[]
   /**
    * Tenant the user belongs to: the tenant it is stored in and that
    * `/user/currentUser` matches Basic auth against.
@@ -40,8 +44,13 @@ export interface C8ySubscription {
 /**
  * State of the fake Cumulocity platform: the baseline a world starts (and
  * resets) with, and partial updates in `world.apply()`.
+ *
+ * `Role` narrows the role names of `user`, `OptionKey` the keys of
+ * `tenantOptions` (other keys stay allowed: `OptionKey` adds suggestions, it
+ * does not forbid). A narrowed state is still a `C8yWorldState`, so it passes
+ * to `createWorld()` and `world.apply()` as it is.
  */
-export interface C8yWorldState {
+export interface C8yWorldState<Role extends string = string, OptionKey extends string = string> {
   /**
    * Tenant the microservice is deployed in (the bootstrap tenant).
    * @default 't12345'
@@ -52,7 +61,7 @@ export interface C8yWorldState {
    * answer 401.
    * @default { userName: 'test-user', roles: [] }
    */
-  user?: C8yUser | null
+  user?: C8yUser<Role> | null
   /**
    * Tenants subscribed to the microservice, with their service users.
    * @default one subscription for the deployed tenant
@@ -61,7 +70,7 @@ export interface C8yWorldState {
   /**
    * Tenant options of the microservice's own settings category, in the deployed tenant.
    */
-  tenantOptions?: Record<string, string>
+  tenantOptions?: Partial<Record<OptionKey, string>> & Record<string, string>
 }
 
 /**

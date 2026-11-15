@@ -153,15 +153,15 @@ export interface C8yNewDeviceRequestInput {
 }
 
 /**
- * A user group to seed.
+ * A user group to seed. `Role` narrows the role names (see `C8yUser`).
  */
-export interface C8yGroupInput {
+export interface C8yGroupInput<Role extends string = string> {
   name: string
   description?: string
   /**
    * Global role names, e.g. `ROLE_ALARM_READ`.
    */
-  roles?: string[]
+  roles?: Role[]
   customProperties?: Record<string, unknown>
 }
 
@@ -175,9 +175,9 @@ export interface C8yInventoryRoleInput {
 }
 
 /**
- * A user to seed.
+ * A user to seed. `Role` narrows the role names (see `C8yUser`).
  */
-export interface C8yUserInput {
+export interface C8yUserInput<Role extends string = string> {
   /**
    * Case-sensitive, like on the platform.
    */
@@ -192,7 +192,7 @@ export interface C8yUserInput {
    * which every new user gets like on the platform. To take them away,
    * delete them through the API (`DELETE /user/{tenant}/users/{user}/roles/{role}`).
    */
-  roles?: string[]
+  roles?: Role[]
   /**
    * Groups the user is a member of, by name or id.
    */
@@ -255,16 +255,17 @@ export interface C8yAuditRecordInput {
 }
 
 /**
- * Input of `world.seed()`.
+ * Input of `world.seed()`. `Role` narrows the role names of `roles`,
+ * `groups`, and `users` (see `C8yUser`); `world.seed()` takes any seed.
  */
-export interface C8ySeed {
+export interface C8ySeed<Role extends string = string> {
   /**
    * Global roles to add to the tenant's role catalogue.
    */
-  roles?: string[]
+  roles?: Role[]
   inventoryRoles?: C8yInventoryRoleInput[]
-  groups?: C8yGroupInput[]
-  users?: C8yUserInput[]
+  groups?: Array<C8yGroupInput<Role>>
+  users?: Array<C8yUserInput<Role>>
   measurements?: C8yMeasurementInput[]
   /**
    * Measurement history computed on read instead of stored: one document per

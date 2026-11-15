@@ -3,7 +3,7 @@
 By default (`roles: 'enforce'`), the world checks every request against the caller's rights the way the platform does: it answers 403 where the platform would, and lists show only what the caller may see. `createWorld({ roles: 'off' })` turns the checks off: every caller may do everything.
 
 ```ts
-import { createWorld } from 'fake-c8y'
+import { basicAuth, createWorld } from 'fake-c8y'
 
 const world = createWorld()
 const plant = world.managedObject({ name: 'Plant', c8y_IsDeviceGroup: {} })
@@ -17,7 +17,7 @@ world.seed({
   users: [{ userName: 'operator', inventoryAssignments: [{ managedObject: plant, roles: ['Reader'] }] }],
 })
 
-const asOperator = { authorization: `Basic ${btoa(`${world.tenant}/operator:any`)}` }
+const asOperator = { authorization: basicAuth({ tenant: world.tenant, user: 'operator' }) }
 await world.fetch(new Request(`${world.baseUrl}/inventory/managedObjects/${pump}`, { headers: asOperator })) // 200: Reader on its group
 await world.fetch(new Request(`${world.baseUrl}/tenant/options`, { headers: asOperator })) // 403 security/Forbidden
 ```

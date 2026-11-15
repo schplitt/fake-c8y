@@ -638,7 +638,7 @@ function microserviceOf(data: TenantData, contextPath: string): Readonly<StoredD
 }
 
 function defaultSubscription(tenant: string): C8ySubscription {
-  return { tenant, user: `service_${tenant}`, password: 'service-password' }
+  return { tenant, user: `service_${tenant}`, password: DEFAULTS.subscriptionPassword }
 }
 
 function parseBasicAuth(header: string | null): { tenant?: string, user: string } | undefined {
@@ -1589,7 +1589,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     if (subscription?.serviceUser) {
       return { name: subscription.serviceUser as string, password: subscription.password as string }
     }
-    return { name: service.user ?? `service_${service.manifest.name ?? contextPath}`, password: 'service-password' }
+    return { name: service.user ?? `service_${service.manifest.name ?? contextPath}`, password: DEFAULTS.subscriptionPassword }
   }
 
   /**
@@ -2298,6 +2298,8 @@ export { UnsupportedRequestError } from './api'
 export { compileRoute, matchesCall, matchRoute, splitPath } from './router'
 export type { CompiledRoute } from './router'
 export { DEFAULTS } from './defaults'
+export { basicAuth } from './auth'
+export type { C8yCredentials } from './auth'
 export { CONSUMER_REMOVED, Realtime, SOCKET_STATE } from './realtime'
 export type { CloseConsumersOptions, NotificationFrame, NotificationSocket, NotificationSubscription, NotificationToken, RealtimeApi, RealtimeOptions } from './realtime'
 export type * from './types'

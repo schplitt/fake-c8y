@@ -31,6 +31,10 @@
       "types": "./dist/realtime.d.mts",
       "import": "./dist/realtime.mjs"
     },
+    "./defaults": {
+      "types": "./dist/defaults.d.mts",
+      "import": "./dist/defaults.mjs"
+    },
     "./package.json": "./package.json"
   },
   "main": "./dist/index.mjs",

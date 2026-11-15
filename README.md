@@ -25,6 +25,12 @@ const alarm = await response.json()
 
 `world.fetch()` takes a `Request` to the platform and returns a `Response`. Pass it as the `fetch` of your HTTP client to route the client's requests to the world.
 
+## Entries
+
+- `fake-c8y`: `createWorld()` and everything else.
+- `fake-c8y/realtime`: the fake consumer WebSocket for Notification 2.0.
+- `fake-c8y/defaults`: `DEFAULTS` only, without the engine (safe in a Vite or Vitest config).
+
 ## Guides
 
 - [The world](https://github.com/schplitt/fake-c8y/blob/main/docs/world.md): `createWorld()` options, seeding, requests, overrides, and reading the data.

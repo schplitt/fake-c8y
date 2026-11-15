@@ -9,6 +9,7 @@
  */
 import type { StoredDocument, TenantData } from './store'
 import { DEFAULT_APPLICATION_DATA } from './application-defaults.generated'
+import { DEFAULTS } from './defaults'
 
 /**
  * The default applications, as stored (owner `management`).
@@ -30,7 +31,7 @@ export function addDefaultApplications(data: TenantData): void {
     }
     data.applications.set(application.id, application)
     data.applicationSubscriptions.set(application.id, application.type === 'MICROSERVICE'
-      ? { id: application.id, owner: application.owner, serviceUser: `service_${application.name as string}`, password: 'service-password' }
+      ? { id: application.id, owner: application.owner, serviceUser: `service_${application.name as string}`, password: DEFAULTS.subscriptionPassword }
       : { id: application.id, owner: application.owner })
   }
 }
