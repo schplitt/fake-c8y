@@ -132,76 +132,243 @@ describe('notification 2.0 state', () => {
     const { world, run } = manualWorld()
     const snapshot = world.snapshot()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const consumer = await open(world, run, 'sub', 'a')
+    world.restore(snapshot)
+    expect(consumer.closes).toEqual([[4410, 'notification token removed']])
+    expect(consumer.socket.readyState).toBe(3)
+  })
+
+  it('closes sockets whose subscription a restore removed, also when the token stays', async () => {
+    const { world, run } = manualWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const consumer = await open(world, run, 'sub', 'a')
+    const snapshot = world.snapshot()
+    for (const tenant of snapshot.tenants) {
+      tenant.notificationSubscriptions = []
+    }
+    expect(snapshot.tenants.some((tenant) => (tenant.notificationTokens ?? []).length > 0)).toBe(true)
+    world.restore(snapshot)
+    expect(world.realtime.tokens.has(consumer.token)).toBe(true)
+    expect(consumer.closes).toEqual([[CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason]])
+  })
+
+  it('does not close a socket that is still connecting; its connect fails instead', async () => {
+    const { world, run } = manualWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
     const token = (await call(world, 'POST', '/notification2/token', { subscription: 'sub', subscriber: 'a' })).body.token
     const WebSocket = createFakeWebSocket(world.realtime)
     const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
     const closes: unknown[][] = []
     socket.on('close', (...args: unknown[]) => closes.push(args))
+    socket.on('error', () => {})
+    world.reset()
+    expect(closes).toEqual([])
+    expect(socket.readyState).toBe(0)
     run()
-    world.restore(snapshot)
-    expect(closes).toEqual([[4410, 'notification token removed']])
-    expect(socket.readyState).toBe(3)
+    expect(closes).toEqual([[1008, 'invalid token']])
+  })
+
+  it('closes the sockets of a fork with CONSUMER_REMOVED and leaves the base\'s open', async () => {
+    const { world: base, run } = manualWorld()
+    await call(base, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const onBase = await open(base, run, 'sub', 'base')
+    const fork = base.fork()
+    const onFork = await open(fork, run, 'sub', 'fork')
+    fork.reset()
+    expect(onFork.closes).toEqual([[CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason]])
+    expect(onBase.closes).toEqual([])
+
+    const snapshot = fork.snapshot()
+    const again = await open(fork, run, 'sub', 'fork2')
+    fork.restore(snapshot)
+    expect(again.closes).toEqual([[CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason]])
+    expect(onBase.closes).toEqual([])
+    expect(onBase.socket.readyState).toBe(1)
   })
 })
 
-describe('closeConsumers()', () => {
-  async function open(world: World, run: () => void, subscription: string, subscriber: string) {
-    const token = (await call(world, 'POST', '/notification2/token', { subscription, subscriber })).body.token as string
-    const WebSocket = createFakeWebSocket(world.realtime)
-    const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
-    const closes: unknown[][] = []
-    const received: string[] = []
-    socket.on('close', (...args: unknown[]) => closes.push(args))
-    socket.on('message', (text: string) => received.push(text))
-    run()
-    expect(socket.readyState).toBe(1)
-    return { token, socket, closes, received }
+async function open(world: World, run: () => void, subscription: string, subscriber: string, tenant?: string) {
+  const headers: Record<string, string> = { 'accept': 'application/json', 'content-type': 'application/json' }
+  if (tenant) {
+    headers.authorization = `Basic ${btoa(`${tenant}/service_${tenant}:p`)}`
   }
+  const response = await world.fetch(new Request(`${world.baseUrl}/notification2/token`, { method: 'POST', headers, body: JSON.stringify({ subscription, subscriber }) }))
+  expect(response.status).toBe(200)
+  const token = (await response.json() as { token: string }).token
+  const WebSocket = createFakeWebSocket(world.realtime)
+  const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
+  const closes: unknown[][] = []
+  const received: string[] = []
+  socket.on('close', (...args: unknown[]) => closes.push(args))
+  socket.on('message', (text: string) => received.push(text))
+  run()
+  expect(socket.readyState).toBe(1)
+  return { token, socket, closes, received }
+}
 
-  it('closes matching open sockets with the given code and reason, and keeps their tokens', async () => {
+const ackId = (frame: string) => frame.split('\n')[0]!
+
+describe('closeConsumers()', () => {
+  async function twoSubscriptions() {
     const { world, run } = manualWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'one' })
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'two' })
+    return { world, run }
+  }
+
+  it('closes the sockets of a subscription with the given code and reason', async () => {
+    const { world, run } = await twoSubscriptions()
     const a = await open(world, run, 'one', 'a')
     const b = await open(world, run, 'two', 'b')
     expect(world.realtime.closeConsumers({ subscription: 'one', code: 1011, reason: 'internal error' })).toBe(1)
     expect(a.closes).toEqual([[1011, 'internal error']])
     expect(a.socket.readyState).toBe(3)
     expect(b.closes).toEqual([])
-    expect(world.realtime.sockets.size).toBe(1)
-    // the subscription and token stay: the client can reconnect with the same token
-    expect(world.realtime.tokens.has(a.token)).toBe(true)
-    // frames of a persistent subscription wait for the reconnect
-    await call(world, 'POST', '/inventory/managedObjects', { name: 'while away' })
-    run()
-    expect(a.received).toEqual([])
-    const WebSocket = createFakeWebSocket(world.realtime)
-    const again = new WebSocket(`wss://example.test/notification2/consumer/?token=${a.token}`)
-    const received: string[] = []
-    again.on('message', (text: string) => received.push(text))
-    run()
-    expect(again.readyState).toBe(1)
-    expect(received).toHaveLength(1)
-    expect(received[0]).toContain('while away')
+    expect([...world.realtime.sockets]).toEqual([b.socket])
   })
 
-  it('defaults to 1006 for every open socket, filters by tenant, subscriber, and token, and rejects invalid codes', async () => {
-    const { world, run } = manualWorld()
-    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
-    const a = await open(world, run, 'sub', 'a')
-    const b = await open(world, run, 'sub', 'b')
-    const c = await open(world, run, 'sub', 'c')
-    expect(world.realtime.closeConsumers({ tenant: 'other' })).toBe(0)
-    expect(world.realtime.closeConsumers({ subscriber: 'a', code: 4000 })).toBe(1)
-    expect(a.closes).toEqual([[4000, '']])
-    expect(world.realtime.closeConsumers({ token: b.token })).toBe(1)
+  it('closes every open socket with 1006 and an empty reason by default, each once', async () => {
+    const { world, run } = await twoSubscriptions()
+    const a = await open(world, run, 'one', 'a')
+    const b = await open(world, run, 'two', 'b')
+    expect(world.realtime.closeConsumers()).toBe(2)
+    expect(a.closes).toEqual([[1006, '']])
     expect(b.closes).toEqual([[1006, '']])
-    expect(() => world.realtime.closeConsumers({ code: 999 })).toThrow(RangeError)
-    expect(() => world.realtime.closeConsumers({ code: 5000 })).toThrow(RangeError)
-    expect(c.closes).toEqual([])
-    expect(world.realtime.closeConsumers()).toBe(1)
-    expect(c.closes).toEqual([[1006, '']])
-    // closed sockets are not closed twice
     expect(world.realtime.closeConsumers()).toBe(0)
+  })
+
+  it('filters by subscriber and by token', async () => {
+    const { world, run } = await twoSubscriptions()
+    const a = await open(world, run, 'one', 'a')
+    const b = await open(world, run, 'one', 'b')
+    const c = await open(world, run, 'one', 'c')
+    expect(world.realtime.closeConsumers({ subscriber: 'a', code: 4000 })).toBe(1)
+    expect(world.realtime.closeConsumers({ token: b.token })).toBe(1)
+    expect(a.closes).toEqual([[4000, '']])
+    expect(b.closes).toEqual([[1006, '']])
+    expect(c.closes).toEqual([])
+  })
+
+  it('filters by tenant', async () => {
+    const queue: Array<() => void> = []
+    const world = createWorld({ schedule: (callback) => queue.push(callback), subscriptions: [{ tenant: 't12345', user: 'service_t12345', password: 'p' }, { tenant: 't2', user: 'service_t2', password: 'p' }] })
+    const run = () => {
+      while (queue.length > 0) {
+        queue.shift()!()
+      }
+    }
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const response = await world.fetch(new Request(`${world.baseUrl}/notification2/subscriptions`, { method: 'POST', headers: { 'accept': 'application/json', 'content-type': 'application/json', 'authorization': `Basic ${btoa('t2/service_t2:p')}` }, body: JSON.stringify({ context: 'tenant', subscription: 'sub' }) }))
+    expect(response.status).toBe(201)
+    const own = await open(world, run, 'sub', 'a')
+    const other = await open(world, run, 'sub', 'a', 't2')
+    expect(other.socket.token?.tenant).toBe('t2')
+    expect(world.realtime.closeConsumers({ tenant: 'unknown' })).toBe(0)
+    expect(world.realtime.closeConsumers({ tenant: 't2' })).toBe(1)
+    expect(other.closes).toEqual([[1006, '']])
+    expect(own.closes).toEqual([])
+    expect(own.socket.readyState).toBe(1)
+  })
+
+  it('accepts the codes 1000 to 4999 and rejects others before closing anything', async () => {
+    const { world, run } = await twoSubscriptions()
+    const a = await open(world, run, 'one', 'a')
+    for (const code of [999, 5000, 1000.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => world.realtime.closeConsumers({ code })).toThrow(RangeError)
+    }
+    expect(a.closes).toEqual([])
+    expect(a.socket.readyState).toBe(1)
+    expect(world.realtime.closeConsumers({ code: 1000 })).toBe(1)
+    const b = await open(world, run, 'one', 'b')
+    expect(world.realtime.closeConsumers({ code: 4999 })).toBe(1)
+    expect(a.closes).toEqual([[1000, '']])
+    expect(b.closes).toEqual([[4999, '']])
+  })
+
+  it('does not close a socket that is still connecting', async () => {
+    const { world, run } = await twoSubscriptions()
+    const token = (await call(world, 'POST', '/notification2/token', { subscription: 'one', subscriber: 'a' })).body.token
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
+    expect(world.realtime.closeConsumers()).toBe(0)
+    run()
+    expect(socket.readyState).toBe(1)
+  })
+
+  it('ignores a client close() after a server-side close', async () => {
+    const { world, run } = await twoSubscriptions()
+    const a = await open(world, run, 'one', 'a')
+    world.realtime.closeConsumers({ code: 1011 })
+    a.socket.close()
+    run()
+    expect(a.closes).toEqual([[1011, '']])
+  })
+
+  it('keeps tokens and subscriptions, so the client reconnects with the same token', async () => {
+    const { world, run } = await twoSubscriptions()
+    const a = await open(world, run, 'one', 'a')
+    world.realtime.closeConsumers()
+    expect(world.realtime.tokens.has(a.token)).toBe(true)
+    expect(await names(world)).toEqual(['one', 'two'])
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const again = new WebSocket(`wss://example.test/notification2/consumer/?token=${a.token}`)
+    run()
+    expect(again.readyState).toBe(1)
+  })
+
+  it('gives the next consumer of a persistent subscription the unacknowledged and the meanwhile published frames, in order', async () => {
+    const { world, run } = await twoSubscriptions()
+    const a = await open(world, run, 'one', 'a')
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'acknowledged' })
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'delivered' })
+    run()
+    expect(a.received).toHaveLength(2)
+    a.socket.send(ackId(a.received[0]!))
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'scheduled' })
+    world.realtime.closeConsumers()
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'while away' })
+    run()
+    expect(a.received).toHaveLength(2)
+    expect(world.realtime.pending()).toBe(3)
+    const again = await open(world, run, 'one', 'a')
+    expect(again.received.map((frame) => JSON.parse(frame.split('\n\n')[1]!).name)).toEqual(['delivered', 'scheduled', 'while away'])
+  })
+
+  it('drops the unacknowledged frames of a non-persistent subscription', async () => {
+    const { world, run } = manualWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'live', nonPersistent: true })
+    const a = await open(world, run, 'live', 'a')
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'delivered' })
+    run()
+    expect(a.received).toHaveLength(1)
+    world.realtime.closeConsumers()
+    const again = await open(world, run, 'live', 'a')
+    expect(again.received).toEqual([])
+  })
+
+  it('does not requeue frames while another consumer of the subscription stays open', async () => {
+    const { world, run } = await twoSubscriptions()
+    const a = await open(world, run, 'one', 'a')
+    const b = await open(world, run, 'one', 'b')
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'delivered' })
+    run()
+    world.realtime.closeConsumers({ subscriber: 'a' })
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'while away' })
+    run()
+    expect(b.received).toHaveLength(2)
+    const again = await open(world, run, 'one', 'a')
+    expect(again.received).toEqual([])
+    expect(a.received).toHaveLength(1)
+  })
+
+  it('closes the sockets of a fork only', async () => {
+    const { world: base, run } = manualWorld()
+    await call(base, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const onBase = await open(base, run, 'sub', 'base')
+    const fork = base.fork()
+    const onFork = await open(fork, run, 'sub', 'fork')
+    expect(fork.realtime.closeConsumers()).toBe(1)
+    expect(onFork.closes).toEqual([[1006, '']])
+    expect(onBase.closes).toEqual([])
   })
 })

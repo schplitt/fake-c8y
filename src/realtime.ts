@@ -15,7 +15,7 @@
  * `TenantData.notificationTokens`): they fork, reset, snapshot, and diff with
  * the rest of the data. `Realtime` keeps what is not data: the consumer
  * sockets and the frames on their way. `world.reset()` and `world.restore()`
- * drop undelivered frames and close the sockets whose token is gone (with
+ * drop undelivered frames and close the sockets whose token or subscription is gone (with
  * `CONSUMER_REMOVED`). `closeConsumers()` closes sockets from the server side
  * to test a client's reconnect path.
  * The consumer WebSocket is in `./websocket` (the `fake-c8y/realtime` entry).
@@ -76,7 +76,11 @@ function typesOf(typeFilter: unknown): string[] | undefined {
   return quoted.length > 0 ? quoted : typeFilter.split(/\s+or\s+/).map((type) => type.trim())
 }
 
-function tokenOf(socket: NotificationSocket): string {
+/**
+ * The token a consumer socket connects with (its URL's `token` parameter).
+ * @param socket - The consumer socket
+ */
+export function tokenOf(socket: Pick<NotificationSocket, 'url'>): string {
   return new URL(socket.url).searchParams.get('token') ?? ''
 }
 
@@ -133,7 +137,9 @@ export interface CloseConsumersOptions {
    */
   token?: string
   /**
-   * Close code the client sees.
+   * Close code the client sees, from 1000 to 4999. `1006` is allowed on
+   * purpose: a peer never sends it, but it is what a client sees when the
+   * connection drops.
    * @default 1006 (abnormal closure: the connection dropped)
    */
   code?: number
@@ -194,6 +200,11 @@ export class Realtime {
   private readonly storedSubscriptions: () => Iterable<NotificationSubscription>
   private readonly storedTokens: () => Iterable<[string, NotificationToken]>
   /**
+   * frames scheduled for or delivered to a socket and not yet acknowledged,
+   * by ack id (put back into the backlog when `closeConsumers()` closes it)
+   */
+  private readonly outstanding: Map<NotificationSocket, Map<string, NotificationFrame>> = new Map()
+  /**
    * Bumped by `dropPending()`: frames scheduled before are not delivered.
    */
   private generation = 0
@@ -223,7 +234,7 @@ export class Realtime {
 
   connect(socket: NotificationSocket): void {
     this.connecting.delete(socket)
-    const token = this.tokens.get(new URL(socket.url).searchParams.get('token') ?? '')
+    const token = this.tokens.get(tokenOf(socket))
     if (!token || socket.readyState === SOCKET_STATE.CLOSED) {
       socket.readyState = SOCKET_STATE.CLOSED
       socket.emit('error', new Error('Invalid notification token'))
@@ -234,6 +245,7 @@ export class Realtime {
     socket.readyState = SOCKET_STATE.OPEN
     this.sockets.add(socket)
     this.unacked.set(socket, new Set())
+    this.outstanding.set(socket, new Map())
     socket.emit('open')
     const waiting = this.backlog.get(this.key(token.tenant, token.subscription)) ?? []
     this.backlog.delete(this.key(token.tenant, token.subscription))
@@ -246,10 +258,12 @@ export class Realtime {
     this.connecting.delete(socket)
     this.sockets.delete(socket)
     this.unacked.delete(socket)
+    this.outstanding.delete(socket)
   }
 
   acknowledge(socket: NotificationSocket, ackId: string): void {
     this.unacked.get(socket)?.delete(ackId)
+    this.outstanding.get(socket)?.delete(ackId)
   }
 
   key(tenant: string, subscription: string): string {
@@ -259,6 +273,7 @@ export class Realtime {
   deliver(socket: NotificationSocket, frame: NotificationFrame): void {
     const generation = this.generation
     this.scheduled++
+    this.outstanding.get(socket)?.set(frame.ackId, frame)
     this.schedule(() => {
       if (generation !== this.generation) {
         // dropped by dropPending(), which already reset `scheduled`
@@ -356,18 +371,23 @@ export class Realtime {
     for (const acks of this.unacked.values()) {
       acks.clear()
     }
+    for (const frames of this.outstanding.values()) {
+      frames.clear()
+    }
   }
 
   /**
-   * Drops undelivered notifications and closes the sockets whose token is
-   * no longer stored (after the data was reset or restored), with
-   * `CONSUMER_REMOVED`.
+   * Drops undelivered notifications and closes the sockets whose token or
+   * subscription is no longer stored (after the data was reset or restored),
+   * with `CONSUMER_REMOVED`.
    */
   resync(): void {
     this.dropPending()
     const tokens = new Map(this.storedTokens())
+    const subscriptions = new Set([...this.storedSubscriptions()].map((subscription) => this.key(subscription.tenant, subscription.subscription)))
     for (const socket of [...this.sockets]) {
-      if (tokens.get(tokenOf(socket)) === undefined) {
+      const token = tokens.get(tokenOf(socket))
+      if (token === undefined || !subscriptions.has(this.key(token.tenant, token.subscription))) {
         this.closeFromServer(socket, CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason)
       }
     }
@@ -377,8 +397,13 @@ export class Realtime {
    * Closes open consumer sockets from the server side, as if the connection
    * dropped or the platform closed it, to test a client's reconnect path. The
    * subscriptions and tokens stay stored, so the client can reconnect (with the
-   * same token or a new one); frames published meanwhile wait in the backlog of
-   * persistent subscriptions. The `close` event is emitted synchronously.
+   * same token or a new one). When no other consumer of the subscription stays
+   * open and the subscription is persistent, the frames the socket had not
+   * acknowledged (delivered or still scheduled) go back into the subscription's
+   * backlog, and frames published meanwhile wait there too: the next consumer
+   * of the subscription that connects gets them. Otherwise they are lost for
+   * this consumer. The platform's redelivery is not verified. The `close`
+   * event is emitted synchronously.
    * @param options - Which sockets (all open ones by default), code, and reason
    * @returns How many sockets were closed
    * @example
@@ -400,10 +425,34 @@ export class Realtime {
         || (options.token !== undefined && tokenOf(socket) !== options.token)) {
         continue
       }
+      const frames = [...(this.outstanding.get(socket)?.values() ?? [])]
       this.closeFromServer(socket, code, reason)
+      if (token) {
+        this.requeue(token, frames)
+      }
       closed++
     }
     return closed
+  }
+
+  /**
+   * Puts the unacknowledged frames of a closed consumer back into its
+   * subscription's backlog (in ack order, before the frames published since),
+   * when the subscription is persistent and has no other open consumer.
+   * @param token - The closed consumer's token
+   * @param frames - Its unacknowledged frames
+   */
+  private requeue(token: NotificationToken, frames: NotificationFrame[]): void {
+    if (frames.length === 0 || [...this.sockets].some((socket) => socket.token?.tenant === token.tenant && socket.token.subscription === token.subscription)) {
+      return
+    }
+    const persistent = [...this.storedSubscriptions()].some((subscription) => subscription.tenant === token.tenant && subscription.subscription === token.subscription && !subscription.nonPersistent)
+    if (!persistent) {
+      return
+    }
+    const key = this.key(token.tenant, token.subscription)
+    const byAck = new Map([...frames, ...(this.backlog.get(key) ?? [])].map((frame) => [frame.ackId, frame]))
+    this.backlog.set(key, [...byAck.values()].sort((a, b) => Number(a.ackId) - Number(b.ackId)))
   }
 
   private closeFromServer(socket: NotificationSocket, code: number, reason: string): void {
@@ -413,7 +462,8 @@ export class Realtime {
   }
 
   /**
-   * Closes every socket and drops undelivered notifications.
+   * Closes every socket (with `1000`, like a normal close: it tears the
+   * world's consumers down) and drops undelivered notifications.
    */
   clear(): void {
     for (const socket of this.sockets) {
@@ -423,6 +473,7 @@ export class Realtime {
     this.sockets.clear()
     this.connecting.clear()
     this.unacked.clear()
+    this.outstanding.clear()
     this.dropPending()
   }
 }

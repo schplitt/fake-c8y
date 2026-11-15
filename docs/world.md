@@ -215,7 +215,13 @@ Sockets belong to one world, so use `createFakeWebSocket(fork.realtime)` for a f
 
 ### Close codes
 
-When `reset()` or `restore()` removes a consumer's token (or its subscription), its open socket closes with code `4410` and reason `notification token removed`, exported as `CONSUMER_REMOVED` (from `fake-c8y` and `fake-c8y/realtime`). The consumer no longer exists, so a client should stop instead of reconnecting. The platform documents no close code for this case: `4410` is fake-c8y's own, in the application range (4000-4999), modeled on HTTP 410 Gone. A connect with an unknown token emits `error` and closes with `1008` (`invalid token`), and a socket the client closes itself closes with `1000`.
+Only `reset()` and `restore()` use a distinct close code: when one of them removes a consumer's token or its subscription, the consumer's open socket closes with code `4410` and reason `notification token removed`, exported as `CONSUMER_REMOVED` (from `fake-c8y` and `fake-c8y/realtime`). The consumer no longer exists, so a client should stop instead of reconnecting. The platform documents no close code for this case: `4410` is fake-c8y's own, in the application range (4000-4999), modeled on HTTP 410 Gone.
+
+- A socket still connecting when a reset or restore removes its token is not closed by it: its connect then fails like any connect with an unknown token.
+- A connect with an unknown token emits `error` and closes with `1008` (`invalid token`).
+- A socket the client closes itself closes with `1000`, and so does every socket on `world.realtime.clear()`.
+- `POST /notification2/unsubscribe` closes the consumer's socket with `1000`.
+- Removing a subscription through the API (`DELETE /notification2/subscriptions/{id}`, `DELETE /notification2/subscriptions?source=…`, or deleting the managed object a subscription is for) closes no socket: the consumer stays open and receives nothing more. What the platform does there is not verified.
 
 ### Closing consumers from the server side
 
@@ -227,6 +233,7 @@ world.realtime.closeConsumers({ subscription: 'alarms', code: 1011, reason: 'int
 ```
 
 - `tenant`, `subscription`, `subscriber`, and `token` select the sockets (all open ones by default). Sockets still connecting are not closed.
-- `code` (default `1006`, what a client sees when the connection drops) must be from 1000 to 4999, and `reason` defaults to `''`.
-- Subscriptions and tokens stay stored, so the client can reconnect with the same token or mint a new one. Frames published meanwhile wait in the backlog of persistent subscriptions and are delivered on the reconnect.
+- `code` (default `1006`, what a client sees when the connection drops) must be an integer from 1000 to 4999, and `reason` defaults to `''`. `1006` is allowed on purpose: a peer never sends it in a close frame, but a client sees it when the connection drops.
+- Subscriptions and tokens stay stored, so the client can reconnect with the same token or mint a new one.
+- Frames are kept for the reconnect only when the subscription is persistent and no other consumer of it stays open (the backlog is per subscription, and filled only while no consumer of it is connected). Then the frames the closed socket had not acknowledged (delivered or still scheduled) go back into the backlog, frames published meanwhile wait there too, and the next consumer of the subscription that connects gets them. If another consumer of the subscription stays open, the frames published meanwhile go to it, and the closed consumer's unacknowledged frames are lost. The platform's redelivery is not verified.
 - The `close` event is emitted synchronously, like the closes of a reset.

@@ -222,6 +222,32 @@ describe('reset({ to, consumers })', () => {
     expect((await call(world, 'GET', '/notification2/subscriptions')).body.subscriptions.map((item: { subscription: string }) => item.subscription)).toEqual(['startup'])
   })
 
+  it('keeps a consumer open with keep when its subscription was deleted since the checkpoint', async () => {
+    const { world, run } = manualWorld()
+    const id = (await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })).body.id
+    const open = await consumer(world, run, 'startup')
+    const startup = world.checkpoint()
+    expect((await call(world, 'DELETE', `/notification2/subscriptions/${id}`)).status).toBe(204)
+    // deleting the subscription through the API closes nothing
+    expect(open.state.closed).toBe(false)
+    world.reset({ to: startup, consumers: 'keep' })
+    expect(open.state.closed).toBe(false)
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'after reset' })
+    run()
+    expect(open.received).toHaveLength(1)
+  })
+
+  it('closes a consumer whose subscription the checkpoint has not, though its token stays', async () => {
+    const { world, run } = manualWorld()
+    const id = (await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })).body.id
+    const open = await consumer(world, run, 'startup')
+    expect((await call(world, 'DELETE', `/notification2/subscriptions/${id}`)).status).toBe(204)
+    const startup = world.checkpoint()
+    expect(world.realtime.tokens.has(open.token)).toBe(true)
+    world.reset({ to: startup })
+    expect([open.state.code, open.state.reason]).toEqual([CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason])
+  })
+
   it('closes consumers whose token the checkpoint lacks by default', async () => {
     const { world, run } = manualWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })

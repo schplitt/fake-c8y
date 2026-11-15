@@ -1,6 +1,7 @@
 import type { C8yRequest } from '../types'
 import type { TenantData } from '../store'
 import type { NotificationSubscription } from '../realtime'
+import { tokenOf } from '../realtime'
 import { nextSequence } from '../store'
 import { apiError, checkQuery, paged, UnsupportedRequestError } from './http'
 import { moSelf } from './inventory'
@@ -248,7 +249,7 @@ export function notifications(call: C8yRequest, segments: string[], data: Tenant
     if (!token) {
       return apiError(422, 'reliable-notification/Invalid Data', 'Missing token')
     }
-    const consumers = [...data.world.realtime.sockets].filter((socket) => new URL(socket.url).searchParams.get('token') === token)
+    const consumers = [...data.world.realtime.sockets].filter((socket) => tokenOf(socket) === token)
     const stored = data.notificationTokens.get(token)
     if (!stored || consumers.length === 0) {
       return apiError(500, 'reliable-notification/Internal Server Error', 'Unsubscribing the consumer failed')
