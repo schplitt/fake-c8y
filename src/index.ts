@@ -9,6 +9,7 @@ import type { Clock } from './clock'
 import type { Access } from './api/access'
 import type { C8yService, C8yServiceContext, C8yServiceDefinition, C8yServiceHandler, C8yServiceOptions } from './services'
 import { DEFAULTS } from './defaults'
+import { basicAuth } from './auth'
 import { withReasonPhrase } from './reason-phrases'
 import { compileRoute, copyCall, matchesCall, matchRoute, splitPath, withSegments } from './router'
 import { emptyTenant, forkTenant, freezeTenant, optionKey, TENANT_COLLECTIONS } from './store'
@@ -22,7 +23,7 @@ import { applySeed, createBinaryFromInput, createDb, createFromInput } from './d
 import { diffSnapshots, diffWorld, restoreTenants, snapshotOptions, snapshotTenants, touchedSnapshots } from './snapshot'
 import { advanceBulkOperations } from './api/bulkoperations'
 import { advanceAvailability } from './availability'
-import { clone, decodeBase64, encodeBase64, parseIsoTime } from './utils'
+import { clone, decodeBase64, parseIsoTime } from './utils'
 import { renderCurrentUser, upsertWorldUser } from './api/users'
 import { C8Y_SPEC_PATHS } from './capabilities.generated'
 import { checkServiceSeed, defineService, serviceStateKey, serviceStore, toJson } from './services'
@@ -638,7 +639,7 @@ function microserviceOf(data: TenantData, contextPath: string): Readonly<StoredD
 }
 
 function defaultSubscription(tenant: string): C8ySubscription {
-  return { tenant, user: `service_${tenant}`, password: 'service-password' }
+  return { tenant, user: `service_${tenant}`, password: DEFAULTS.subscriptionPassword }
 }
 
 function parseBasicAuth(header: string | null): { tenant?: string, user: string } | undefined {
@@ -1589,7 +1590,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     if (subscription?.serviceUser) {
       return { name: subscription.serviceUser as string, password: subscription.password as string }
     }
-    return { name: service.user ?? `service_${service.manifest.name ?? contextPath}`, password: 'service-password' }
+    return { name: service.user ?? `service_${service.manifest.name ?? contextPath}`, password: DEFAULTS.subscriptionPassword }
   }
 
   /**
@@ -1785,7 +1786,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     const data = () => tenantData(call.tenant)
     const state = serviceStore(data, name, 'default', live)
     const serviceUser = serviceUserOf(service, name, call.tenant)
-    const login = encodeBase64(new TextEncoder().encode(`${call.tenant}/${serviceUser.name}:${serviceUser.password}`))
+    const login = basicAuth({ tenant: call.tenant, user: serviceUser.name, password: serviceUser.password })
     return {
       service: name,
       tenant: call.tenant,
@@ -1808,7 +1809,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         }
         const outgoing = new Request(typeof input === 'string' && input.startsWith('/') ? `${baseUrl}${input}` : input, init)
         if (!outgoing.headers.has('authorization')) {
-          outgoing.headers.set('authorization', `Basic ${login}`)
+          outgoing.headers.set('authorization', login)
         }
         return send(outgoing, call.id)
       },
@@ -2298,6 +2299,8 @@ export { UnsupportedRequestError } from './api'
 export { compileRoute, matchesCall, matchRoute, splitPath } from './router'
 export type { CompiledRoute } from './router'
 export { DEFAULTS } from './defaults'
+export { basicAuth } from './auth'
+export type { C8yCredentials } from './auth'
 export { CONSUMER_REMOVED, Realtime, SOCKET_STATE } from './realtime'
 export type { CloseConsumersOptions, NotificationFrame, NotificationSocket, NotificationSubscription, NotificationToken, RealtimeApi, RealtimeOptions } from './realtime'
 export type * from './types'

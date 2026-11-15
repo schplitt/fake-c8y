@@ -38,7 +38,33 @@ const world = createWorld({
 | `roles`            | `'enforce'`                            | Checks requests against the caller's rights, like the platform. `'off'` gives every caller full access. See [Roles](#roles).        |
 | `freezeDocuments`  | `false`                                | Deep-freezes every stored document, so code that changes one in place throws. For tests of fake-c8y itself; it makes writes slower. |
 
-`DEFAULTS` (exported) holds the default values.
+`DEFAULTS` (exported) holds the default values, plus passwords for credentials a harness builds: `subscriptionPassword` (`'service-password'`, the default subscription's service user), `bootstrapPassword` (`'bootstrap-password'`), and `userPassword` (`'test-password'`). The fake checks no passwords; these only spare wrappers their own copies. The light entry `fake-c8y/defaults` exports `DEFAULTS` and nothing else, so a Vite or Vitest config (or any code that must not load the engine) can import it:
+
+```ts
+import { DEFAULTS } from 'fake-c8y/defaults'
+```
+
+### Types for wrappers
+
+`C8yUser<Role>`, `C8yWorldState<Role, OptionKey>`, `C8yUserInput<Role>`, `C8yGroupInput<Role>`, and `C8ySeed<Role>` take the role name type and (for the state) the tenant option key type. The defaults are `string`, so nothing changes without them. A harness that knows a service's roles and option keys narrows them for autocomplete instead of copying the interfaces, and passes the narrowed values to `createWorld()`, `apply()`, `setUser()`, and `seed()` without casts:
+
+```ts
+import type { C8yWorldState } from 'fake-c8y'
+import { createWorld } from 'fake-c8y'
+
+type Role = 'ROLE_PUMP_READ' | 'ROLE_PUMP_ADMIN' | (string & {}) // known roles suggested, others allowed
+type OptionKey = 'threshold' | 'unit'
+
+const state: C8yWorldState<Role, OptionKey> = {
+  user: { userName: 'eva', roles: ['ROLE_PUMP_READ'] },
+  tenantOptions: { threshold: '3' }, // other keys stay allowed
+}
+const world = createWorld(state)
+```
+
+Leave out `(string & {})` to reject unknown roles. `OptionKey` only adds suggestions: `tenantOptions` accepts any key. Reading a narrowed `tenantOptions` gives `string | undefined` for a known key (it may be left out) and `string` for any other key (like any index signature; with `noUncheckedIndexedAccess`, `string | undefined` too).
+
+`World` itself is not generic: `world.user` stays a `C8yUser`, `world.options.get(key: string)` takes any key, and `world.seed()` takes any `C8ySeed`. A wrapper narrows its own surface and passes the values on.
 
 ## Seeding
 
@@ -92,7 +118,7 @@ world.seed({
 
 Like the platform, a write (POST or PUT) answers with its object only if the request accepts JSON (`Accept: application/json` or a Cumulocity vendor type). Without an Accept header, or with `*/*`, the status is the same and the body is empty. Send `Accept: application/json` when you read the result of a write.
 
-Basic auth selects the tenant and the user (`<tenant>/<user>:<password>`). A request without Basic auth works in the deployed tenant as the world's `user`.
+Basic auth selects the tenant and the user (`<tenant>/<user>:<password>`). A request without Basic auth works in the deployed tenant as the world's `user`. `basicAuth({ tenant, user, password? })` (input type `C8yCredentials`) returns the `authorization` header value in any runtime (UTF-8, no `btoa` or `Buffer`); the password defaults to `DEFAULTS.userPassword`, and a subscription (`world.subscriptions[0]`) passes as it is. The tenant ends at the first `/`, so a user name may contain one.
 
 ## Roles
 
@@ -116,7 +142,7 @@ world.db.tenant('t99999').users.get('eve') // stored in t99999
 const world = createWorld()
 const pump = world.device({ name: 'Pump' })
 world.seed({ users: [{ userName: 'viewer', roles: ['ROLE_INVENTORY_READ'] }] })
-const headers = { authorization: `Basic ${btoa(`${world.tenant}/viewer:any`)}` }
+const headers = { authorization: basicAuth({ tenant: world.tenant, user: 'viewer' }) }
 await world.fetch(new Request(`${world.baseUrl}/inventory/managedObjects/${pump}`, { headers })) // 200
 await world.fetch(new Request(`${world.baseUrl}/event/events`, { headers })) // 403 Access is denied
 ```
