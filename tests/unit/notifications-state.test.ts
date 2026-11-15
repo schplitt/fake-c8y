@@ -5,7 +5,7 @@
  * their way are dropped by a reset.
  */
 import { describe, expect, it } from 'vitest'
-import { createWorld } from '../../src'
+import { CONSUMER_REMOVED, createWorld } from '../../src'
 import type { World } from '../../src'
 import { createFakeWebSocket } from '../../src/realtime-entry'
 
@@ -108,10 +108,10 @@ describe('notification 2.0 state', () => {
     const WebSocket = createFakeWebSocket(base.realtime)
     const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
     const received: string[] = []
-    let closed = false
+    let closed: unknown[] | undefined
     socket.on('message', (text: string) => received.push(text))
-    socket.on('close', () => {
-      closed = true
+    socket.on('close', (...args: unknown[]) => {
+      closed = args
     })
     run()
     expect(socket.readyState).toBe(1)
@@ -123,6 +123,85 @@ describe('notification 2.0 state', () => {
     run()
     expect(received).toEqual([])
     // a plain world's reset drops the token too, so its socket is closed
-    expect(closed).toBe(true)
+    // with the code that tells the client not to reconnect
+    expect(closed).toEqual([CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason])
+    expect(CONSUMER_REMOVED.code).toBe(4410)
+  })
+
+  it('closes sockets whose token a restore removed with CONSUMER_REMOVED', async () => {
+    const { world, run } = manualWorld()
+    const snapshot = world.snapshot()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const token = (await call(world, 'POST', '/notification2/token', { subscription: 'sub', subscriber: 'a' })).body.token
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
+    const closes: unknown[][] = []
+    socket.on('close', (...args: unknown[]) => closes.push(args))
+    run()
+    world.restore(snapshot)
+    expect(closes).toEqual([[4410, 'notification token removed']])
+    expect(socket.readyState).toBe(3)
+  })
+})
+
+describe('closeConsumers()', () => {
+  async function open(world: World, run: () => void, subscription: string, subscriber: string) {
+    const token = (await call(world, 'POST', '/notification2/token', { subscription, subscriber })).body.token as string
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
+    const closes: unknown[][] = []
+    const received: string[] = []
+    socket.on('close', (...args: unknown[]) => closes.push(args))
+    socket.on('message', (text: string) => received.push(text))
+    run()
+    expect(socket.readyState).toBe(1)
+    return { token, socket, closes, received }
+  }
+
+  it('closes matching open sockets with the given code and reason, and keeps their tokens', async () => {
+    const { world, run } = manualWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'one' })
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'two' })
+    const a = await open(world, run, 'one', 'a')
+    const b = await open(world, run, 'two', 'b')
+    expect(world.realtime.closeConsumers({ subscription: 'one', code: 1011, reason: 'internal error' })).toBe(1)
+    expect(a.closes).toEqual([[1011, 'internal error']])
+    expect(a.socket.readyState).toBe(3)
+    expect(b.closes).toEqual([])
+    expect(world.realtime.sockets.size).toBe(1)
+    // the subscription and token stay: the client can reconnect with the same token
+    expect(world.realtime.tokens.has(a.token)).toBe(true)
+    // frames of a persistent subscription wait for the reconnect
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'while away' })
+    run()
+    expect(a.received).toEqual([])
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const again = new WebSocket(`wss://example.test/notification2/consumer/?token=${a.token}`)
+    const received: string[] = []
+    again.on('message', (text: string) => received.push(text))
+    run()
+    expect(again.readyState).toBe(1)
+    expect(received).toHaveLength(1)
+    expect(received[0]).toContain('while away')
+  })
+
+  it('defaults to 1006 for every open socket, filters by tenant, subscriber, and token, and rejects invalid codes', async () => {
+    const { world, run } = manualWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const a = await open(world, run, 'sub', 'a')
+    const b = await open(world, run, 'sub', 'b')
+    const c = await open(world, run, 'sub', 'c')
+    expect(world.realtime.closeConsumers({ tenant: 'other' })).toBe(0)
+    expect(world.realtime.closeConsumers({ subscriber: 'a', code: 4000 })).toBe(1)
+    expect(a.closes).toEqual([[4000, '']])
+    expect(world.realtime.closeConsumers({ token: b.token })).toBe(1)
+    expect(b.closes).toEqual([[1006, '']])
+    expect(() => world.realtime.closeConsumers({ code: 999 })).toThrow(RangeError)
+    expect(() => world.realtime.closeConsumers({ code: 5000 })).toThrow(RangeError)
+    expect(c.closes).toEqual([])
+    expect(world.realtime.closeConsumers()).toBe(1)
+    expect(c.closes).toEqual([[1006, '']])
+    // closed sockets are not closed twice
+    expect(world.realtime.closeConsumers()).toBe(0)
   })
 })

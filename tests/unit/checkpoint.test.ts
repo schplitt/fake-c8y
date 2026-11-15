@@ -5,7 +5,7 @@
  * checkpoint, as a client does on every reconnect).
  */
 import { describe, expect, it } from 'vitest'
-import { createWorld } from '../../src'
+import { CONSUMER_REMOVED, createWorld } from '../../src'
 import type { C8yResetOptions, World } from '../../src'
 import { createFakeWebSocket, waitForRealtimeStartup } from '../../src/realtime-entry'
 
@@ -38,10 +38,12 @@ async function consumer(world: World, run: () => void, subscription: string) {
   const WebSocket = createFakeWebSocket(world.realtime)
   const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
   const received: string[] = []
-  const state = { closed: false }
+  const state = { closed: false, code: undefined as unknown, reason: undefined as unknown }
   socket.on('message', (text: string) => received.push(text))
-  socket.on('close', () => {
+  socket.on('close', (code: unknown, reason: unknown) => {
     state.closed = true
+    state.code = code
+    state.reason = reason
   })
   run()
   expect(socket.readyState).toBe(1)
@@ -216,6 +218,7 @@ describe('reset({ to, consumers })', () => {
     world.reset({ to: startup, consumers: 'keep' })
     expect(kept.state.closed).toBe(false)
     expect(dropped.state.closed).toBe(true)
+    expect([dropped.state.code, dropped.state.reason]).toEqual([CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason])
     expect((await call(world, 'GET', '/notification2/subscriptions')).body.subscriptions.map((item: { subscription: string }) => item.subscription)).toEqual(['startup'])
   })
 
@@ -228,6 +231,7 @@ describe('reset({ to, consumers })', () => {
     world.reset({ to: startup })
     expect(early.state.closed).toBe(false)
     expect(late.state.closed).toBe(true)
+    expect(late.state.code).toBe(CONSUMER_REMOVED.code)
   })
 
   it('drops undelivered frames but keeps delivering to the kept socket', async () => {

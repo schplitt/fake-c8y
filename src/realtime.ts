@@ -15,7 +15,9 @@
  * `TenantData.notificationTokens`): they fork, reset, snapshot, and diff with
  * the rest of the data. `Realtime` keeps what is not data: the consumer
  * sockets and the frames on their way. `world.reset()` and `world.restore()`
- * drop undelivered frames and close the sockets whose token is gone.
+ * drop undelivered frames and close the sockets whose token is gone (with
+ * `CONSUMER_REMOVED`). `closeConsumers()` closes sockets from the server side
+ * to test a client's reconnect path.
  * The consumer WebSocket is in `./websocket` (the `fake-c8y/realtime` entry).
  */
 import type { StoredDocument } from './store'
@@ -74,6 +76,10 @@ function typesOf(typeFilter: unknown): string[] | undefined {
   return quoted.length > 0 ? quoted : typeFilter.split(/\s+or\s+/).map((type) => type.trim())
 }
 
+function tokenOf(socket: NotificationSocket): string {
+  return new URL(socket.url).searchParams.get('token') ?? ''
+}
+
 /**
  * A consumer WebSocket connected to the fake (see `fake-c8y/realtime`).
  */
@@ -96,6 +102,47 @@ export interface NotificationSocket {
  * WebSocket ready states.
  */
 export const SOCKET_STATE = { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 } as const
+
+/**
+ * Close code and reason of a consumer socket whose token `world.reset()` or
+ * `world.restore()` removed (also when its subscription is gone): the consumer
+ * no longer exists, so a client should not reconnect with it. The platform
+ * documents no close code for this; the code is fake-c8y's own, in the
+ * application range (4000-4999), modeled on HTTP 410 Gone.
+ */
+export const CONSUMER_REMOVED = { code: 4410, reason: 'notification token removed' } as const
+
+/**
+ * Which consumer sockets `Realtime.closeConsumers()` closes, and how.
+ */
+export interface CloseConsumersOptions {
+  /**
+   * Only sockets of this tenant.
+   */
+  tenant?: string
+  /**
+   * Only sockets of this subscription name.
+   */
+  subscription?: string
+  /**
+   * Only sockets of this subscriber.
+   */
+  subscriber?: string
+  /**
+   * Only the sockets connected with this token.
+   */
+  token?: string
+  /**
+   * Close code the client sees.
+   * @default 1006 (abnormal closure: the connection dropped)
+   */
+  code?: number
+  /**
+   * Close reason the client sees.
+   * @default ''
+   */
+  reason?: string
+}
 
 export interface RealtimeOptions {
   /**
@@ -313,19 +360,56 @@ export class Realtime {
 
   /**
    * Drops undelivered notifications and closes the sockets whose token is
-   * no longer stored (after the data was reset or restored).
+   * no longer stored (after the data was reset or restored), with
+   * `CONSUMER_REMOVED`.
    */
   resync(): void {
     this.dropPending()
     const tokens = new Map(this.storedTokens())
     for (const socket of [...this.sockets]) {
-      const value = new URL(socket.url).searchParams.get('token') ?? ''
-      if (tokens.get(value) === undefined) {
-        this.disconnect(socket)
-        socket.readyState = SOCKET_STATE.CLOSED
-        socket.emit('close', 1000, '')
+      if (tokens.get(tokenOf(socket)) === undefined) {
+        this.closeFromServer(socket, CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason)
       }
     }
+  }
+
+  /**
+   * Closes open consumer sockets from the server side, as if the connection
+   * dropped or the platform closed it, to test a client's reconnect path. The
+   * subscriptions and tokens stay stored, so the client can reconnect (with the
+   * same token or a new one); frames published meanwhile wait in the backlog of
+   * persistent subscriptions. The `close` event is emitted synchronously.
+   * @param options - Which sockets (all open ones by default), code, and reason
+   * @returns How many sockets were closed
+   * @example
+   * ```ts
+   * world.realtime.closeConsumers({ subscription: 'alarms', code: 1011, reason: 'internal error' })
+   * ```
+   */
+  closeConsumers(options: CloseConsumersOptions = {}): number {
+    const { code = 1006, reason = '' } = options
+    if (!Number.isInteger(code) || code < 1000 || code > 4999) {
+      throw new RangeError(`fake-c8y: closeConsumers() needs a close code from 1000 to 4999, got ${code}`)
+    }
+    let closed = 0
+    for (const socket of [...this.sockets]) {
+      const token = socket.token
+      if ((options.tenant !== undefined && token?.tenant !== options.tenant)
+        || (options.subscription !== undefined && token?.subscription !== options.subscription)
+        || (options.subscriber !== undefined && token?.subscriber !== options.subscriber)
+        || (options.token !== undefined && tokenOf(socket) !== options.token)) {
+        continue
+      }
+      this.closeFromServer(socket, code, reason)
+      closed++
+    }
+    return closed
+  }
+
+  private closeFromServer(socket: NotificationSocket, code: number, reason: string): void {
+    this.disconnect(socket)
+    socket.readyState = SOCKET_STATE.CLOSED
+    socket.emit('close', code, reason)
   }
 
   /**

@@ -212,3 +212,21 @@ const WebSocket = createFakeWebSocket(world.realtime, { encodeMessage: (text) =>
 ```
 
 Sockets belong to one world, so use `createFakeWebSocket(fork.realtime)` for a fork. Subscriptions and tokens are tenant data: a fork inherits the base's, `reset()` drops the ones created since (`reset({ to, consumers: 'keep' })` keeps open consumers, see [Checkpoints](trials.md#checkpoints)), `restore()` brings back the snapshot's, and `diff()` lists subscriptions under `notificationSubscriptions`.
+
+### Close codes
+
+When `reset()` or `restore()` removes a consumer's token (or its subscription), its open socket closes with code `4410` and reason `notification token removed`, exported as `CONSUMER_REMOVED` (from `fake-c8y` and `fake-c8y/realtime`). The consumer no longer exists, so a client should stop instead of reconnecting. The platform documents no close code for this case: `4410` is fake-c8y's own, in the application range (4000-4999), modeled on HTTP 410 Gone. A connect with an unknown token emits `error` and closes with `1008` (`invalid token`), and a socket the client closes itself closes with `1000`.
+
+### Closing consumers from the server side
+
+`world.realtime.closeConsumers(options?)` closes open consumer sockets from the server side, as if the connection dropped or the platform closed it, to test a client's reconnect path. It returns how many sockets it closed.
+
+```ts
+world.realtime.closeConsumers() // every open socket, code 1006 (abnormal closure)
+world.realtime.closeConsumers({ subscription: 'alarms', code: 1011, reason: 'internal error' })
+```
+
+- `tenant`, `subscription`, `subscriber`, and `token` select the sockets (all open ones by default). Sockets still connecting are not closed.
+- `code` (default `1006`, what a client sees when the connection drops) must be from 1000 to 4999, and `reason` defaults to `''`.
+- Subscriptions and tokens stay stored, so the client can reconnect with the same token or mint a new one. Frames published meanwhile wait in the backlog of persistent subscriptions and are delivered on the reconnect.
+- The `close` event is emitted synchronously, like the closes of a reset.
