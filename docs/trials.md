@@ -23,6 +23,7 @@ const results = await Promise.all(questions.map(async (question) => {
 - It starts with the base's tenant, user, subscriptions, overrides, services, and next id. It has its own ids, clock, call log, `unhandled` list, overrides, and Notification 2.0 state.
 - Forks of the same base do not see each other and hand out the same ids, so trials are deterministic.
 - A fork can be forked again.
+- To wait for a fork's background work before grading it, use `await trial.idle()` (no request in flight, nothing scheduled) or `await trial.realtime.settled()` (every delivered notification acknowledged). Both count only the fork's own work and run on real timers. See [Waiting for background work](world.md#waiting-for-background-work).
 - `fork()` takes `now`, `clock`, `schedule`, `unsupported`, `onUnsupported`, and `onChange`. Each defaults to the base's. Callbacks get the fork as their world.
 
 The first `fork()` freezes the base (`frozen` is then `true`). Writes to it throw (requests, `device()`, `seed()`, `setUser()`, `reset()`, `checkpoint()`), and its time-based work stops. Reads still work. Load everything before you fork. `override()` and `service()` still work on a frozen base, for the forks created afterwards.
@@ -40,7 +41,10 @@ On a fork, `reset()` goes back to the state the fork started in: its own writes,
 `world.checkpoint()` remembers the current state, and `world.reset({ to: checkpoint })` goes back to it on the same world: data, ids, tenant options, the user, subscriptions, overrides, and the call log, like a fork's `reset()` but to a state taken later than the baseline. Use it when something keeps running against the world between tests, such as an app that subscribed to Notification 2.0 at startup:
 
 ```ts
+import { waitForRealtimeStartup } from 'fake-c8y/realtime'
+
 await startApp(world) // creates subscriptions and tokens, connects consumers
+await waitForRealtimeStartup(world.realtime, () => world.inflight, { onTimeout: 'throw' })
 const startup = world.checkpoint()
 
 beforeEach(() => {
