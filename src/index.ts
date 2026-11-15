@@ -10,7 +10,7 @@ import type { Access } from './api/access'
 import type { C8yService, C8yServiceContext, C8yServiceDefinition, C8yServiceHandler, C8yServiceOptions } from './services'
 import { DEFAULTS } from './defaults'
 import { withReasonPhrase } from './reason-phrases'
-import { compileRoute, matchRoute, splitPath } from './router'
+import { compileRoute, matchesCall, matchRoute, splitPath } from './router'
 import { emptyTenant, forkTenant, freezeTenant, optionKey, TENANT_COLLECTIONS } from './store'
 import { Realtime, SOCKET_STATE } from './realtime'
 import { platformApi, UnsupportedRequestError } from './api'
@@ -330,6 +330,13 @@ export interface World {
    */
   unhandled: C8yUnhandledRequest[]
   /**
+   * The calls since the last reset (`calls`) that match a route pattern, in
+   * order. Patterns are those of `override()`: `"[METHOD ]/path"` with
+   * `:name`, `*` (one segment), and `**` (the rest).
+   * @param pattern - Route pattern, e.g. `'POST /alarm/alarms'`
+   */
+  callsTo: (pattern: string) => C8yRequest[]
+  /**
    * Whether the requests since the last reset stayed inside the emulation:
    * `valid` is `false` as soon as one request was unhandled (the world made
    * up a 501). Requests the platform also rejects (404 for an unknown path,
@@ -354,7 +361,10 @@ export interface World {
    * `statusText`. The request's signal works like `fetch`'s: an aborted
    * signal rejects with its reason and nothing is sent; a signal that fires
    * before the answer rejects at once with its reason, while the request
-   * still runs to its end (its call is recorded with `aborted: true`).
+   * still runs to its end (its call is recorded with `aborted: true`). An
+   * override that answers `Response.error()` makes it reject with a
+   * `TypeError`, like a network failure (its call is recorded with
+   * `networkError: true`).
    */
   fetch: (request: Request) => Promise<Response>
   /**
@@ -1200,6 +1210,8 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
   }
 
   const unhandledOf = new WeakMap<C8yRequest, C8yUnhandledRequest>()
+  // the TypeErrors send() rejected with for a network error (Response.error())
+  const networkErrors = new WeakSet<object>()
 
   function recordUnhandled(call: C8yRequest, reason: string, kind: C8yUnhandledRequest['kind']): C8yUnhandledRequest {
     const unhandled: C8yUnhandledRequest = { ...call, reason, kind }
@@ -1315,6 +1327,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         tenant: call.tenant,
         user: call.user,
         params,
+        call,
         world,
         callCount,
         next: async () => {
@@ -1525,6 +1538,11 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       const unhandled = typeof error === 'object' && error !== null ? reported.get(error) : undefined
       if (unhandled) {
         return unsupportedAnswer(unhandled)
+      }
+      if (networkErrors.has(error as object)) {
+        // the service did not catch a network error of ctx.fetch(): it fails
+        // like a microservice would, without making the trial invalid
+        return apiError(500, 'general/Internal Server Error', 'fetch failed')
       }
       throw error
     }
@@ -1796,7 +1814,16 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     if (signal?.aborted) {
       return Promise.reject(abortReason(signal))
     }
-    const answered = dispatch(request, parent)
+    const answered = dispatch(request, parent).then((response) => {
+      if (response.type !== 'error') {
+        return response
+      }
+      // like fetch on a network failure (an override or a service returned
+      // Response.error())
+      const error = new TypeError('fetch failed', { cause: new Error(`fake-c8y: ${request.method} ${new URL(request.url).pathname} was answered with a network error (Response.error())`) })
+      networkErrors.add(error)
+      throw error
+    })
     if (!signal) {
       return answered
     }
@@ -1819,6 +1846,11 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         call = recorded
       }, parent)
       status = response.status
+      if (response.type === 'error' && call) {
+        // a simulated network failure: send() rejects; not unhandled
+        call.networkError = true
+        return response
+      }
       return await withReasonPhrase(response)
     } catch (error) {
       if (generation !== started) {
@@ -1926,6 +1958,11 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     realtime,
     db,
     options: worldOptions,
+
+    callsTo(pattern) {
+      const route = compileRoute(pattern)
+      return calls.filter((call) => matchesCall(route, call))
+    },
 
     fetch: (request) => send(request, undefined),
 
@@ -2230,7 +2267,7 @@ export type { Clock, ClockOptions } from './clock'
 export { diffSnapshots } from './snapshot'
 export type { BinarySnapshot, CollectionDiff, RelationChange, TenantDiff, TenantSnapshot, UserSequences, WorldDiff, WorldSnapshot } from './snapshot'
 export { UnsupportedRequestError } from './api'
-export { compileRoute, matchRoute, splitPath } from './router'
+export { compileRoute, matchesCall, matchRoute, splitPath } from './router'
 export type { CompiledRoute } from './router'
 export { DEFAULTS } from './defaults'
 export { Realtime, SOCKET_STATE } from './realtime'

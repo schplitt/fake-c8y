@@ -57,3 +57,19 @@ export function matchRoute(route: CompiledRoute, method: string, segments: strin
   }
   return segments.length === route.segments.length ? params : undefined
 }
+
+/**
+ * Whether a recorded call matches a route pattern (the syntax of
+ * `world.override()`), e.g. to count the calls to an endpoint. The call's
+ * decoded `path` is split at `/`, so a `%2F` inside a segment counts as a
+ * separator here.
+ * @param pattern - Route pattern (`"[METHOD ]/path"`), or a compiled one
+ * @param call - A recorded call (`world.calls`): its `method` and `path`
+ * @param call.method - The call's method
+ * @param call.path - The call's path (without query)
+ * @returns Whether the call matches
+ */
+export function matchesCall(pattern: string | CompiledRoute, call: { method: string, path: string }): boolean {
+  const route = typeof pattern === 'string' ? compileRoute(pattern) : pattern
+  return matchRoute(route, call.method.toUpperCase(), splitPath(call.path)) !== undefined
+}

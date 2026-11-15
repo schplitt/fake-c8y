@@ -3,7 +3,7 @@
  * request on with `ctx.next()`, and count their requests (`ctx.callCount`).
  */
 import { describe, expect, it } from 'vitest'
-import { createWorld, UnsupportedRequestError } from '../../src'
+import { createWorld, matchesCall, UnsupportedRequestError } from '../../src'
 import type { World } from '../../src'
 
 const json = { 'accept': 'application/json', 'content-type': 'application/json' }
@@ -230,5 +230,160 @@ describe('world.override()', () => {
     expect(fork.db.alarms.find()).toHaveLength(1)
     expect(base.db.alarms.find()).toEqual([])
     expect(fork.diff().tenants[fork.tenant]?.alarms?.created).toHaveLength(1)
+  })
+})
+
+describe('network errors (Response.error())', () => {
+  it('makes world.fetch() reject with a TypeError and records the call', async () => {
+    const world = createWorld()
+    const pump = world.device({ name: 'Pump' })
+    world.override('GET /inventory/managedObjects/:id', () => Response.error())
+    const error = await send(world, 'GET', `/inventory/managedObjects/${pump}`).catch((error: unknown) => error)
+    expect(error).toBeInstanceOf(TypeError)
+    expect((error as TypeError).message).toBe('fetch failed')
+    expect(world.calls).toMatchObject([{ path: `/inventory/managedObjects/${pump}`, status: 0, networkError: true }])
+    expect(world.unhandled).toEqual([])
+    expect(world.coverage().valid).toBe(true)
+  })
+
+  it('keeps what next() wrote when the client sees a network error', async () => {
+    const world = createWorld()
+    const pump = world.device({ name: 'Pump' })
+    world.override('POST /alarm/alarms', async (_request, ctx) => {
+      await ctx.next()
+      return Response.error()
+    })
+    await expect(send(world, 'POST', '/alarm/alarms', alarm(pump))).rejects.toBeInstanceOf(TypeError)
+    expect(world.db.alarms.find()).toHaveLength(1)
+    expect(world.calls[0]).toMatchObject({ networkError: true, writes: [{ collection: 'alarms', action: 'created' }] })
+  })
+
+  it('comes back from next() as the response, so an outer override passes it on', async () => {
+    const world = createWorld()
+    const seen: string[] = []
+    world.override('GET /inventory/managedObjects', () => Response.error())
+    world.override('GET /inventory/**', async (_request, ctx) => {
+      const response = await ctx.next()
+      seen.push(response.type)
+      return response
+    })
+    await expect(send(world, 'GET', '/inventory/managedObjects')).rejects.toBeInstanceOf(TypeError)
+    expect(seen).toEqual(['error'])
+    expect(world.calls).toHaveLength(1)
+  })
+
+  it('keeps a throwing handler a 500 of kind error', async () => {
+    const world = createWorld()
+    world.override('GET /inventory/managedObjects', () => {
+      throw new TypeError('boom')
+    })
+    expect((await send(world, 'GET', '/inventory/managedObjects')).status).toBe(500)
+    expect(world.unhandled).toMatchObject([{ kind: 'error' }])
+    expect(world.calls[0]!.networkError).toBeUndefined()
+  })
+
+  it('rejects a service\'s ctx.fetch(); uncaught, the service answers 500 and the trial stays valid', async () => {
+    const world = createWorld()
+    world.override('GET /inventory/managedObjects', () => Response.error())
+    world.service('caught', async (_request, ctx) => {
+      try {
+        await ctx.fetch('/inventory/managedObjects')
+        return Response.json({ caught: false })
+      } catch (error) {
+        return Response.json({ caught: error instanceof TypeError })
+      }
+    })
+    world.service('uncaught', async (_request, ctx) => ctx.fetch('/inventory/managedObjects'))
+    expect(await (await send(world, 'GET', '/service/caught/x')).json()).toEqual({ caught: true })
+    const response = await send(world, 'GET', '/service/uncaught/x')
+    expect(response.status).toBe(500)
+    expect(world.coverage().valid).toBe(true)
+    expect(world.calls.map((call) => [call.path, call.status, call.networkError ?? false])).toEqual([
+      ['/service/caught/x', 200, false],
+      ['/inventory/managedObjects', 0, true],
+      ['/service/uncaught/x', 500, false],
+      ['/inventory/managedObjects', 0, true],
+    ])
+  })
+
+  it('lets a service handler answer with a network error', async () => {
+    const world = createWorld()
+    world.service('flaky', () => Response.error())
+    await expect(send(world, 'GET', '/service/flaky/x')).rejects.toBeInstanceOf(TypeError)
+    expect(world.calls[0]).toMatchObject({ service: 'flaky', networkError: true })
+    expect(world.coverage().valid).toBe(true)
+  })
+
+  it('rejects with the abort reason when the signal fires first', async () => {
+    const world = createWorld()
+    let release!: () => void
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    world.override('GET /custom/slow', async () => {
+      await waiting
+      return Response.error()
+    })
+    const controller = new AbortController()
+    const answer = world.fetch(new Request(`${world.baseUrl}/custom/slow`, { signal: controller.signal }))
+    controller.abort(new Error('stop'))
+    await expect(answer).rejects.toThrow('stop')
+    release()
+    await new Promise((resolve) => {
+      setTimeout(resolve, 0)
+    })
+    expect(world.calls[0]).toMatchObject({ aborted: true, networkError: true })
+  })
+})
+
+describe('world.callsTo() and matchesCall()', () => {
+  it('returns the recorded calls matching a pattern', async () => {
+    const world = createWorld()
+    const pump = world.device({ name: 'Pump' })
+    await send(world, 'GET', `/inventory/managedObjects/${pump}`)
+    await send(world, 'POST', '/alarm/alarms', alarm(pump))
+    await send(world, 'GET', `/inventory/managedObjects/${pump}?withParents=true`)
+    await send(world, 'GET', '/inventory/managedObjects')
+    expect(world.callsTo('GET /inventory/managedObjects/:id').map((call) => call.id)).toEqual([1, 3])
+    expect(world.callsTo('/inventory/**')).toHaveLength(3)
+    expect(world.callsTo('post /alarm/alarms')).toMatchObject([{ method: 'POST', status: 201 }])
+    expect(world.callsTo('DELETE /alarm/alarms')).toEqual([])
+    expect(matchesCall('GET /inventory/*/:id', world.calls[3]!)).toBe(false)
+    expect(matchesCall('GET /inventory/managedObjects', world.calls[3]!)).toBe(true)
+  })
+
+  it('starts over after a reset', async () => {
+    const world = createWorld()
+    await send(world, 'GET', '/inventory/managedObjects')
+    world.reset()
+    expect(world.callsTo('/inventory/**')).toEqual([])
+  })
+})
+
+describe('ctx.call', () => {
+  it('is the recorded call: method, decoded path, query, parsed body, headers', async () => {
+    const world = createWorld()
+    let seen: unknown
+    world.override('/custom/**', (_request, ctx) => {
+      seen = { call: ctx.call, same: ctx.call === world.calls.at(-1), status: ctx.call.status }
+      return {}
+    })
+    await world.fetch(new Request(`${world.baseUrl}/custom/a%20b?x=1&x=2&y=3`, { method: 'POST', headers: { ...json, 'x-http-method': 'PUT' }, body: JSON.stringify({ n: 1 }) }))
+    expect(seen).toMatchObject({
+      call: { method: 'PUT', path: '/custom/a b', query: { x: '1', y: '3' }, body: { n: 1 }, headers: { 'content-type': 'application/json' } },
+      same: true,
+      status: undefined,
+    })
+  })
+
+  it('has no body for binary uploads; the request copy has the bytes', async () => {
+    const world = createWorld()
+    let seen: unknown
+    world.override('POST /custom/upload', async (request, ctx) => {
+      seen = { body: ctx.call.body, bytes: [...new Uint8Array(await request.arrayBuffer())] }
+      return {}
+    })
+    await world.fetch(new Request(`${world.baseUrl}/custom/upload`, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: new Uint8Array([1, 2, 3]) }))
+    expect(seen).toEqual({ body: undefined, bytes: [1, 2, 3] })
   })
 })

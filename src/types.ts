@@ -86,7 +86,8 @@ export interface C8yRequest {
   path: string
   query: Record<string, string>
   /**
-   * Parsed JSON body, raw text, or `undefined`.
+   * Parsed JSON body, raw text, or `undefined` (also for multipart and
+   * binary bodies: an override reads their bytes from its request copy).
    */
   body: unknown
   headers: Record<string, string>
@@ -113,6 +114,12 @@ export interface C8yRequest {
    * signal's reason, while the world still answered the request.
    */
   aborted?: true
+  /**
+   * Set when the answer was a network error: an override (or a service
+   * handler) returned `Response.error()`, so the caller's `fetch` rejected
+   * with a `TypeError` instead of getting a response. `status` is `0`.
+   */
+  networkError?: true
   /**
    * The context path of the registered service (`world.service()`) that
    * answered the request, for a request to `/service/<contextPath>/**` that
@@ -205,6 +212,14 @@ export interface C8yOverrideContext {
    */
   readonly params: Record<string, string>
   /**
+   * The request as the world recorded it: the same object as in
+   * `world.calls`, with the method (after `X-HTTP-METHOD`), the decoded path,
+   * the query, the parsed JSON or text body (`undefined` for multipart and
+   * binary bodies: read the bytes from the request copy), and the headers.
+   * `status` is set after the answer. Read it, do not change it.
+   */
+  readonly call: Readonly<C8yRequest>
+  /**
    * The world answering the request: the fork it was sent to, also for an
    * override registered on the base.
    */
@@ -221,7 +236,9 @@ export interface C8yOverrideContext {
    * that answer. What it writes stays written, whatever the handler returns
    * afterwards. The call log keeps one call (the client's), with the status
    * the handler finally returns. Callable once per request; after a reset
-   * or restore it answers 503 and changes nothing.
+   * or restore it answers 503 and changes nothing. A network error below
+   * (an older override returned `Response.error()`) comes back as that
+   * response, so `return ctx.next()` passes it on.
    */
   next: () => Promise<Response>
 }
@@ -229,8 +246,11 @@ export interface C8yOverrideContext {
 /**
  * Answers a request instead of the world. The request is a copy whose body
  * can be read. Return a `Response` for full control (status, headers), any
- * other value to answer `200` with it as JSON, or nothing for `204`. Throw
- * `UnsupportedRequestError` to report the request as not emulated (kind
- * `'feature'`).
+ * other value to answer `200` with it as JSON, or nothing for `204`. Return
+ * `Response.error()` to simulate a network failure: the caller's `fetch`
+ * rejects with a `TypeError` (the call is recorded with `networkError: true`
+ * and keeps the trial valid). Throw `UnsupportedRequestError` to report the
+ * request as not emulated (kind `'feature'`); any other exception is a 500
+ * of kind `'error'`.
  */
 export type C8yOverrideHandler = (request: Request, context: C8yOverrideContext) => unknown

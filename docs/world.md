@@ -88,7 +88,7 @@ world.seed({
 
 ## Requests
 
-`world.fetch(request)` answers a request to the platform. It never throws. A malformed request gets the platform's 4xx, and an exception inside the fake or an override becomes a 500. The one exception is a request whose signal is already aborted: like `fetch`, it rejects with the signal's reason and is not sent. A signal that fires later rejects at once, while the world still answers the request (its call is recorded with `aborted: true`). Every answer carries the standard reason phrase as `statusText` (`404 Not Found`).
+`world.fetch(request)` answers a request to the platform. It never throws. A malformed request gets the platform's 4xx, and an exception inside the fake or an override becomes a 500. It rejects in two cases, like `fetch`: a request whose signal is already aborted rejects with the signal's reason and is not sent (a signal that fires later rejects at once, while the world still answers the request and records its call with `aborted: true`), and an override that answers with `Response.error()` makes it reject with a `TypeError` ([Network errors](#network-errors)). Every answer carries the standard reason phrase as `statusText` (`404 Not Found`).
 
 Like the platform, a write (POST or PUT) answers with its object only if the request accepts JSON (`Accept: application/json` or a Cumulocity vendor type). Without an Accept header, or with `*/*`, the status is the same and the body is empty. Send `Accept: application/json` when you read the result of a write.
 
@@ -128,12 +128,13 @@ The handler gets a copy of the request whose body it can read, and a context:
 | Field            | What It Is                                                                                                                                             |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `params`         | What the pattern captured.                                                                                                                             |
+| `call`           | The request as the world recorded it, the same object as in `world.calls`. See [The recorded call](#the-recorded-call).                                |
 | `tenant`, `user` | The caller's tenant and user name (`user` is `undefined` without Basic auth).                                                                          |
 | `world`          | The world that got the request: the fork, also for an override registered on the base.                                                                 |
 | `callCount`      | How many requests this override got, this one included: `2` is its second. A fork counts on its own, and `reset()` starts over.                        |
 | `next()`         | Answers the request as if this override did not exist (the next older matching override, else a service or the emulation) and returns that `Response`. |
 
-The handler returns a `Response`, another value (200 with it as JSON), or nothing (204). It can throw `UnsupportedRequestError` (exported) to report the request as not emulated (kind `'feature'`).
+The handler returns a `Response`, another value (200 with it as JSON), or nothing (204). `Response.error()` simulates a network failure, see [Network errors](#network-errors). It can throw `UnsupportedRequestError` (exported) to report the request as not emulated (kind `'feature'`). Any other exception answers 500 and is recorded in `unhandled` with kind `'error'`: a broken override, not a simulated failure.
 
 Use overrides for what can't be expressed as data: failures, latency, and endpoints the fake doesn't emulate. Seed normal data instead of rewriting answers, so a test does not depend on the endpoints the code under test calls.
 
@@ -156,6 +157,45 @@ world.override('POST /alarm/alarms', async (request, ctx) => {
   return new Response(null, { status: 503 })
 })
 ```
+
+### The recorded call
+
+`ctx.call` holds what the world parsed from the request, so a handler does not parse the request copy again:
+
+| Field     | What It Is                                                                                          |
+| --------- | --------------------------------------------------------------------------------------------------- |
+| `method`  | The method in upper case. A `POST` with `X-HTTP-METHOD: PUT` or `DELETE` has the named method.      |
+| `path`    | The decoded path without the query, e.g. `/inventory/managedObjects/42`.                            |
+| `query`   | The query parameters. A repeated parameter has its first value, like on the platform.               |
+| `body`    | The parsed JSON body, else the text, else `undefined`. Multipart and binary bodies are `undefined`. |
+| `headers` | The request headers, with lower-case names.                                                         |
+| `id`      | The call's number in `world.calls`. `status` is set after the answer.                               |
+
+For the bytes of a multipart or binary body, read the request copy: `new Uint8Array(await request.arrayBuffer())`. Do not change `ctx.call`: it is the call log entry.
+
+```ts
+world.override('POST /alarm/alarms', (request, ctx) => {
+  const { type } = ctx.call.body as { type?: string }
+  return type === 'overheat' ? new Response(null, { status: 503 }) : ctx.next()
+})
+```
+
+### Network errors
+
+A handler that returns `Response.error()` (the standard network-error response, `type: 'error'`) makes `world.fetch()` reject with a `TypeError` (`fetch failed`), like `fetch` does when the connection fails. Use it to test retries and fallbacks.
+
+```ts
+// the first request fails like a dropped connection, the others go through
+world.override('GET /inventory/**', (request, ctx) => (ctx.callCount === 1 ? Response.error() : ctx.next()))
+```
+
+- The call is recorded with `networkError: true` and `status: 0`. It is not unhandled, so `coverage()` stays valid.
+- Combined with `next()`, the platform answers and writes, and the client still sees a failure (`await ctx.next(); return Response.error()`).
+- `ctx.next()` of an outer override returns the network-error response as it is, so `return ctx.next()` passes it on. Calling `response.json()` on it fails, check `response.type === 'error'` first.
+- A service's `ctx.fetch()` rejects with the `TypeError` too. If the service does not catch it, its request answers 500, and the trial stays valid. A service handler can also return `Response.error()` itself.
+- If the request's signal fires first, the caller gets the abort reason, and the call has both `aborted: true` and `networkError: true`.
+
+A handler that throws is still a 500 of kind `'error'`, which makes the trial invalid.
 
 ### Without a pattern
 
@@ -188,8 +228,11 @@ h3 answers errors it throws in its own JSON shape, not the platform's.
 | `options.get/set/delete(key, scope?)` | Tenant options. `scope` is `{ category?, tenant? }`; the default is the own settings category of the deployed tenant.                   |
 | `apply(state)`, `setUser(user)`       | Change the tenant, user, subscriptions, or tenant options.                                                                              |
 | `calls`, `unhandled`, `inflight`      | Requests answered and requests not emulated since the last reset, and the number of requests being answered now.                        |
+| `callsTo(pattern)`                    | The calls since the last reset that match an `override()` pattern, in order: `world.callsTo('POST /alarm/alarms')`.                     |
 | `muted(fn)`                           | Runs `fn` without publishing Notification 2.0 messages. An async `fn` mutes the whole world until its promise settles.                  |
 | `tenant`, `user`, `subscriptions`     | The current deployed tenant, current user, and subscriptions.                                                                           |
+
+`matchesCall(pattern, call)` (exported) tells whether one recorded call matches a pattern, e.g. to filter `calls` of several worlds or to count calls in a custom matcher. It matches the call's decoded `path`, so an encoded `%2F` inside a segment counts as a separator there, unlike in `override()`.
 
 `db` collections have `get(id)` and `find(filter?)`; a filter is a partial object or a predicate. `db.measurements.find()` builds every matching generated document, so filter it by `source`.
 
