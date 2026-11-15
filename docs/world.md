@@ -62,7 +62,9 @@ const state: C8yWorldState<Role, OptionKey> = {
 const world = createWorld(state)
 ```
 
-Leave out `(string & {})` to reject unknown roles. `OptionKey` only adds suggestions: `tenantOptions` accepts any key.
+Leave out `(string & {})` to reject unknown roles. `OptionKey` only adds suggestions: `tenantOptions` accepts any key. Reading a narrowed `tenantOptions` gives `string | undefined` for a known key (it may be left out) and `string` for any other key (like any index signature; with `noUncheckedIndexedAccess`, `string | undefined` too).
+
+`World` itself is not generic: `world.user` stays a `C8yUser`, `world.options.get(key: string)` takes any key, and `world.seed()` takes any `C8ySeed`. A wrapper narrows its own surface and passes the values on.
 
 ## Seeding
 
@@ -116,7 +118,7 @@ world.seed({
 
 Like the platform, a write (POST or PUT) answers with its object only if the request accepts JSON (`Accept: application/json` or a Cumulocity vendor type). Without an Accept header, or with `*/*`, the status is the same and the body is empty. Send `Accept: application/json` when you read the result of a write.
 
-Basic auth selects the tenant and the user (`<tenant>/<user>:<password>`). A request without Basic auth works in the deployed tenant as the world's `user`. `basicAuth({ tenant, user, password? })` returns the `authorization` header value in any runtime (UTF-8, no `btoa` or `Buffer`); the password defaults to `DEFAULTS.userPassword`, and a subscription (`world.subscriptions[0]`) passes as it is.
+Basic auth selects the tenant and the user (`<tenant>/<user>:<password>`). A request without Basic auth works in the deployed tenant as the world's `user`. `basicAuth({ tenant, user, password? })` (input type `C8yCredentials`) returns the `authorization` header value in any runtime (UTF-8, no `btoa` or `Buffer`); the password defaults to `DEFAULTS.userPassword`, and a subscription (`world.subscriptions[0]`) passes as it is. The tenant ends at the first `/`, so a user name may contain one.
 
 ## Roles
 

@@ -1,17 +1,18 @@
-import type { C8yUser } from './types'
-
 /**
  * Values a world uses when its options leave them out, and the passwords
  * harnesses put into credentials. The fake checks no passwords: any value
  * passes, these only keep wrappers from inventing their own.
  *
  * Also exported from the light `fake-c8y/defaults` entry, which imports
- * nothing else (safe in a Vite or Vitest config).
+ * nothing else (safe in a Vite or Vitest config). Keep this module free of
+ * imports, also type imports.
  */
 export const DEFAULTS = {
   tenant: 't12345',
   baseUrl: 'https://t12345.cumulocity.test',
-  user: { userName: 'test-user', roles: [] } as C8yUser,
+  // typed inline, not as C8yUser: an import would pull the shared
+  // declaration chunk into the light entry's types
+  user: { userName: 'test-user', roles: [] } as { userName: string, roles: string[] },
   bootstrapUser: 'servicebootstrap_test',
   settingsCategory: 'service',
   /**

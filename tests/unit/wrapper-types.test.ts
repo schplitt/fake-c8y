@@ -3,10 +3,14 @@
 // basicAuth(). The type checks run in `pnpm typecheck` (tsc covers tests/).
 import { Buffer } from 'node:buffer'
 import { readFileSync } from 'node:fs'
+import { dirname, relative } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { rolldown } from 'rolldown'
+import ts from 'typescript'
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import { basicAuth, createWorld, DEFAULTS } from '../../src'
 import { DEFAULTS as LIGHT_DEFAULTS } from '../../src/defaults-entry'
-import type { C8yGroupInput, C8ySeed, C8ySubscription, C8yUser, C8yUserInput, C8yWorldState } from '../../src'
+import type { C8yCredentials, C8yGroupInput, C8ySeed, C8ySubscription, C8yUser, C8yUserInput, C8yWorldState } from '../../src'
 
 type Role = 'ROLE_PUMP_READ' | 'ROLE_PUMP_ADMIN'
 type OptionKey = 'threshold' | 'unit'
@@ -26,6 +30,8 @@ describe('generic user and state types', () => {
   it('narrows roles and option keys, and the narrowed types pass where the wide ones go', () => {
     expectTypeOf<C8yUser<Role>['roles']>().toEqualTypeOf<Role[] | undefined>()
     expectTypeOf<C8yWorldState<Role, OptionKey>['user']>().toEqualTypeOf<C8yUser<Role> | null | undefined>()
+    // a known key may be left out
+    expectTypeOf<NonNullable<C8yWorldState<Role, OptionKey>['tenantOptions']>['threshold']>().toEqualTypeOf<string | undefined>()
 
     // @ts-expect-error an unknown role
     const wrong: C8yUser<Role> = { userName: 'eva', roles: ['ROLE_OTHER'] }
@@ -58,14 +64,29 @@ describe('fake-c8y/defaults', () => {
     expect(DEFAULTS).toMatchObject({ subscriptionPassword: 'service-password', bootstrapPassword: 'bootstrap-password', userPassword: 'test-password' })
   })
 
-  it('imports nothing but the defaults module, which imports only types', () => {
-    const imports = (file: string) => [...readFileSync(new URL(`../../src/${file}`, import.meta.url), 'utf8').matchAll(/^(?:import|export)\s.*from '([^']+)'/gm)].map((match) => match[0])
-    expect(imports('defaults-entry.ts')).toEqual([`export { DEFAULTS } from './defaults'`])
-    expect(imports('defaults.ts').every((line) => line.startsWith('import type '))).toBe(true)
+  it('bundles only the defaults module, and its declarations import nothing', async () => {
+    const entry = fileURLToPath(new URL('../../src/defaults-entry.ts', import.meta.url))
+    const bundle = await rolldown({ input: entry, platform: 'neutral', treeshake: false })
+    const { output } = await bundle.generate({ format: 'esm' })
+    await bundle.close()
+    // every module the entry reaches, side-effect and dynamic imports included
+    const modules = output.flatMap((chunk) => (chunk.type === 'chunk' ? chunk.moduleIds : [])).map((id) => relative(dirname(entry), id))
+    expect(modules.sort()).toEqual(['defaults-entry.ts', 'defaults.ts'])
+    expect(output.filter((chunk) => chunk.type === 'chunk')).toHaveLength(1)
+    // the declarations (isolatedDeclarations: per file) reach no other module
+    const declaration = (file: string) => ts.transpileDeclaration(readFileSync(new URL(`../../src/${file}`, import.meta.url), 'utf8'), { fileName: file, compilerOptions: { isolatedDeclarations: true } }).outputText
+    expect(declaration('defaults.ts')).toContain('declare const DEFAULTS')
+    expect(declaration('defaults.ts')).not.toMatch(/\bimport\b|\bfrom\s+['"]/)
+    expect(declaration('defaults-entry.ts').match(/from\s+['"][^'"]+['"]/g)).toEqual([`from './defaults'`])
   })
 
-  it('is the password of the default subscription', () => {
-    expect(createWorld().subscriptions).toEqual([{ tenant: DEFAULTS.tenant, user: `service_${DEFAULTS.tenant}`, password: DEFAULTS.subscriptionPassword }])
+  it('is the password of the default subscription and of the default applications\' service users', () => {
+    const world = createWorld()
+    expect(world.subscriptions).toEqual([{ tenant: DEFAULTS.tenant, user: `service_${DEFAULTS.tenant}`, password: DEFAULTS.subscriptionPassword }])
+    const subscriptions = world.snapshot().tenants.find((tenant) => tenant.tenant === world.tenant)!.applicationSubscriptions!
+    const microservices = subscriptions.filter((subscription) => subscription.serviceUser !== undefined)
+    expect(microservices.length).toBeGreaterThan(0)
+    expect(new Set(microservices.map((subscription) => subscription.password))).toEqual(new Set([DEFAULTS.subscriptionPassword]))
   })
 })
 
@@ -73,11 +94,20 @@ describe('basicAuth()', () => {
   it('builds the header value, with the default user password', () => {
     expect(basicAuth({ tenant: 't1', user: 'eva', password: 'pw' })).toBe(`Basic ${btoa('t1/eva:pw')}`)
     expect(basicAuth({ tenant: 't1', user: 'eva' })).toBe(`Basic ${btoa(`t1/eva:${DEFAULTS.userPassword}`)}`)
-    expectTypeOf<C8ySubscription>().toExtend<Parameters<typeof basicAuth>[0]>()
+    expectTypeOf<C8ySubscription>().toExtend<C8yCredentials>()
+    expectTypeOf<{ tenant: string, user: string }>().toExtend<C8yCredentials>()
+    expectTypeOf<C8yCredentials['password']>().toEqualTypeOf<string | undefined>()
   })
 
   it('encodes UTF-8', () => {
     expect(basicAuth({ tenant: 't1', user: 'jürgen', password: 'pä' })).toBe(`Basic ${Buffer.from('t1/jürgen:pä').toString('base64')}`)
+  })
+
+  it('keeps a user name with a slash: the tenant ends at the first one', async () => {
+    const world = createWorld()
+    world.override('GET /whoami', (_request, ctx) => ({ tenant: ctx.tenant, user: ctx.user }))
+    const response = await world.fetch(new Request(`${world.baseUrl}/whoami`, { headers: { authorization: basicAuth({ tenant: world.tenant, user: 'site/eva', password: 'p:w' }) } }))
+    expect(await response.json()).toEqual({ tenant: world.tenant, user: 'site/eva' })
   })
 
   it('takes a subscription as it is, and the world sees the user', async () => {
