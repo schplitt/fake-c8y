@@ -92,7 +92,10 @@ export interface C8yServiceContext {
    * The call log links the request to the one being answered (`parent`).
    * A path (`/inventory/managedObjects`) is resolved against the world's
    * base URL. Rejects only when the request's signal is already aborted
-   * (it is not sent then), like `fetch`.
+   * (it is not sent then), or with a `TypeError` when an override answers
+   * it with a network error (`Response.error()`), like `fetch`. If the
+   * handler does not catch that error, the service answers 500 without
+   * making the trial invalid.
    */
   fetch: (input: Request | string, init?: ConstructorParameters<typeof Request>[1]) => Promise<Response>
   /**
@@ -108,7 +111,10 @@ export interface C8yServiceContext {
  * Answers the requests to a service. The request's URL has the path below
  * the context path (`/service/pumps/stats?x=1` arrives as `/stats?x=1`),
  * like a microservice sees it on the platform, and its body can be read.
- * Throwing makes the trial invalid (kind `'error'`, answered 500).
+ * Throwing makes the trial invalid (kind `'error'`, answered 500), except
+ * for the `TypeError` of a network error from `ctx.fetch()`. Returning
+ * `Response.error()` makes the caller's `fetch` reject like a network
+ * failure.
  */
 export type C8yServiceHandler = (request: Request, context: C8yServiceContext) => Response | Promise<Response>
 
