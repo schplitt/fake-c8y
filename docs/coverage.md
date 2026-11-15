@@ -37,4 +37,21 @@ The `unsupported` option of `createWorld()` and `fork()` sets the answer:
 
 In every case the request is recorded in `world.unhandled` and passed to `onUnsupported`.
 
+For one agent turn, or one test on a shared world, read the unhandled requests of a [log window](world.md#log-windows) instead of the whole trial: a turn is valid while `world.unhandledSince(turnStart)` is empty. A request belongs to the turn in which it started, also when it fails after the next turn began:
+
+```ts
+import type { C8yLogMark } from 'fake-c8y'
+
+const turns: C8yLogMark[] = []
+for (const message of conversation) {
+  turns.push(trial.mark())
+  await runAgentTurn(trial, message)
+}
+turns.push(trial.mark())
+const invalidTurns = turns.slice(1).map((end, i) => trial.unhandledSince(turns[i]!, end)).filter((unhandled) => unhandled.length > 0)
+for (const mark of turns) {
+  mark.release()
+}
+```
+
 Report invalid trials apart from passes and failures, and count them per endpoint: they show where the emulation needs to grow.

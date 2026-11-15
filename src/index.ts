@@ -323,10 +323,21 @@ export interface World {
   readonly subscriptions: readonly C8ySubscription[]
   /**
    * Every request answered since the last reset, in order.
+   *
+   * Assigning a new array only replaces what `calls` shows: request ids,
+   * override call counts, and usage statistics keep counting, and a request
+   * in flight lands in the new array. For "the requests since point X", use
+   * `mark()` and `callsSince()` instead (also to bound memory: assigning
+   * does not drop entries kept for live marks).
    */
   calls: C8yRequest[]
   /**
    * Requests since the last reset the world could not answer.
+   *
+   * Assigning a new array replaces what `unhandled` and `coverage()` show;
+   * an entry is added when its request finishes, so one that started before
+   * the assignment can land in the new array. For windows, use `mark()` and
+   * `unhandledSince()` instead.
    */
   unhandled: C8yUnhandledRequest[]
   /**
@@ -336,6 +347,50 @@ export interface World {
    * @param pattern - Route pattern, e.g. `'POST /alarm/alarms'`
    */
   callsTo: (pattern: string) => C8yRequest[]
+  /**
+   * Marks the current point of the call log, for `callsSince()`,
+   * `unhandledSince()`, and `takeUnhandledSince()`. Costs O(1). The mark
+   * belongs to this world (a fork has its own log) and to its current log:
+   * `restore()` keeps the log, `reset()` (also `reset({ to })`) starts a new
+   * one, and marks of the old one throw.
+   *
+   * Retention: the world keeps the calls and unhandled entries of requests
+   * started after its oldest live mark, and nothing without one. Release a
+   * mark when its windows are no longer needed (`mark.release()`).
+   */
+  mark: () => C8yLogMark
+  /**
+   * The requests that started after `from` (and not after `until`), in the
+   * order they were recorded. A request belongs to the window in which
+   * `fetch()` was called, also when it is recorded or finishes later; a
+   * request a service sends with `ctx.fetch()` belongs to the window of the
+   * request the service was answering. An `until` before `from` gives an
+   * empty window.
+   * @param from - A live mark of this world
+   * @param until - A live mark of this world (default: now)
+   * @param options - Ranges to leave out (`except`)
+   */
+  callsSince: (from: C8yLogMark, until?: C8yLogMark, options?: C8yLogWindowOptions) => C8yRequest[]
+  /**
+   * The unhandled entries of the requests of a window (see `callsSince()`),
+   * without those taken by `takeUnhandledSince()`. An entry is recorded when
+   * its request finishes, so a window can grow after its `until` mark.
+   * @param from - A live mark of this world
+   * @param until - A live mark of this world (default: now)
+   * @param options - Ranges to leave out (`except`)
+   */
+  unhandledSince: (from: C8yLogMark, until?: C8yLogMark, options?: C8yLogWindowOptions) => C8yUnhandledRequest[]
+  /**
+   * Like `unhandledSince()`, and takes what it returns: later windows of any
+   * mark leave those entries out, and the world drops them. Entries recorded
+   * afterwards (a request still in flight) are not taken yet, so taking the
+   * same window again returns only them. The calls, `unhandled`, and
+   * `coverage()` stay as they are.
+   * @param from - A live mark of this world
+   * @param until - A live mark of this world (default: now)
+   * @param options - Ranges to leave out (`except`)
+   */
+  takeUnhandledSince: (from: C8yLogMark, until?: C8yLogMark, options?: C8yLogWindowOptions) => C8yUnhandledRequest[]
   /**
    * Whether the requests since the last reset stayed inside the emulation:
    * `valid` is `false` as soon as one request was unhandled (the world made
@@ -700,6 +755,57 @@ export interface C8yCheckpoint {
 }
 
 /**
+ * A point in a world's call log (`world.mark()`). It belongs to the world
+ * that took it and to its current log (until `reset()`).
+ */
+export interface C8yLogMark {
+  /**
+   * Counts the marks of a world, from 1 (informational only).
+   */
+  readonly id: number
+  /**
+   * Ends the mark: the world no longer keeps entries only its windows
+   * needed, and using it throws. Calling it again does nothing.
+   */
+  readonly release: () => void
+}
+
+/**
+ * A range of a world's call log: the requests started after `from` and not
+ * after `until` (default: now).
+ */
+export interface C8yLogRange {
+  from: C8yLogMark
+  until?: C8yLogMark
+}
+
+/**
+ * Options of the log windows (`world.callsSince()` and the others).
+ */
+export interface C8yLogWindowOptions {
+  /**
+   * Ranges whose requests the window leaves out, e.g. a service restart
+   * inside a test.
+   */
+  except?: readonly C8yLogRange[]
+}
+
+interface MarkState {
+  // requestSeq and recordSeq when the mark was taken
+  seq: number
+  record: number
+  epoch: number
+  released: boolean
+}
+
+interface LogEntry<T> {
+  entry: T
+  // the start number of the entry's request, and the entry's record number
+  seq: number
+  record: number
+}
+
+/**
  * Options of `world.reset()`: a new baseline (the state fields), or a
  * checkpoint to go back to.
  */
@@ -802,6 +908,26 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
   // errors thrown by ctx.unsupported(), already recorded as unhandled
   const reported = new WeakMap<object, C8yUnhandledRequest>()
   let unhandledRequests: C8yUnhandledRequest[] = []
+  // log windows (mark()): every request gets a start number when it is
+  // dispatched (never reset; a service's request takes the number of the
+  // request it was sent for). The logs hold the calls and unhandled entries
+  // that some live mark's windows can still contain: those started after the
+  // oldest live mark. Without a live mark they hold nothing. They are
+  // independent of the `calls`/`unhandled` setters.
+  let requestSeq = 0
+  // the start number of every recorded call (and of its unhandled entry)
+  const requestStart = new WeakMap<object, number>()
+  // numbers the log entries in recording order (binary search from a mark)
+  let recordSeq = 0
+  // bumped by reset(): marks of an earlier log throw
+  let logEpoch = 0
+  let callLog: LogEntry<C8yRequest>[] = []
+  let unhandledLog: LogEntry<C8yUnhandledRequest>[] = []
+  const marks = new WeakMap<C8yLogMark, MarkState>()
+  // marks not released (in this log), and the smallest start number among them
+  const liveMarks = new Set<MarkState>()
+  let oldestLive = Number.POSITIVE_INFINITY
+  let markCount = 0
   let platformErrors: C8yCoverage['platformErrors'] = []
   // user name of the request being answered, for audit records
   let actor: string | undefined
@@ -1231,6 +1357,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
   function recordUnhandled(call: C8yRequest, reason: string, kind: C8yUnhandledRequest['kind']): C8yUnhandledRequest {
     const unhandled: C8yUnhandledRequest = copyCall(call, { reason, kind })
     unhandledRequests.push(unhandled)
+    logEntry(unhandledLog, unhandled, requestStart.get(call))
     // a copy of the call: dispatch() sets its status and duration too
     unhandledOf.set(call, unhandled)
     options.onUnsupported?.(unhandled, world)
@@ -1810,7 +1937,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         if (!outgoing.headers.has('authorization')) {
           outgoing.headers.set('authorization', `Basic ${login}`)
         }
-        return send(outgoing, call.id)
+        return send(outgoing, call)
       },
       unsupported: (reason) => {
         const error = new UnsupportedRequestError(reason)
@@ -1835,7 +1962,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
    * @param request - The request
    * @param parent - The request a service sent this one for
    */
-  function send(request: Request, parent: number | undefined): Promise<Response> {
+  function send(request: Request, parent: C8yRequest | undefined): Promise<Response> {
     const { signal } = request
     if (signal?.aborted) {
       return Promise.reject(abortReason(signal))
@@ -1860,9 +1987,13 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     })
   }
 
-  async function dispatch(request: Request, parent: number | undefined): Promise<Response> {
+  async function dispatch(request: Request, parentCall: C8yRequest | undefined): Promise<Response> {
+    const parent = parentCall?.id
     inflight++
     const started = generation
+    // the window the request belongs to (mark()): a service's request
+    // belongs to the window of the request it was sent for
+    const seq = (parentCall && requestStart.get(parentCall)) ?? ++requestSeq
     // iso4 has no `performance`
     const startedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
     let call: C8yRequest | undefined
@@ -1870,6 +2001,8 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     try {
       const response = await answer(request, (recorded) => {
         call = recorded
+        requestStart.set(recorded, seq)
+        logEntry(callLog, recorded, seq)
       }, parent)
       status = response.status
       if (response.type === 'error' && call) {
@@ -1888,6 +2021,8 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       if (!call) {
         call = { id: ++callCount, ...(parent !== undefined ? { parent } : {}), method: request.method.toUpperCase(), path: request.url, query: {}, body: undefined, headers: {}, tenant, user: undefined }
         calls.push(call)
+        requestStart.set(call, seq)
+        logEntry(callLog, call, seq)
       }
       const reason = error instanceof Error ? error.message : String(error)
       const response = error instanceof UnsupportedRequestError
@@ -1915,6 +2050,82 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         usage.record(call, call.networkError ? emulatedStatus.get(call) ?? status : status, clock(), tenants.get(call.tenant))
       }
     }
+  }
+
+  /**
+   * Logs an entry when a live mark's window can contain it.
+   * @param log - `callLog` or `unhandledLog`
+   * @param entry - The call or unhandled entry
+   * @param seq - The start number of its request
+   */
+  function logEntry<T>(log: LogEntry<T>[], entry: T, seq: number | undefined): void {
+    if (seq !== undefined && seq > oldestLive) {
+      log.push({ entry, seq, record: ++recordSeq })
+    }
+  }
+
+  /**
+   * The state of a mark of this world's current log.
+   * @param mark - The mark
+   */
+  function liveMark(mark: C8yLogMark): MarkState {
+    const state = marks.get(mark)
+    if (!state) {
+      throw new TypeError('fake-c8y: log windows need marks of this world (world.mark())')
+    }
+    if (state.epoch !== logEpoch) {
+      throw new TypeError(`fake-c8y: log mark ${mark.id} is from before the last reset (marks end with the log they were taken in)`)
+    }
+    if (state.released) {
+      throw new TypeError(`fake-c8y: log mark ${mark.id} was released`)
+    }
+    return state
+  }
+
+  /**
+   * Drops the log entries no live mark's window can contain.
+   */
+  function compactLogs(): void {
+    oldestLive = Number.POSITIVE_INFINITY
+    for (const state of liveMarks) {
+      oldestLive = Math.min(oldestLive, state.seq)
+    }
+    callLog = callLog.filter(({ seq }) => seq > oldestLive)
+    unhandledLog = unhandledLog.filter(({ seq }) => seq > oldestLive)
+  }
+
+  /**
+   * The positions of a log's entries in a window: started after `from`, not
+   * after `until`, and in none of the `except` ranges. Entries of requests
+   * started after a mark are recorded after it, so the search starts at the
+   * first entry recorded after `from`.
+   * @param log - `callLog` or `unhandledLog`
+   * @param from - The start mark
+   * @param until - The end mark
+   * @param options - `except` ranges
+   */
+  function windowOf<T>(log: LogEntry<T>[], from: C8yLogMark, until: C8yLogMark | undefined, options: C8yLogWindowOptions | undefined): number[] {
+    const start = liveMark(from)
+    const end = until === undefined ? Number.POSITIVE_INFINITY : liveMark(until).seq
+    const except = (options?.except ?? []).map((range) => [liveMark(range.from).seq, range.until === undefined ? Number.POSITIVE_INFINITY : liveMark(range.until).seq] as const)
+    let low = 0
+    let high = log.length
+    while (low < high) {
+      const middle = (low + high) >>> 1
+      if (log[middle]!.record <= start.record) {
+        low = middle + 1
+      } else {
+        high = middle
+      }
+    }
+    const positions: number[] = []
+    for (let i = low; i < log.length; i++) {
+      const { seq } = log[i]!
+      if (seq > start.seq && seq <= end && !except.some(([after, until]) => seq > after && seq <= until)) {
+        positions.push(i)
+      }
+    }
+    return positions
   }
 
   function snapshot(): WorldSnapshot {
@@ -1980,6 +2191,35 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     coverage() {
       return { valid: unhandledRequests.length === 0, unhandled: [...unhandledRequests], platformErrors: [...platformErrors] }
     },
+    mark() {
+      const state: MarkState = { seq: requestSeq, record: recordSeq, epoch: logEpoch, released: false }
+      const mark: C8yLogMark = Object.freeze({
+        id: ++markCount,
+        release() {
+          if (state.released || state.epoch !== logEpoch) {
+            return
+          }
+          state.released = true
+          liveMarks.delete(state)
+          compactLogs()
+        },
+      })
+      marks.set(mark, state)
+      liveMarks.add(state)
+      oldestLive = Math.min(oldestLive, state.seq)
+      return mark
+    },
+    callsSince: (from, until, options) => windowOf(callLog, from, until, options).map((i) => callLog[i]!.entry),
+    unhandledSince: (from, until, options) => windowOf(unhandledLog, from, until, options).map((i) => unhandledLog[i]!.entry),
+    takeUnhandledSince(from, until, options) {
+      const positions = windowOf(unhandledLog, from, until, options)
+      const taken = new Set(positions)
+      const window = positions.map((i) => unhandledLog[i]!.entry)
+      if (positions.length > 0) {
+        unhandledLog = unhandledLog.filter((_, i) => !taken.has(i))
+      }
+      return window
+    },
     get inflight() {
       return inflight
     },
@@ -2011,6 +2251,12 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       callCounts = new Map()
       unhandledRequests = []
       platformErrors = []
+      // a new log: marks of the old one end
+      callLog = []
+      unhandledLog = []
+      logEpoch++
+      liveMarks.clear()
+      oldestLive = Number.POSITIVE_INFINITY
       tenants.clear()
       if (from || base) {
         if (!from && forkStart !== undefined && clock() !== forkStart) {
