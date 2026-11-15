@@ -23,11 +23,12 @@ const world = createWorld({
 | ------------------ | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tenant`           | `'t12345'`                               | Tenant the microservice is deployed in. Requests without a tenant in their Basic auth go here.                                              |
 | `user`             | `{ userName: 'test-user', roles: [] }`   | User that `GET /user/currentUser` answers with. `null` answers 401. The world also stores it as a user of its tenant.                       |
-| `subscriptions`    | `service_<tenant>`, `service-password`   | Tenants subscribed to the microservice, with their service users.                                                                           |
+| `subscriptions`    | `service_<tenant>`, `service-password`   | Tenants subscribed to the microservice, with their service users and passwords.                                                             |
 | `tenantOptions`    | none                                     | Tenant options in the microservice's own settings category.                                                                                 |
 | `baseUrl`          | `'https://t12345.cumulocity.test'`       | Base URL in `self` and `next` links.                                                                                                        |
-| `bootstrapUser`    | `'servicebootstrap_test'`                | Bootstrap user, allowed to read `/application/currentApplication`.                                                                          |
-| `settingsCategory` | `'service'`                              | The microservice's own tenant option category. Its `credentials.*` options read decrypted.                                                  |
+| `bootstrapUser`    | `'servicebootstrap_test'`                | Bootstrap user, allowed to read `/application/currentApplication`. With a `manifest`: `servicebootstrap_<name>`.                            |
+| `settingsCategory` | `'service'`                              | The microservice's own tenant option category. Its `credentials.*` options read decrypted. With a `manifest`: the manifest's.               |
+| `manifest`         | none                                     | The microservice's `cumulocity.json`. Makes it an application, see [The deployed microservice](services.md#the-deployed-microservice).      |
 | `now`              | `Date.now`                               | Clock for timestamps, in epoch milliseconds.                                                                                                |
 | `clock`            | none                                     | A trial clock from `createClock()`. It wins over `now`. See [Trials](trials.md#the-clock).                                                  |
 | `ids`              | `'scattered'`                            | Id format, see [Ids](#ids).                                                                                                                 |
@@ -146,7 +147,7 @@ const restore = interceptFetch(() => world, { origin: 'https://t100.cumulocity.t
 
 ## Roles
 
-Roles are enforced by default. A request with Basic auth of a user the tenant stores (other than the world's `user`), or of a registered service's bootstrap or service user, gets the platform's 403 `security/Forbidden` where it lacks the rights, and lists show only what it may see. Three kinds of caller stay unrestricted: requests without Basic auth, the world's own `user`, and user names the tenant does not store. `roles: 'off'` gives every caller full access.
+Roles are enforced by default. A request with Basic auth of a user the tenant stores (other than the world's `user`), or of a registered service's bootstrap or service user, gets the platform's 403 `security/Forbidden` where it lacks the rights, and lists show only what it may see. Three kinds of caller stay unrestricted: requests without Basic auth, the world's own `user`, and user names the tenant does not store. The service and bootstrap users of `subscriptions` and `bootstrapUser` are unrestricted too, unless the world has a `manifest` ([The deployed microservice](services.md#the-deployed-microservice)). `roles: 'off'` gives every caller full access.
 
 A user you switch to with `setUser()` or `apply({ user })` is stored in its tenant only while it is current: switching away removes it again, or puts back the seeded user of that name, unless the API changed it meanwhile. The user the world starts with stays stored.
 
@@ -286,7 +287,7 @@ h3 answers errors it throws in its own JSON shape, not the platform's.
 | `db.operations.update(id, update)`    | Updates an operation like a device agent, e.g. `{ status: 'SUCCESSFUL' }`.                                                              |
 | `db.newDeviceRequests.connect(id)`    | Moves a new device request to `PENDING_ACCEPTANCE`, like the device's first credentials poll.                                           |
 | `options.get/set/delete(key, scope?)` | Tenant options. `scope` is `{ category?, tenant? }`; the default is the own settings category of the deployed tenant.                   |
-| `apply(state)`, `setUser(user)`       | Change the tenant, user, subscriptions, or tenant options.                                                                              |
+| `apply(state)`, `setUser(user)`       | Change the tenant, user, subscriptions, or tenant options. With a `manifest`, a change of subscriptions subscribes and unsubscribes.    |
 | `calls`, `unhandled`, `inflight`      | Requests answered and requests not emulated since the last reset, and the number of requests being answered now.                        |
 | `callsTo(pattern)`                    | The calls since the last reset that match an `override()` pattern, in order: `world.callsTo('POST /alarm/alarms')`.                     |
 | `mark()`, `callsSince(mark)`, …       | Windows of the call log without a reset, see [Log windows](#log-windows).                                                               |

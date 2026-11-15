@@ -24,16 +24,17 @@ await world.fetch(new Request(`${world.baseUrl}/tenant/options`, { headers: asOp
 
 ## Who is checked
 
-| Caller (Basic Auth `<tenant>/<user>`)                                   | Rights                                                                                          |
-| ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| No Basic auth                                                           | Unrestricted (the request runs as the world's `user`).                                          |
-| The world's `user`                                                      | Unrestricted, whatever its `roles`.                                                             |
-| A user the caller's tenant stores                                       | Its global roles (own and from its groups), ownership, inventory roles, and device permissions. |
-| A registered service's service user (`world.service()`)                 | The manifest's `requiredRoles` and `ROLE_SYSTEM`.                                               |
-| A registered service's bootstrap user                                   | `ROLE_SYSTEM` only.                                                                             |
-| A name the tenant does not store, the world's own `subscriptions` users | Unrestricted (the fake checks no passwords).                                                    |
+| Caller (Basic Auth `<tenant>/<user>`)                                   | Rights                                                                                                                      |
+| ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| No Basic auth                                                           | Unrestricted (the request runs as the world's `user`).                                                                      |
+| The world's `user`                                                      | Unrestricted, whatever its `roles`.                                                                                         |
+| A user the caller's tenant stores                                       | Its global roles (own and from its groups), ownership, inventory roles, and device permissions.                             |
+| A registered service's service user (`world.service()`)                 | The manifest's `requiredRoles` and `ROLE_SYSTEM`.                                                                           |
+| A registered service's bootstrap user                                   | `ROLE_SYSTEM` only.                                                                                                         |
+| The world's own `subscriptions` and `bootstrapUser` with a `manifest`   | Like a registered service's: `requiredRoles` and `ROLE_SYSTEM` for the service users, `ROLE_SYSTEM` for the bootstrap user. |
+| A name the tenant does not store, the world's own `subscriptions` users | Unrestricted (the fake checks no passwords). With a `manifest`, see the row above.                                          |
 
-So under enforcement only stored users and a service's bootstrap and service users are restricted. Requests without Basic auth, the world's own `user`, and user names the tenant does not store keep full access, so tests that send no credentials work unchanged.
+So under enforcement only stored users and a service's bootstrap and service users (also those of the deployed microservice with a `manifest`, see [The deployed microservice](services.md#the-deployed-microservice)) are restricted. With a manifest, declare every role the service uses in `requiredRoles`, for example `ROLE_OPTION_MANAGEMENT_READ` to read the tenant options of its own settings category through `/tenant/options/**`. Requests without Basic auth, the world's own `user`, and user names the tenant does not store keep full access, so tests that send no credentials work unchanged.
 
 Every new user gets `ROLE_USER_MANAGEMENT_OWN_READ` and `ROLE_USER_MANAGEMENT_OWN_ADMIN`, like on the platform: users seeded with `world.seed({ users })` (in addition to the `roles` you give) and users created with `POST /user/{tenant}/users`. Without `OWN_READ`, `GET /user/currentUser` answers 403; delete the role through the API to test that. The world's `user` keeps exactly its `roles`, since it is unrestricted anyway. A user is unrestricted only while it is the world's `user`: after `setUser()` switches away, it is restricted by what the tenant stores for it, which is what was there before the switch.
 
