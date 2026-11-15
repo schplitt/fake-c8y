@@ -20,6 +20,8 @@ src/
 ├── availability.ts             # availability monitoring by the clock (UNAVAILABLE, c8y_UnavailabilityAlarm), run by tick()
 ├── availability-queue.ts       # AvailabilityQueue: per-tenant due-time queue (sorted base array shared by forks + own heap)
 ├── realtime-entry.ts           # `fake-c8y/realtime` entry: fake consumer WebSocket
+├── c8y-client.ts               # `fake-c8y/c8y-client` entry: installFetchClient() patches a passed-in @c8y/client FetchClient class (no import of @c8y/client)
+├── intercept.ts                # interceptFetch(): routes the global fetch to a world by origin
 ├── store.ts                    # TenantData (one Collection per kind of data) + WorldContext (per world: baseUrl, ids, clock, notify, realtime), emptyTenant/forkTenant/freezeTenant
 ├── user-defaults.ts            # role catalogue, default groups and inventory roles every tenant starts with
 ├── application-defaults.ts     # the standard applications every tenant starts with (owner `management`, subscribed); data in application-defaults.generated.ts (from a real tenant)
@@ -27,7 +29,7 @@ src/
 ├── snapshot.ts                 # JSON snapshots, restore, diff (also from a fork's touched keys: touchedSnapshots)
 ├── generators.ts               # generated measurement history: compiled generators, tombstones, GeneratedView (merged list, paging, series points, supportedSeries)
 ├── realtime.ts                 # Notification 2.0 sockets and frames per world (Realtime class; resets close removed consumers with CONSUMER_REMOVED 4410, closeConsumers() injects server-side closes); subscriptions and tokens are tenant data (notificationSubscriptions, notificationTokens)
-├── websocket.ts                # createFakeWebSocket(), waitForRealtimeStartup()
+├── websocket.ts                # createFakeWebSocket() (flavor 'text' or 'ws'), waitForRealtimeStartup()
 ├── router.ts                   # override() pattern matcher (`[METHOD ]/path` with `:name`, `*`, `**`), matchesCall() for recorded calls
 ├── services.ts                 # service emulations: defineService(), C8yServiceDefinition/Seed, C8yServiceContext/Handler types, serviceStore() over TenantData.serviceState, key helpers
 ├── utils.ts                    # clone, base64, hex, multipart parser (no structuredClone/Buffer/FormData)
@@ -184,7 +186,7 @@ The gate before a commit: `pnpm lint:fix && pnpm typecheck && pnpm test:run && p
 
 ## Testing
 
-- `tests/contract/fake-platform.ts` (`fakePlatform({ fork? })`) routes the real `@c8y/client` and the global `fetch` to one world and resets it before every test; a test fails if it sent a request the world does not emulate. `tests/contract/contract-suite.ts` registers the scenarios; `fake.test.ts` runs them on a plain world, `fake-fork.test.ts` on a fork.
+- `tests/contract/fake-platform.ts` (`fakePlatform({ fork? })`) routes the real `@c8y/client` (`installFetchClient()`) and the global `fetch` (`interceptFetch()`) to one world and resets it before every test; a test fails if it sent a request the world does not emulate. `tests/contract/contract-suite.ts` registers the scenarios; `fake.test.ts` runs them on a plain world, `fake-fork.test.ts` on a fork.
 - `tests/unit/fork.test.ts` checks forks: isolation, tombstones, a random request sequence answered identically by a plain world and a fork (and equal snapshots and diffs afterwards), ids, reset, bulk operation clocks, concurrent forks.
 - A new or changed platform behavior needs a contract scenario (`tests/contract/scenarios/`), and, if it differs from the API docs, a row in `docs/platform-behavior.md` with the scenario's `verifies` id.
 - Every emulated endpoint must be exercised by a scenario (checked in `tests/contract/contract-suite.ts`).
@@ -204,7 +206,7 @@ When you update `README.md`, `AGENTS.md`, or a guide, call out the changes at th
 
 1. **Run the gate** after changes: `pnpm lint:fix && pnpm typecheck && pnpm test:run && pnpm build`. Prefer `pnpm lint:fix` over fixing lint issues by hand.
 2. **Update this file** when adding modules or APIs or changing architecture.
-3. **Keep exports in `src/index.ts`**: all public API is exported from the main entry point (the other entries are `fake-c8y/realtime` and `fake-c8y/defaults`, which re-export from their modules). Public types a wrapper narrows (`C8yUser`, `C8yWorldState`, the role-taking seed inputs) take type parameters whose defaults keep the wide types; narrowed values must stay assignable to the wide ones.
+3. **Keep exports in `src/index.ts`**: all public API is exported from the main entry point (the other entries are `fake-c8y/realtime` and `fake-c8y/defaults`, which re-export from their modules, and `fake-c8y/c8y-client` with `installFetchClient()`; `@c8y/client` stays a dev dependency, so entries take its classes as arguments instead of importing them). Public types a wrapper narrows (`C8yUser`, `C8yWorldState`, the role-taking seed inputs) take type parameters whose defaults keep the wide types; narrowed values must stay assignable to the wide ones.
 4. **Add tests** for new functionality in `tests/`.
 5. **Record learnings**: when the user corrects a recurring mistake or explains how something should be done, add it to "Project Context & Learnings" below.
 6. **Git workflow**: use available MCP or devtools first, else the `gh` CLI. Branch names use conventional prefixes (`feat/`, `fix/`, `chore/`, `docs/`, `refactor/`, `test/`, `build/`, `types/`, `style/`, `perf/`, `examples/`, `ci/`); commit subjects and PR titles use conventional-commit style.

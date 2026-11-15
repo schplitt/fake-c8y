@@ -23,7 +23,7 @@ const alarm = await response.json()
 
 `device()`, `managedObject()`, and `binary()` return the id of what they create, since other data points to it. `seed()` creates everything else and returns the ids per list, in input order ([seeding](https://github.com/schplitt/fake-c8y/blob/main/docs/world.md#seeding)).
 
-`world.fetch()` takes a `Request` to the platform and returns a `Response`. Pass it as the `fetch` of your HTTP client to route the client's requests to the world.
+`world.fetch()` takes a `Request` to the platform and returns a `Response`. Pass it as the `fetch` of your HTTP client to route the client's requests to the world. For the real `@c8y/client`, `installFetchClient(FetchClient, world)` from `fake-c8y/c8y-client` does it; `interceptFetch(world)` routes the global `fetch` ([routing clients](https://github.com/schplitt/fake-c8y/blob/main/docs/world.md#routing-clients-to-the-world)).
 
 ## Entries
 

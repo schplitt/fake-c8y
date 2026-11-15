@@ -35,6 +35,10 @@
       "types": "./dist/defaults.d.mts",
       "import": "./dist/defaults.mjs"
     },
+    "./c8y-client": {
+      "types": "./dist/c8y-client.d.mts",
+      "import": "./dist/c8y-client.mjs"
+    },
     "./package.json": "./package.json"
   },
   "main": "./dist/index.mjs",

@@ -31,7 +31,7 @@ The `kind` of an unhandled request:
 
 The `unsupported` option of `createWorld()` and `fork()` sets the answer:
 
-- `'developer'` (default): a 501 that names the request and the reason, with a hint to answer it with `world.override()`.
+- `'developer'` (default): a 501 that names the request and the reason, with a hint to answer it with `world.override()`. A wrapper that exposes overrides under its own name sets `overrideHint`: `createWorld({ overrideHint: (request) => \`c8y.override('${request.method} ${request.path}', ...)\` })` changes only the hint.
 - `'platform'`: a neutral 501 without hints, for clients that must not notice the fake, such as an agent under evaluation.
 - a function `(request, world) => Response`: your own answer.
 
