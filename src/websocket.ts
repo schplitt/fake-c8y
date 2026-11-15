@@ -33,26 +33,52 @@ export interface FakeWebSocketClass {
 
 export interface FakeWebSocketOptions {
   /**
-   * Turns a frame's text into the `message` event's data, e.g.
-   * `(text) => Buffer.from(text)` to look like the `ws` package.
-   * @default the text itself
+   * Which WebSocket the events look like.
+   *
+   * - `'text'`: `message` carries the frame's text, `close` the code and the
+   *   reason as text.
+   * - `'ws'`: like the `ws` package: `message` carries the frame as a `Buffer`
+   *   and `isBinary` (`false`) as second argument, `close` the code and the
+   *   reason as a `Buffer`. Where the runtime has no `Buffer`, a `Uint8Array`
+   *   of the UTF-8 bytes takes its place.
+   * @default 'text'
+   */
+  flavor?: 'text' | 'ws'
+  /**
+   * Turns a frame's text into the `message` event's data. It wins over the
+   * `flavor`'s encoding (the `ws` flavor still passes `isBinary`).
+   * @default by `flavor`
    */
   encodeMessage?: (text: string) => unknown
+}
+
+/**
+ * The text as the `ws` package hands it out: a `Buffer` where the runtime has
+ * one, else its UTF-8 bytes.
+ * @param text - The text
+ */
+function wsData(text: string): unknown {
+  // feature-detected: isolates and browsers have no Buffer
+  const buffer = Reflect.get(globalThis, 'Buffer') as { from: (text: string) => unknown } | undefined
+  return buffer ? buffer.from(text) : new TextEncoder().encode(text)
 }
 
 /**
  * Creates a WebSocket class whose sockets connect to a world's Notification 2.0
  * (`world.realtime`) with a token minted by `POST /notification2/token`.
  * @param realtime - Notification 2.0 state of the world
- * @param options - Message encoding
+ * @param options - Event flavor and message encoding
  * @example
  * ```ts
  * const world = createWorld()
- * const WebSocket = createFakeWebSocket(world.realtime)
+ * const WebSocket = createFakeWebSocket(world.realtime, { flavor: 'ws' })
  * ```
  */
 export function createFakeWebSocket(realtime: Realtime, options: FakeWebSocketOptions = {}): FakeWebSocketClass {
-  const encode = options.encodeMessage ?? ((text: string) => text)
+  const ws = options.flavor === 'ws'
+  const encode = options.encodeMessage ?? (ws ? wsData : (text: string) => text)
+  // the `ws` package's `message` listener gets `(data, isBinary)`
+  const messageArgs = (text: string): unknown[] => ws ? [encode(text), false] : [encode(text)]
 
   class Socket implements FakeWebSocket {
     static readonly CONNECTING = SOCKET_STATE.CONNECTING
@@ -91,13 +117,17 @@ export function createFakeWebSocket(realtime: Realtime, options: FakeWebSocketOp
     }
 
     emit(event: string, ...args: unknown[]): void {
+      if (ws && event === 'close' && typeof args[1] === 'string') {
+        // the `ws` package hands out the close reason as a Buffer
+        args[1] = wsData(args[1])
+      }
       for (const listener of [...(this.listeners.get(event) ?? [])]) {
         listener(...args)
       }
     }
 
     receive(text: string): void {
-      this.emit('message', encode(text))
+      this.emit('message', ...messageArgs(text))
     }
 
     /**

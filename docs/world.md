@@ -19,24 +19,25 @@ const world = createWorld({
 })
 ```
 
-| Option             | Default                                | Meaning                                                                                                                             |
-| ------------------ | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `tenant`           | `'t12345'`                             | Tenant the microservice is deployed in. Requests without a tenant in their Basic auth go here.                                      |
-| `user`             | `{ userName: 'test-user', roles: [] }` | User that `GET /user/currentUser` answers with. `null` answers 401. The world also stores it as a user of its tenant.               |
-| `subscriptions`    | `service_<tenant>`, `service-password` | Tenants subscribed to the microservice, with their service users.                                                                   |
-| `tenantOptions`    | none                                   | Tenant options in the microservice's own settings category.                                                                         |
-| `baseUrl`          | `'https://t12345.cumulocity.test'`     | Base URL in `self` and `next` links.                                                                                                |
-| `bootstrapUser`    | `'servicebootstrap_test'`              | Bootstrap user, allowed to read `/application/currentApplication`.                                                                  |
-| `settingsCategory` | `'service'`                            | The microservice's own tenant option category. Its `credentials.*` options read decrypted.                                          |
-| `now`              | `Date.now`                             | Clock for timestamps, in epoch milliseconds.                                                                                        |
-| `clock`            | none                                   | A trial clock from `createClock()`. It wins over `now`. See [Trials](trials.md#the-clock).                                          |
-| `ids`              | `'scattered'`                          | Id format, see [Ids](#ids).                                                                                                         |
-| `schedule`         | `setTimeout(callback, 0)`              | Runs a callback later (Notification 2.0 delivery).                                                                                  |
-| `unsupported`      | `'developer'`                          | How to answer a request the world does not emulate. See [The coverage gate](coverage.md).                                           |
-| `onUnsupported`    | none                                   | Called with every request the world does not emulate, and the world.                                                                |
-| `onChange`         | none                                   | Called with the world when the deployed tenant or the current user changed.                                                         |
-| `roles`            | `'enforce'`                            | Checks requests against the caller's rights, like the platform. `'off'` gives every caller full access. See [Roles](#roles).        |
-| `freezeDocuments`  | `false`                                | Deep-freezes every stored document, so code that changes one in place throws. For tests of fake-c8y itself; it makes writes slower. |
+| Option             | Default                                  | Meaning                                                                                                                                     |
+| ------------------ | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tenant`           | `'t12345'`                               | Tenant the microservice is deployed in. Requests without a tenant in their Basic auth go here.                                              |
+| `user`             | `{ userName: 'test-user', roles: [] }`   | User that `GET /user/currentUser` answers with. `null` answers 401. The world also stores it as a user of its tenant.                       |
+| `subscriptions`    | `service_<tenant>`, `service-password`   | Tenants subscribed to the microservice, with their service users.                                                                           |
+| `tenantOptions`    | none                                     | Tenant options in the microservice's own settings category.                                                                                 |
+| `baseUrl`          | `'https://t12345.cumulocity.test'`       | Base URL in `self` and `next` links.                                                                                                        |
+| `bootstrapUser`    | `'servicebootstrap_test'`                | Bootstrap user, allowed to read `/application/currentApplication`.                                                                          |
+| `settingsCategory` | `'service'`                              | The microservice's own tenant option category. Its `credentials.*` options read decrypted.                                                  |
+| `now`              | `Date.now`                               | Clock for timestamps, in epoch milliseconds.                                                                                                |
+| `clock`            | none                                     | A trial clock from `createClock()`. It wins over `now`. See [Trials](trials.md#the-clock).                                                  |
+| `ids`              | `'scattered'`                            | Id format, see [Ids](#ids).                                                                                                                 |
+| `schedule`         | `setTimeout(callback, 0)`                | Runs a callback later (Notification 2.0 delivery).                                                                                          |
+| `unsupported`      | `'developer'`                            | How to answer a request the world does not emulate. See [The coverage gate](coverage.md).                                                   |
+| `overrideHint`     | `world.override('<METHOD> <path>', ...)` | What the developer 501 tells the reader to answer the request with, as a function of the request. For wrappers with their own override API. |
+| `onUnsupported`    | none                                     | Called with every request the world does not emulate, and the world.                                                                        |
+| `onChange`         | none                                     | Called with the world when the deployed tenant or the current user changed.                                                                 |
+| `roles`            | `'enforce'`                              | Checks requests against the caller's rights, like the platform. `'off'` gives every caller full access. See [Roles](#roles).                |
+| `freezeDocuments`  | `false`                                  | Deep-freezes every stored document, so code that changes one in place throws. For tests of fake-c8y itself; it makes writes slower.         |
 
 `DEFAULTS` (exported) holds the default values, plus passwords for credentials a harness builds: `subscriptionPassword` (`'service-password'`, the default subscription's service user), `bootstrapPassword` (`'bootstrap-password'`), and `userPassword` (`'test-password'`). The fake checks no passwords; these only spare wrappers their own copies. The light entry `fake-c8y/defaults` exports `DEFAULTS` and nothing else, so a Vite or Vitest config (or any code that must not load the engine) can import it:
 
@@ -119,6 +120,29 @@ world.seed({
 Like the platform, a write (POST or PUT) answers with its object only if the request accepts JSON (`Accept: application/json` or a Cumulocity vendor type). Without an Accept header, or with `*/*`, the status is the same and the body is empty. Send `Accept: application/json` when you read the result of a write.
 
 Basic auth selects the tenant and the user (`<tenant>/<user>:<password>`). A request without Basic auth works in the deployed tenant as the world's `user`. `basicAuth({ tenant, user, password? })` (input type `C8yCredentials`) returns the `authorization` header value in any runtime (UTF-8, no `btoa` or `Buffer`); the password defaults to `DEFAULTS.userPassword`, and a subscription (`world.subscriptions[0]`) passes as it is. The tenant ends at the first `/`, so a user name may contain one.
+
+### Routing clients to the world
+
+`world.fetch()` is a `fetch`, so a client that takes one needs nothing else. For code you do not control, two helpers route requests to a world. Both take the world or a function that returns it per request (for example the current fork of a trial), and return a function that undoes the change.
+
+The real `@c8y/client` sends every request through `FetchClient.prototype.fetch`. `installFetchClient()` from the `fake-c8y/c8y-client` entry patches it, keeping the client's own URL, query, and auth handling. Uploads made with the Node `form-data` package (`inventoryBinary.create()`, event attachments) are sent as their multipart bytes. `@c8y/client` is not a dependency of fake-c8y: pass its `FetchClient` class.
+
+```ts
+import { FetchClient } from '@c8y/client'
+import { installFetchClient } from 'fake-c8y/c8y-client'
+
+const uninstall = installFetchClient(FetchClient, () => world)
+```
+
+`interceptFetch()` replaces `globalThis.fetch`: requests to the world's origin (the origin of `world.baseUrl`, or `origin`) go to the world, everything else to the `fetch` that was there before. Relative URLs pass through too. With `origin`, the world (or its getter) is read only for requests to that origin, so a lazy getter is not called for unrelated requests. It uses no Node APIs.
+
+Both helpers stack: the newest install answers (for `interceptFetch()`, the newest one whose origin matches), and they can be undone in any order. Once all are undone, the original `fetch` is back, unless other code replaced it meanwhile, which is left alone.
+
+```ts
+import { interceptFetch } from 'fake-c8y'
+
+const restore = interceptFetch(() => world, { origin: 'https://t100.cumulocity.test' })
+```
 
 ## Roles
 
@@ -314,13 +338,12 @@ Assigning new arrays to `calls` and `unhandled` still works, but it is only a pa
 
 ## Notification 2.0
 
-Subscriptions and tokens work through the REST API. Consumers connect with a fake WebSocket from the `fake-c8y/realtime` entry. Pass it where your client expects a `ws`-style WebSocket. `encodeMessage` turns a frame into the `message` event's data (default: the text).
+Subscriptions and tokens work through the REST API. Consumers connect with a fake WebSocket from the `fake-c8y/realtime` entry. Pass it where your client expects a `ws`-style WebSocket. By default the `message` event carries the frame's text. `flavor: 'ws'` makes the events look like the `ws` package's: `message` gets a `Buffer` and `isBinary` (`false`), `close` the reason as a `Buffer` (a `Uint8Array` of the UTF-8 bytes where the runtime has no `Buffer`). `encodeMessage` turns a frame into the `message` data yourself and wins over the flavor.
 
 ```ts
-import { Buffer } from 'node:buffer'
 import { createFakeWebSocket } from 'fake-c8y/realtime'
 
-const WebSocket = createFakeWebSocket(world.realtime, { encodeMessage: (text) => Buffer.from(text) })
+const WebSocket = createFakeWebSocket(world.realtime, { flavor: 'ws' })
 ```
 
 Sockets belong to one world, so use `createFakeWebSocket(fork.realtime)` for a fork. Subscriptions and tokens are tenant data: a fork inherits the base's, `reset()` drops the ones created since (`reset({ to, consumers: 'keep' })` keeps open consumers, see [Checkpoints](trials.md#checkpoints)), `restore()` brings back the snapshot's, and `diff()` lists subscriptions under `notificationSubscriptions`.

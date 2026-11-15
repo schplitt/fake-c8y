@@ -1,14 +1,15 @@
 /**
- * Routes the real `@c8y/client` (every request goes through
- * `FetchClient.prototype.fetch`) and the global `fetch` to the platform's URL
- * to one world, the same way a test framework adapter does. Resets the world
- * before every test and fails a test that sent a request the world does not
- * emulate.
+ * Routes the real `@c8y/client` (`installFetchClient()`: every request goes
+ * through `FetchClient.prototype.fetch`) and requests of the global `fetch`
+ * to the platform's URL (`interceptFetch()`) to one world, the way a test
+ * framework adapter does. Never uninstalls: Vitest isolates each test file,
+ * so the patches end with the file. Resets the world before every test and
+ * fails a test that sent a request the world does not emulate.
  */
-import { Buffer } from 'node:buffer'
 import { FetchClient } from '@c8y/client'
 import { afterEach, beforeEach } from 'vitest'
-import { createWorld } from '../../src'
+import { createWorld, interceptFetch } from '../../src'
+import { installFetchClient } from '../../src/c8y-client'
 import type { World } from '../../src'
 import { createFakeWebSocket } from '../../src/realtime-entry'
 import type { FakeWebSocketClass } from '../../src/realtime-entry'
@@ -31,12 +32,6 @@ export interface FakePlatform {
   base?: World
 }
 
-interface FetchClientInternals {
-  getUrl: (url: string, init?: object) => string
-  getFetchOptions: (init?: object) => ConstructorParameters<typeof Request>[1]
-  adjustOptionsForFormData: (options: ConstructorParameters<typeof Request>[1]) => ConstructorParameters<typeof Request>[1]
-}
-
 /**
  * Creates the world and routes the client and `fetch` to it.
  * @param options - Options
@@ -53,25 +48,8 @@ export function fakePlatform(options: { fork?: boolean } = {}): FakePlatform {
   }
   const world = options.fork ? plain.fork() : plain
 
-  FetchClient.prototype.fetch = async function (this: FetchClientInternals, url: string, init?: object) {
-    const options = this.adjustOptionsForFormData(this.getFetchOptions(init)) as Record<string, any>
-    const fullUrl = new URL(this.getUrl(url, init), world.baseUrl)
-    // @c8y/client uploads with the Node `form-data` package (a stream, not a
-    // WHATWG FormData): send its serialized bytes with its multipart boundary
-    const body = options.body
-    if (body && typeof body.getBuffer === 'function' && typeof body.getBoundary === 'function') {
-      const headers = new Headers(options.headers)
-      headers.set('content-type', `multipart/form-data; boundary=${body.getBoundary()}`)
-      return world.fetch(new Request(fullUrl, { ...options, headers, body: body.getBuffer() }))
-    }
-    return world.fetch(new Request(fullUrl, options))
-  } as unknown as FetchClient['fetch']
-
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-    const request = new Request(input, init)
-    return new URL(request.url).origin === new URL(world.baseUrl).origin ? world.fetch(request) : originalFetch(input, init)
-  }) as typeof fetch
+  installFetchClient(FetchClient, world)
+  interceptFetch(world)
 
   beforeEach(() => {
     world.reset()
@@ -87,7 +65,7 @@ export function fakePlatform(options: { fork?: boolean } = {}): FakePlatform {
 
   return {
     world,
-    FakeWebSocket: createFakeWebSocket(world.realtime, { encodeMessage: (text) => Buffer.from(text) }),
+    FakeWebSocket: createFakeWebSocket(world.realtime, { flavor: 'ws' }),
     advanceClock: (ms) => {
       clockOffset += ms
     },
