@@ -880,6 +880,11 @@ interface ForkBase {
   handlers: RegisteredHandler[]
   services: ReadonlyMap<string, RegisteredService>
   /**
+   * `<tenant>/<user>` of every service user the deployed microservice
+   * (`manifest`) had: one that is gone answers 401, whatever its name.
+   */
+  deployedUsers: ReadonlySet<string>
+  /**
    * Whether the fork's clock is its own copy of the base's (`reset()` sets
    * it back to the time the fork started at).
    */
@@ -940,6 +945,10 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
   const services = new Map<string, RegisteredService>(base?.services)
   // the removers of this world's own registrations
   const removers = new WeakMap<RegisteredService, () => void>()
+  // every service user the deployed microservice had (`<tenant>/<user>`), so
+  // a removed one answers 401 like on the platform, whatever its name; it
+  // only grows (a name that is subscribed again is found as a service user)
+  const deployedUsers = new Set<string>(base?.deployedUsers)
   let calls: C8yRequest[] = []
   // what the calls added to the usage statistics (cleared with the calls)
   let usage = new UsageLog()
@@ -1266,8 +1275,18 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         }
       }
     }
-    for (const subscription of subscriptions) {
-      subscribe(tenantData(subscription.tenant), application, subscription.user, true, subscription.password)
+    for (const { tenant: name, user: serviceUser, password } of subscriptions) {
+      deployedUsers.add(`${name}/${serviceUser}`)
+      const subscriber = tenantData(name)
+      const existing = subscriber.applicationSubscriptions.get(application.id)
+      if (!existing || existing.owner !== application.owner) {
+        // a new subscription: service user, roles, settings defaults
+        subscribe(subscriber, application, serviceUser, false, password)
+      } else if (existing.serviceUser !== serviceUser || existing.password !== password) {
+        // an existing one only changes its user: settings defaults deleted
+        // through the API stay deleted
+        subscriber.applicationSubscriptions.set(application.id, { ...existing, serviceUser, password })
+      }
     }
   }
 
@@ -1412,9 +1431,12 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
    * @param call - The recorded request
    */
   function formerApplicationUser(call: C8yRequest): boolean {
-    const deployedUser = call.user === bootstrapUser || subscriptions.some((subscription) => subscription.user === call.user)
-    // with a manifest the deployed microservice's users are application users too
-    return (deployed ? /^service(?:bootstrap)?_/.test(call.user ?? '') || deployedUser : /^service(?:bootstrap)?_/.test(call.user ?? '') && !deployedUser)
+    // with a manifest the deployed microservice's users are application users
+    // too: a former one is known by what was subscribed, not by its name
+    const former = deployed
+      ? /^service(?:bootstrap)?_/.test(call.user ?? '') || call.user === bootstrapUser || deployedUsers.has(`${call.tenant}/${call.user}`)
+      : /^service(?:bootstrap)?_/.test(call.user ?? '') && call.user !== bootstrapUser && !subscriptions.some((subscription) => subscription.user === call.user)
+    return former
       // a user of the tenant may have such a name too
       && !tenantData(call.tenant).users.has(call.user!)
   }
@@ -2449,6 +2471,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         subscriptions: subscriptions.map((subscription) => ({ ...subscription })),
         handlers: [...handlers],
         services: new Map(services),
+        deployedUsers: new Set(deployedUsers),
         ownClock: false,
       })
       return checkpoint
@@ -2612,6 +2635,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         subscriptions: subscriptions.map((subscription) => ({ ...subscription })),
         handlers: [...handlers],
         services: new Map(services),
+        deployedUsers: new Set(deployedUsers),
         ownClock: !forkOptions.clock && !forkOptions.now && options.clock !== undefined,
       })
     },

@@ -491,6 +491,7 @@ function diffCollection(before: StoredDocument[], after: StoredDocument[], recre
 const binaryDocuments = (list: Array<[string, BinarySnapshot]>) => list.map(([id, content]) => ({ id, ...content }))
 const serviceStateDocuments = (list: Array<[string, C8yJson]> = []) => list.map(([id, value]) => ({ id, ...splitServiceStateKey(id), value }))
 const usageDocuments = (list: StoredUsageDay[] = []) => list.map((day) => ({ id: day.day, ...day }))
+const publicApplications = (list: StoredDocument[] = []) => list.map((application) => (Object.keys(application).some((field) => field.startsWith('__')) ? Object.fromEntries(Object.entries(application).filter(([field]) => !field.startsWith('__'))) as StoredDocument : application))
 const certificateDocuments = (list: StoredTrustedCertificate[] = []) => list.map((certificate) => ({ id: certificate.fingerprint, ...certificate }))
 
 /**
@@ -592,7 +593,8 @@ export function diffWorld(before: Pick<WorldSnapshot, 'tenants' | 'options'>, af
       binaries: diffCollection(binaryDocuments(old.binaries), binaryDocuments(current.binaries), recreated('binaries')),
       eventBinaries: diffCollection(binaryDocuments(old.eventBinaries), binaryDocuments(current.eventBinaries), recreated('eventBinaries')),
       serviceState: diffCollection(serviceStateDocuments(old.serviceState), serviceStateDocuments(current.serviceState), recreated('serviceState')),
-      applications: documents('applications'),
+      // the world's hidden fields (`__bootstrapUser`) stay in snapshots, not in diffs
+      applications: diffCollection(publicApplications(old.applications), publicApplications(current.applications), recreated('applications')),
       applicationSubscriptions: documents('applicationSubscriptions'),
       usageStatistics: diffCollection(usageDocuments(old.usageStatistics), usageDocuments(current.usageStatistics), recreated('usageStatistics')),
       trustedCertificates: diffCollection(certificateDocuments(old.trustedCertificates), certificateDocuments(current.trustedCertificates), recreated('trustedCertificates')),

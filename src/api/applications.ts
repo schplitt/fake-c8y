@@ -245,7 +245,8 @@ function buildApplication(data: TenantData, body: Record<string, unknown>): Stor
     owner: data.tenant,
   }
   for (const [field, value] of Object.entries(fields)) {
-    if (!Object.hasOwn(application, field) && value !== undefined && value !== null) {
+    // hidden fields (`__*`) are the world's own, never the caller's
+    if (!Object.hasOwn(application, field) && value !== undefined && value !== null && !field.startsWith('__')) {
       application[field] = clone(value)
     }
   }
@@ -359,7 +360,8 @@ export function seedApplications(data: TenantData, inputs: readonly C8yApplicati
       owner,
     }
     for (const [field, value] of Object.entries(fields)) {
-      if (!(field in application) && value !== undefined) {
+      // hidden fields (`__*`) are the world's own, never the seed's
+      if (!(field in application) && value !== undefined && !field.startsWith('__')) {
         application[field] = clone(value)
       }
     }
@@ -715,7 +717,8 @@ export function updateApplication(data: TenantData, application: Readonly<Stored
   const { id: _id, owner: _owner, self: _self, type: _type, manifest: _manifest, ...fields } = body
   const next: StoredDocument = { ...application }
   for (const [field, value] of Object.entries(fields)) {
-    if (value !== undefined && value !== null) {
+    // hidden fields (`__*`) are the world's own, never the caller's
+    if (value !== undefined && value !== null && !field.startsWith('__')) {
       next[field] = clone(value)
     }
   }

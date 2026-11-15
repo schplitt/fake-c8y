@@ -8,12 +8,12 @@ import { describe, expect, it } from 'vitest'
 import { createWorld } from '../../src'
 import type { C8ySubscription, World, WorldOptions } from '../../src'
 
-async function send(world: World, method: string, path: string, login?: string) {
-  const headers: Record<string, string> = { accept: 'application/json' }
+async function send(world: World, method: string, path: string, login?: string, body?: unknown) {
+  const headers: Record<string, string> = { 'accept': 'application/json', 'content-type': 'application/json' }
   if (login) {
     headers.authorization = `Basic ${Buffer.from(`${login}:any`).toString('base64')}`
   }
-  const response = await world.fetch(new Request(`${world.baseUrl}${path}`, { method, headers }))
+  const response = await world.fetch(new Request(`${world.baseUrl}${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }))
   const text = await response.text()
   return { status: response.status, body: text ? JSON.parse(text) : undefined }
 }
@@ -108,7 +108,9 @@ describe('createWorld({ manifest })', () => {
     expect((await send(world, 'GET', `/application/applications/${application!.id}/bootstrapUser`)).body).toMatchObject({ tenant: 't100', name: 'servicebootstrap_custom' })
     expect((await send(world, 'GET', '/application/currentApplication/subscriptions', 't100/servicebootstrap_custom')).status).toBe(200)
     expect((await send(world, 'GET', '/application/currentApplication/subscriptions', 't100/servicebootstrap_pump-service')).status).toBe(401)
-    expect((await send(deployedWorld(), 'GET', `/application/applications/${application!.id}/bootstrapUser`)).body).toMatchObject({ name: 'servicebootstrap_pump-service' })
+    const plain = deployedWorld()
+    const [own] = deployedApplication(plain)
+    expect((await send(plain, 'GET', `/application/applications/${own!.id}/bootstrapUser`)).body).toMatchObject({ name: 'servicebootstrap_pump-service' })
   })
 
   it('answers /service/<contextPath>/** with 501 in subscribed tenants and 404 elsewhere, and keeps its context path from world.service()', async () => {
@@ -179,5 +181,143 @@ describe('createWorld({ manifest })', () => {
     expect(world.db.applications.find({ type: 'MICROSERVICE', owner: { tenant: { id: 't100' } } })).toEqual([])
     expect(await send(world, 'GET', '/application/currentApplication/subscriptions', 't100/servicebootstrap_test')).toMatchObject({ status: 200, body: { users: [{ name: 'service_t100' }, { name: 'service_t200' }] } })
     expect((await send(world, 'GET', '/event/events', 't100/service_t100')).status).toBe(200)
+  })
+
+  it('gives the bootstrap user ROLE_SYSTEM', async () => {
+    const world = deployedWorld()
+    const pump = world.device({ name: 'Pump' })
+    const me = (await send(world, 'GET', '/user/currentUser', 't100/servicebootstrap_pump-service')).body
+    expect(me.effectiveRoles.map((role: { id: string }) => role.id)).toEqual(['ROLE_SYSTEM'])
+    // ROLE_SYSTEM creates audit records (docs/roles.md)
+    const record = { type: 'Pump', activity: 'checked', text: 'ok', time: '2026-01-01T00:00:00Z', source: { id: pump } }
+    expect((await send(world, 'POST', '/audit/auditRecords', 't100/servicebootstrap_pump-service', record)).status).toBe(201)
+    world.seed({ users: [{ userName: 'plain' }] })
+    expect((await send(world, 'POST', '/audit/auditRecords', 't100/plain', record)).status).toBe(403)
+  })
+
+  it('answers 401 for a removed service user with any name, and for the bootstrap user of a deleted application', async () => {
+    const world = deployedWorld({ subscriptions: [t100, { tenant: 't200', user: 's2', password: 'x' }] })
+    expect((await send(world, 'GET', '/user/currentUser', 't200/s2')).status).toBe(200)
+    world.apply({ subscriptions: [] })
+    expect((await send(world, 'GET', '/user/currentUser', 't200/s2')).status).toBe(401)
+    expect((await send(world, 'GET', '/application/currentApplication/settings', 't200/s2')).status).toBe(401)
+    const [application] = deployedApplication(world)
+    expect((await send(world, 'DELETE', `/application/applications/${application!.id}`, 't100/admin')).status).toBe(204)
+    expect((await send(world, 'GET', '/application/currentApplication', 't100/servicebootstrap_pump-service')).status).toBe(401)
+  })
+
+  it('keeps settings defaults deleted through the API when the subscriptions change', async () => {
+    const world = deployedWorld()
+    expect((await send(world, 'DELETE', '/tenant/options/pumps/mode', 't100/admin')).status).toBe(204)
+    world.apply({ subscriptions: [{ ...t100, password: 'rotated' }, t200, t300] })
+    expect(world.options.get('mode')).toBeUndefined()
+    expect(world.options.get('mode', { tenant: 't300' })).toBe('auto')
+  })
+
+  it('reads credentials.* settings decrypted for its service users', async () => {
+    const world = createWorld({
+      tenant: 't100',
+      manifest: { ...manifest, requiredRoles: ['ROLE_OPTION_MANAGEMENT_READ'], settings: [{ key: 'credentials.token', defaultValue: 'abc' }] },
+      subscriptions: [t100],
+    })
+    expect((await send(world, 'GET', '/application/currentApplication/settings', 't100/service_t100')).body).toEqual({ 'credentials.token': 'abc' })
+    expect((await send(world, 'GET', '/tenant/options/pumps/credentials.token', 't100/service_t100')).body).toMatchObject({ value: 'abc' })
+    // without ROLE_OPTION_MANAGEMENT_READ in requiredRoles, the option API answers 403
+    expect((await send(deployedWorld(), 'GET', '/tenant/options/pumps/interval', 't100/service_t100')).status).toBe(403)
+  })
+
+  it('takes the context path and settings category from a manifest with only a name or only a context path', () => {
+    const named = createWorld({ manifest: { name: 'only-name', settings: [{ key: 'k', defaultValue: 'v' }] } })
+    expect(named.db.applications.find({ name: 'only-name' })).toEqual([expect.objectContaining({ contextPath: 'only-name' })])
+    expect(named.options.get('k', { category: 'only-name' })).toBe('v')
+    const pathOnly = createWorld({ manifest: { contextPath: 'only-path', settings: [{ key: 'k', defaultValue: 'v' }] } })
+    expect(pathOnly.db.applications.find({ name: 'only-path' })).toEqual([expect.objectContaining({ contextPath: 'only-path' })])
+    expect(pathOnly.options.get('k')).toBe('v')
+  })
+
+  it('puts tenantOptions, also from apply(), into the manifest\'s settings category', () => {
+    const world = deployedWorld({ tenantOptions: { a: '1' } })
+    world.apply({ tenantOptions: { b: '2' } })
+    expect(world.options.get('a', { category: 'pumps' })).toBe('1')
+    expect(world.options.get('b', { category: 'pumps' })).toBe('2')
+    expect(world.options.get('b', { category: 'service' })).toBeUndefined()
+  })
+
+  it('moves the application, its users, and its bootstrap user name with the deployed tenant', async () => {
+    const world = deployedWorld({ bootstrapUser: 'servicebootstrap_custom' })
+    const [old] = deployedApplication(world)
+    world.apply({ tenant: 't300', subscriptions: [t300] })
+    expect(world.db.tenant('t100').applications.find({ id: old!.id, name: 'pump-service' })).toEqual([])
+    expect((await send(world, 'GET', '/user/currentUser', 't100/service_t100')).status).toBe(401)
+    expect((await send(world, 'GET', '/application/currentApplication', 't100/servicebootstrap_custom')).status).toBe(401)
+    expect((await send(world, 'GET', '/application/currentApplication/subscriptions', 't300/servicebootstrap_custom')).body).toEqual({ users: [{ tenant: 't300', name: 'service_t300', password: 'pw-300' }] })
+  })
+
+  it('moves the application on a fork, and lets a fork unsubscribe a base tenant', () => {
+    const base = deployedWorld()
+    const moved = base.fork()
+    moved.apply({ tenant: 't200' })
+    const diff = moved.diff().tenants
+    expect(diff.t100?.applications.deleted).toEqual([expect.objectContaining({ name: 'pump-service' })])
+    expect(diff.t200?.applications.created).toEqual([expect.objectContaining({ name: 'pump-service', owner: 't200' })])
+    const fewer = base.fork()
+    fewer.apply({ subscriptions: [t100] })
+    expect(fewer.diff().tenants.t200?.applicationSubscriptions.deleted).toEqual([expect.objectContaining({ serviceUser: 'service_t200' })])
+    expect(base.db.tenant('t200').applications.find({ name: 'pump-service' })).toHaveLength(1)
+    expect(() => base.apply({ subscriptions: [t100] })).toThrow(/frozen/)
+  })
+
+  it('keeps a custom bootstrap user name through forks, snapshots, restore, and reset, but not in diffs', async () => {
+    const base = deployedWorld({ bootstrapUser: 'servicebootstrap_custom' })
+    const asBootstrap = async (world: World) => (await send(world, 'GET', '/application/currentApplication', `${world.tenant}/servicebootstrap_custom`)).status
+    const snapshot = base.snapshot()
+    expect(snapshot.tenants.find((tenant) => tenant.tenant === 't100')?.applications?.find((application) => application.name === 'pump-service')).toMatchObject({ __bootstrapUser: 'servicebootstrap_custom' })
+    base.apply({ subscriptions: [] })
+    base.restore(snapshot)
+    expect(await asBootstrap(base)).toBe(200)
+    base.reset()
+    expect(await asBootstrap(base)).toBe(200)
+    const fork = base.fork()
+    expect(await asBootstrap(fork)).toBe(200)
+    fork.apply({ tenant: 't200' })
+    expect(await asBootstrap(fork)).toBe(200)
+    const created = fork.diff().tenants.t200?.applications.created ?? []
+    expect(created).toEqual([expect.objectContaining({ name: 'pump-service' })])
+    expect(created[0]).not.toHaveProperty('__bootstrapUser')
+  })
+
+  it('lets world.service() register other context paths next to it', async () => {
+    const world = deployedWorld()
+    world.service('other', () => Response.json({ ok: true }))
+    expect((await send(world, 'GET', '/service/other/x')).body).toEqual({ ok: true })
+    expect((await send(world, 'GET', '/service/pumps/x')).status).toBe(501)
+  })
+})
+
+describe('hidden application fields', () => {
+  it('are never taken from the API or a seed', async () => {
+    const world = createWorld({ tenant: 't100' })
+    world.seed({ users: [{ userName: 'bob', roles: ['ROLE_APPLICATION_MANAGEMENT_READ'] }] })
+    const created = await send(world, 'POST', '/application/applications', undefined, { name: 'evil', key: 'evil-key', type: 'MICROSERVICE', __bootstrapUser: 'bob' })
+    expect(created.status).toBe(201)
+    const [id] = world.seed({ applications: [{ name: 'evil2', type: 'MICROSERVICE', __bootstrapUser: 'bob' }] }).applications
+    expect((await send(world, 'PUT', `/application/applications/${id}`, undefined, { __bootstrapUser: 'bob' })).status).toBe(200)
+    const stored = world.snapshot().tenants.find((tenant) => tenant.tenant === 't100')!.applications!.filter((application) => String(application.name).startsWith('evil'))
+    expect(stored).toHaveLength(2)
+    for (const application of stored) {
+      expect(application).not.toHaveProperty('__bootstrapUser')
+    }
+    expect((await send(world, 'GET', '/application/currentApplication', 't100/bob')).status).toBe(403)
+  })
+})
+
+describe('createWorld() without a manifest', () => {
+  it('keeps the legacy service users: a removed service_* user answers 401, other names stay unrestricted', async () => {
+    const world = createWorld({ tenant: 't100', subscriptions: [t100, t200] })
+    world.apply({ subscriptions: [t100] })
+    expect((await send(world, 'GET', '/user/currentUser', 't200/service_t200')).status).toBe(401)
+    expect((await send(world, 'GET', '/event/events', 't100/servicebootstrap_x')).status).toBe(200)
+    expect((await send(world, 'GET', '/event/events', 't100/service_t100')).status).toBe(200)
+    expect((await send(world, 'GET', '/application/currentApplication/settings', 't100/servicebootstrap_test')).status).toBe(200)
   })
 })
