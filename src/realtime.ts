@@ -21,6 +21,7 @@
  * The consumer WebSocket is in `./websocket` (the `fake-c8y/realtime` entry).
  */
 import type { StoredDocument } from './store'
+import { scheduleReal, SettleTimeoutError, waitForQuiet } from './timers'
 
 export type RealtimeApi = 'managedobjects' | 'measurements' | 'events' | 'alarms' | 'operations'
 
@@ -153,7 +154,8 @@ export interface CloseConsumersOptions {
 export interface RealtimeOptions {
   /**
    * Runs a callback later (frame delivery, socket events).
-   * @default (callback) => setTimeout(callback, 0)
+   * @default the real `setTimeout(callback, 0)`, captured when fake-c8y is
+   * loaded (fake timers installed later do not hold delivery back)
    */
   schedule?: (callback: () => void) => void
   /**
@@ -170,6 +172,77 @@ export interface RealtimeOptions {
    * @default none
    */
   tokens?: () => Iterable<[string, NotificationToken]>
+}
+
+/**
+ * What a world's Notification 2.0 still has on its way (`realtime.status()`).
+ */
+export interface RealtimeStatus {
+  /**
+   * Requests the world is answering right now (handlers may still publish).
+   */
+  inflight: number
+  /**
+   * Callbacks scheduled and not run yet: frame deliveries, socket connects,
+   * and socket events (`open`, `close`, `pong`).
+   */
+  scheduled: number
+  /**
+   * Sockets created whose connect has not run yet.
+   */
+  connecting: number
+  /**
+   * Frames delivered to a socket and not acknowledged yet.
+   */
+  unacknowledged: number
+  /**
+   * Frames held for a persistent subscription that has a token (its consumer
+   * is connecting, or reconnecting).
+   */
+  backlog: number
+  /**
+   * Frames held for a persistent subscription without any token: the
+   * platform keeps them until a consumer connects, which may never happen.
+   */
+  unclaimed: number
+}
+
+export interface RealtimeSettledOptions {
+  /**
+   * Milliseconds to wait before rejecting.
+   * @default 5000
+   */
+  timeout?: number
+  /**
+   * Milliseconds the world must stay settled without interruption before
+   * `settled()` resolves. Raise it when a consumer acknowledges a frame and
+   * only writes after a longer await of its own.
+   * @default 20
+   */
+  quietMs?: number
+  /**
+   * Frames held for persistent subscriptions without a token
+   * (`status().unclaimed`): `'wait'` waits until a consumer connects and
+   * acknowledges them, `'ignore'` does not wait for them (the result still
+   * reports them).
+   * @default 'wait'
+   */
+  unclaimed?: 'wait' | 'ignore'
+}
+
+/**
+ * Result of `realtime.settled()`.
+ */
+export interface RealtimeSettledResult {
+  /**
+   * Milliseconds waited.
+   */
+  waitedMs: number
+  /**
+   * The status when it settled. `unclaimed` can be above 0 only with
+   * `unclaimed: 'ignore'`.
+   */
+  status: RealtimeStatus
 }
 
 /**
@@ -195,7 +268,16 @@ export class Realtime {
    * frames scheduled for delivery
    */
   scheduled = 0
+  /**
+   * Runs a callback later (the `schedule` option), counted in
+   * `status().scheduled` until it ran.
+   */
   readonly schedule: (callback: () => void) => void
+  /**
+   * callbacks given to `schedule` since the last `dropPending()` that have
+   * not run yet
+   */
+  private tasks = 0
   private readonly inflight: () => number
   private readonly storedSubscriptions: () => Iterable<NotificationSubscription>
   private readonly storedTokens: () => Iterable<[string, NotificationToken]>
@@ -210,9 +292,23 @@ export class Realtime {
   private generation = 0
 
   constructor(options: RealtimeOptions = {}) {
-    this.schedule = options.schedule ?? ((callback) => {
-      setTimeout(callback, 0)
-    })
+    const schedule = options.schedule ?? scheduleReal
+    this.schedule = (callback) => {
+      this.tasks++
+      // dropPending() resets the count: a callback scheduled before no
+      // longer counts, also if the schedule never calls it
+      const generation = this.generation
+      let ran = false
+      schedule(() => {
+        if (!ran) {
+          ran = true
+          if (generation === this.generation) {
+            this.tasks--
+          }
+        }
+        callback()
+      })
+    }
     this.inflight = options.inflight ?? (() => 0)
     this.storedSubscriptions = options.subscriptions ?? (() => [])
     this.storedTokens = options.tokens ?? (() => [])
@@ -342,7 +438,72 @@ export class Realtime {
   }
 
   /**
-   * Notifications on their way to a consumer or not yet acknowledged.
+   * What is still on its way, split up. `pending()` is `inflight`, the
+   * scheduled frame deliveries, `unacknowledged`, and `backlog`; it leaves
+   * out `unclaimed` (frames of persistent subscriptions without a token),
+   * which may never be delivered.
+   */
+  status(): RealtimeStatus {
+    let unacknowledged = 0
+    for (const acks of this.unacked.values()) {
+      unacknowledged += acks.size
+    }
+    const claimed = new Set([...this.storedTokens()].map(([, token]) => this.key(token.tenant, token.subscription)))
+    let backlog = 0
+    let unclaimed = 0
+    for (const [key, frames] of this.backlog) {
+      if (claimed.has(key)) {
+        backlog += frames.length
+      } else {
+        unclaimed += frames.length
+      }
+    }
+    return { inflight: this.inflight(), scheduled: this.tasks, connecting: this.connecting.size, unacknowledged, backlog, unclaimed }
+  }
+
+  /**
+   * Waits until every delivered notification has been acknowledged,
+   * including notifications caused by the consumers' own writes: no request
+   * in flight, no callback scheduled, nothing unacknowledged, no backlog of a
+   * subscription with a token, and (unless `unclaimed: 'ignore'`) no frames
+   * held for a persistent subscription without a token, for `quietMs` on the
+   * real timers.
+   * @param options - `timeout` (default 5000 ms), `quietMs` (default 20 ms), `unclaimed` (default `'wait'`)
+   * @returns How long it waited and the status it settled with
+   * @throws {SettleTimeoutError} when it is not settled within the timeout
+   * @example
+   * ```ts
+   * world.seed({ measurements: [{ source: pump, type: 'c8y_Temperature', c8y_Temperature: { T: { value: 95, unit: 'C' } } }] })
+   * await world.realtime.settled()
+   * expect(world.db.alarms.find({ source: pump })).toHaveLength(1)
+   * ```
+   */
+  async settled(options: RealtimeSettledOptions = {}): Promise<RealtimeSettledResult> {
+    const timeout = options.timeout ?? 5000
+    const waitUnclaimed = options.unclaimed !== 'ignore'
+    const settled = () => {
+      const status = this.status()
+      return status.inflight === 0 && status.scheduled === 0 && status.unacknowledged === 0 && status.backlog === 0 && (!waitUnclaimed || status.unclaimed === 0)
+    }
+    const { quiet, waitedMs } = await waitForQuiet(settled, { timeout, quietMs: options.quietMs ?? 20 })
+    const status = this.status()
+    if (!quiet) {
+      const claimed = new Set([...this.storedTokens()].map(([, token]) => this.key(token.tenant, token.subscription)))
+      const unclaimed = [...this.backlog].filter(([key, frames]) => frames.length > 0 && !claimed.has(key)).map(([key]) => key.replace('\u0000', '/'))
+      const detail = waitUnclaimed && unclaimed.length > 0
+        ? `; no consumer has a token for ${unclaimed.join(', ')}: connect one, or pass unclaimed: 'ignore'`
+        : ''
+      throw new SettleTimeoutError('realtime.settled()', timeout, { ...status }, detail)
+    }
+    return { waitedMs, status }
+  }
+
+  /**
+   * Notifications on their way to a consumer or not yet acknowledged:
+   * requests in flight, scheduled frame deliveries, unacknowledged frames,
+   * and the backlog of subscriptions a consumer has a token for. Frames of
+   * persistent subscriptions without a token are not counted; `status()`
+   * has them as `unclaimed`.
    */
   pending(): number {
     let count = this.scheduled + this.inflight()
@@ -367,6 +528,7 @@ export class Realtime {
   dropPending(): void {
     this.generation++
     this.scheduled = 0
+    this.tasks = 0
     this.backlog.clear()
     for (const acks of this.unacked.values()) {
       acks.clear()
