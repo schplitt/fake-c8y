@@ -1,6 +1,6 @@
 /**
- * Real timers for waiting on a world (`realtime.settled()`, `world.idle()`,
- * `waitForRealtimeStartup()`) and for the default Notification 2.0 delivery.
+ * Real timers for waiting on a world (`realtime.settled()`, `world.idle()`)
+ * and for the default Notification 2.0 delivery.
  * They are captured when fake-c8y is loaded, so fake timers installed later
  * (Vitest's `vi.useFakeTimers()`, sinon) do not stop the fake platform.
  * In a runtime without `setTimeout` (an isolate) the import still works; only
@@ -135,24 +135,22 @@ export async function waitForQuiet(quiet: () => boolean, options: QuietWaitOptio
 }
 
 /**
- * A wait for a world (`realtime.settled()`, `world.idle()`, or
- * `waitForRealtimeStartup()` with `onTimeout: 'throw'`) timed out. `status`
+ * A wait for a world (`realtime.settled()` or `world.idle()`) timed out. `status`
  * has the counts of what was still open at the last check, the same ones the
  * message lists.
  */
 export class SettleTimeoutError extends Error {
   override readonly name = 'SettleTimeoutError'
   /**
-   * Counts of what was still open when the wait gave up: the fields of
-   * `realtime.status()` for `settled()`, `inflight` and `scheduled` for
-   * `idle()`, and `inflight`, `scheduled`, `connecting`, and
-   * `unconnectedTokens` (a count) for `waitForRealtimeStartup()`.
+   * Counts of what was still open when the wait gave up: `inflight`,
+   * `scheduled`, `connecting`, and `unacknowledged` for `settled()`,
+   * `inflight` and `scheduled` for `idle()`.
    */
   readonly status: Readonly<Record<string, number>>
 
-  constructor(what: string, timeout: number, status: Readonly<Record<string, number>>, detail = '') {
+  constructor(what: string, timeout: number, status: Readonly<Record<string, number>>) {
     const open = Object.entries(status).filter(([, count]) => count > 0).map(([field, count]) => `${field} ${count}`)
-    super(`fake-c8y: ${what} timed out after ${timeout} ms (${open.length > 0 ? open.join(', ') : 'nothing open at the last check'})${detail}`)
+    super(`fake-c8y: ${what} timed out after ${timeout} ms (${open.length > 0 ? open.join(', ') : 'nothing open at the last check'})`)
     this.status = status
   }
 }

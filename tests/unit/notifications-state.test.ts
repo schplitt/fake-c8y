@@ -329,7 +329,9 @@ describe('closeConsumers()', () => {
     await call(world, 'POST', '/inventory/managedObjects', { name: 'while away' })
     run()
     expect(a.received).toHaveLength(2)
-    expect(world.realtime.pending()).toBe(3)
+    // held for the next consumer: stored, not live work
+    expect(world.realtime.status().backlog).toBe(3)
+    expect(world.realtime.pending()).toBe(0)
     const again = await open(world, run, 'one', 'a')
     expect(again.received.map((frame) => JSON.parse(frame.split('\n\n')[1]!).name)).toEqual(['delivered', 'scheduled', 'while away'])
   })
