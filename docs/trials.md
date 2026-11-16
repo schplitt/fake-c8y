@@ -23,7 +23,7 @@ const results = await Promise.all(questions.map(async (question) => {
 - It starts with the base's tenant, user, subscriptions, overrides, services, and next id. It has its own ids, clock, call log, `unhandled` list, overrides, and Notification 2.0 state.
 - Forks of the same base do not see each other and hand out the same ids, so trials are deterministic.
 - A fork can be forked again.
-- To wait for a fork's background work before grading it, use `await trial.idle()` (no request in flight, nothing scheduled) or `await trial.realtime.settled()` (every delivered notification acknowledged). Both count only the fork's own work and run on real timers. See [Waiting for background work](world.md#waiting-for-background-work).
+- To wait for a fork's background work before grading it, use `await trial.idle()` (no request in flight, nothing scheduled) or `await trial.realtime.settled()` (also no socket connecting and every delivered notification acknowledged). Both count only the fork's own work and run on real timers. See [Waiting for background work](world.md#waiting-for-background-work).
 - `fork()` takes `now`, `clock`, `schedule`, `unsupported`, `onUnsupported`, and `onChange`. Each defaults to the base's. Callbacks get the fork as their world.
 
 The first `fork()` freezes the base (`frozen` is then `true`). Writes to it throw (requests, `device()`, `seed()`, `setUser()`, `reset()`, `checkpoint()`), and its time-based work stops. Reads still work. Load everything before you fork. `override()` and `service()` still work on a frozen base, for the forks created afterwards.
@@ -41,10 +41,8 @@ On a fork, `reset()` goes back to the state the fork started in: its own writes,
 `world.checkpoint()` remembers the current state, and `world.reset({ to: checkpoint })` goes back to it on the same world: data, ids, tenant options, the user, subscriptions, overrides, and the call log, like a fork's `reset()` but to a state taken later than the baseline. Use it when something keeps running against the world between tests, such as an app that subscribed to Notification 2.0 at startup:
 
 ```ts
-import { waitForRealtimeStartup } from 'fake-c8y/realtime'
-
 await startApp(world) // creates subscriptions and tokens, connects consumers
-await waitForRealtimeStartup(world.realtime, () => world.inflight, { onTimeout: 'throw' })
+await world.realtime.settled()
 const startup = world.checkpoint()
 
 beforeEach(() => {
@@ -52,7 +50,9 @@ beforeEach(() => {
 })
 ```
 
-- `consumers: 'keep'` keeps every open (or still connecting) socket whose subscription the checkpoint has, with its token, also a token minted after the checkpoint (clients mint a new one on every reconnect). Tokens of the same subscription and subscriber that have no socket and are older than a kept token are dropped (a reconnect replaced them), so `waitForRealtimeStartup()` does not wait for them; newer tokens that are not connected yet stay if the checkpoint has them. Subscriptions created after the checkpoint are deleted and their sockets closed. The default, `'close'`, closes every socket whose token or subscription the checkpoint does not have. Either way the closed sockets get code `4410` (`CONSUMER_REMOVED`). Sockets still connecting are not closed by the reset: with `'close'`, one whose token is gone fails when it connects (`1008`, like any unknown token). Undelivered notifications are dropped either way.
+`settled()` here covers the listeners the service connects while it starts, not ones it opens later (on a timer or a lazy route): poll `world.realtime.consumers()` for those first, see [When to poll first](world.md#when-to-poll-first).
+
+- `consumers: 'keep'` keeps every open (or still connecting) socket whose subscription the checkpoint has, with its token, also a token minted after the checkpoint (clients mint a new one on every reconnect). Tokens of the same subscription and subscriber that have no socket and are older than a kept token are dropped (a reconnect replaced them); newer tokens that are not connected yet stay if the checkpoint has them. Subscriptions created after the checkpoint are deleted and their sockets closed. The default, `'close'`, closes every socket whose token or subscription the checkpoint does not have. Either way the closed sockets get code `4410` (`CONSUMER_REMOVED`). Sockets still connecting are not closed by the reset: with `'close'`, one whose token is gone fails when it connects (`1008`, like any unknown token). Undelivered notifications are dropped either way.
 - With `to`, state fields (`tenant`, `user`, `subscriptions`, `tenantOptions`) apply on top without changing the baseline; a plain `reset()` still goes back to the baseline.
 - Services registered after the checkpoint stay registered and are installed again; the applications of services removed since are deleted.
 - The clock is not part of a checkpoint and stays where it is.

@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest'
 import { CONSUMER_REMOVED, createWorld } from '../../src'
 import type { C8yResetOptions, World } from '../../src'
-import { createFakeWebSocket, waitForRealtimeStartup } from '../../src/realtime-entry'
+import { createFakeWebSocket } from '../../src/realtime-entry'
 
 async function call(world: World, method: string, path: string, body?: unknown) {
   const response = await world.fetch(new Request(`${world.baseUrl}${path}`, {
@@ -276,7 +276,7 @@ describe('reset({ to, consumers })', () => {
     expect(open.received.some((frame) => frame.includes('after'))).toBe(true)
   })
 
-  it('drops the checkpoint\'s token that a reconnect replaced, so waiting for consumers does not hang', async () => {
+  it('drops the checkpoint\'s token that a reconnect replaced', async () => {
     const { world, run } = manualWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
     const first = await consumer(world, run, 'startup')
@@ -287,34 +287,9 @@ describe('reset({ to, consumers })', () => {
     const second = await consumer(world, run, 'startup')
     world.reset({ to: startup, consumers: 'keep' })
     expect([...world.realtime.tokens.keys()]).toEqual([second.token])
-    // every stored token has a connected socket, so waiting for consumers ends without the timeout
+    // every stored token has a connected socket
     const connected = new Set([...world.realtime.sockets].map((socket) => socket.token))
     expect([...world.realtime.tokens.values()].every((token) => connected.has(token))).toBe(true)
-  })
-
-  it('lets waiting for consumers end when a reset hit a client between two sockets', async () => {
-    // real scheduling, as in a host
-    const world = createWorld()
-    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
-    const WebSocket = createFakeWebSocket(world.realtime)
-    const connect = async () => {
-      const token = (await call(world, 'POST', '/notification2/token', { subscription: 'startup', subscriber: 's' })).body.token as string
-      const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
-      await new Promise<void>((resolve) => {
-        socket.on('open', () => resolve())
-      })
-      return socket
-    }
-    const first = await connect()
-    const startup = world.checkpoint()
-    // the socket dropped and the client is in its backoff when the reset comes
-    first.close()
-    world.reset({ to: startup, consumers: 'keep' })
-    await connect()
-    const started = Date.now()
-    // generous bounds for slow CI runners: ending at all before the timeout is the point
-    await waitForRealtimeStartup(world.realtime, () => world.inflight, 4000)
-    expect(Date.now() - started).toBeLessThan(3000)
   })
 
   it('gives consumers of one subscription different tokens, also after a reset', async () => {

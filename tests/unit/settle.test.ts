@@ -1,12 +1,12 @@
 /**
  * Waiting for a world's background work: `realtime.status()`,
- * `realtime.settled()`, `world.idle()`, and `waitForRealtimeStartup()`, all
- * on the real timers (also under `vi.useFakeTimers()`), also on forks.
+ * `realtime.settled()`, `realtime.consumers()`, and `world.idle()`, all on
+ * the real timers (also under `vi.useFakeTimers()`), also on forks.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createWorld, SettleTimeoutError } from '../../src'
 import type { World } from '../../src'
-import { createFakeWebSocket, waitForRealtimeStartup } from '../../src/realtime-entry'
+import { createFakeWebSocket } from '../../src/realtime-entry'
 import { scheduleWith, timerSource, waitForQuiet } from '../../src/timers'
 
 async function call(world: World, method: string, path: string, body?: unknown) {
@@ -26,9 +26,10 @@ async function call(world: World, method: string, path: string, body?: unknown) 
  * @param subscription
  * @param onFrame
  * @param ack
+ * @param subscriber
  */
-async function consume(world: World, subscription: string, onFrame: (text: string) => Promise<void> | void = () => {}, ack = true) {
-  const token = (await call(world, 'POST', '/notification2/token', { subscription, subscriber: 's' })).body.token as string
+async function consume(world: World, subscription: string, onFrame: (text: string) => Promise<void> | void = () => {}, ack = true, subscriber = 's') {
+  const token = (await call(world, 'POST', '/notification2/token', { subscription, subscriber })).body.token as string
   const WebSocket = createFakeWebSocket(world.realtime)
   const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
   const received: string[] = []
@@ -42,7 +43,7 @@ async function consume(world: World, subscription: string, onFrame: (text: strin
   await new Promise<void>((resolve) => {
     socket.on('open', () => resolve())
   })
-  return { socket, received }
+  return { socket, received, token }
 }
 
 afterEach(() => {
@@ -50,16 +51,30 @@ afterEach(() => {
 })
 
 describe('realtime.status()', () => {
-  it('counts the backlog of a subscription without a token as unclaimed, not in pending()', async () => {
+  it('reports stored frames as backlog or unclaimed, and pending() leaves both out', async () => {
     const world = createWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'nobody' })
     await call(world, 'POST', '/inventory/managedObjects', { name: 'held' })
     expect(world.realtime.status()).toMatchObject({ backlog: 0, unclaimed: 1, unacknowledged: 0 })
     expect(world.realtime.pending()).toBe(0)
-    // a token claims it: now it is backlog, on its way to the consumer
+    // a token claims it: now it is backlog, still not counted
     await call(world, 'POST', '/notification2/token', { subscription: 'nobody', subscriber: 's' })
     expect(world.realtime.status()).toMatchObject({ backlog: 1, unclaimed: 0 })
-    expect(world.realtime.pending()).toBe(1)
+    expect(world.realtime.pending()).toBe(0)
+  })
+
+  it('counts a connecting socket in pending()', async () => {
+    const queue: Array<() => void> = []
+    const world = createWorld({ schedule: (callback) => queue.push(callback) })
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const token = (await call(world, 'POST', '/notification2/token', { subscription: 'sub', subscriber: 's' })).body.token as string
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
+    // the connect callback (scheduled 1) and the socket (connecting 1)
+    expect(world.realtime.pending()).toBe(2)
+    queue.shift()!()
+    expect(world.realtime.pending()).toBe(world.realtime.status().scheduled)
+    expect(socket.readyState).toBe(WebSocket.OPEN)
   })
 
   it('counts every scheduled callback, also socket connects and events', async () => {
@@ -131,28 +146,59 @@ describe('realtime.settled()', () => {
     expect((error as SettleTimeoutError).status).toMatchObject({ unacknowledged: 1 })
   })
 
-  it('waits for unclaimed frames by default and reports them with unclaimed: ignore', async () => {
+  it('does not wait for a token whose consumer is gone (issue #31)', async () => {
+    const world = createWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'stopped' })
+    // the token of a service that stopped: no socket will ever connect with it
+    await call(world, 'POST', '/notification2/token', { subscription: 'stopped', subscriber: 's' })
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'for nobody' })
+    const { status, waitedMs } = await world.realtime.settled({ timeout: 1000 })
+    expect(waitedMs).toBeLessThan(500)
+    expect(status).toMatchObject({ backlog: 1, unclaimed: 0 })
+    expect(world.realtime.status().backlog).toBe(1)
+    expect(world.realtime.pending()).toBe(0)
+  })
+
+  it('does not wait for unclaimed frames', async () => {
     const world = createWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'nobody' })
     await call(world, 'POST', '/inventory/managedObjects', { name: 'held' })
-    await expect(world.realtime.settled({ timeout: 50 })).rejects.toThrow(
-      new RegExp(`^fake-c8y: realtime\\.settled\\(\\) timed out after 50 ms \\(unclaimed 1\\); no consumer has a token for ${world.tenant}/nobody: connect one, or pass unclaimed: 'ignore'$`),
-    )
-    const ignored = await world.realtime.settled({ timeout: 200, unclaimed: 'ignore' })
-    expect(ignored.status).toMatchObject({ unclaimed: 1, backlog: 0 })
+    const { status } = await world.realtime.settled({ timeout: 1000 })
+    expect(status).toMatchObject({ unclaimed: 1, backlog: 0 })
   })
 
-  it('waits for a consumer that mints its token after the write', async () => {
+  it('stays busy until an open consumer acknowledges', async () => {
+    const world = createWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const { received } = await consume(world, 'sub', () => gate)
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'held by the handler' })
+    await expect(world.realtime.settled({ timeout: 50 })).rejects.toThrow('fake-c8y: realtime.settled() timed out after 50 ms (unacknowledged 1)')
+    const settled = world.realtime.settled({ timeout: 2000 })
+    release()
+    const { status } = await settled
+    expect(received).toHaveLength(1)
+    expect(status).toEqual({ inflight: 0, scheduled: 0, connecting: 0, unacknowledged: 0, backlog: 0, unclaimed: 0 })
+  })
+
+  it('delivers the backlog to a consumer that connects later, polled with consumers()', async () => {
     const world = createWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'late' })
-    await call(world, 'POST', '/inventory/managedObjects', { name: 'before the token' })
-    const waiting = world.realtime.settled({ timeout: 2000 })
-    // the client mints its token only after a backoff, longer than the quiet window
-    await new Promise((resolve) => {
-      setTimeout(resolve, 60)
-    })
-    const { received } = await consume(world, 'late')
-    const { status } = await waiting
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'before the consumer' })
+    await world.realtime.settled({ timeout: 1000 })
+    expect(world.realtime.status().unclaimed).toBe(1)
+    // the client connects only after a backoff, longer than the quiet window
+    let received: string[] = []
+    setTimeout(() => {
+      consume(world, 'late').then((consumer) => {
+        received = consumer.received
+      })
+    }, 60)
+    await expect.poll(() => world.realtime.consumers({ subscription: 'late' }).length).toBe(1)
+    const { status } = await world.realtime.settled({ timeout: 2000 })
     expect(received).toHaveLength(1)
     expect(status).toEqual({ inflight: 0, scheduled: 0, connecting: 0, unacknowledged: 0, backlog: 0, unclaimed: 0 })
   })
@@ -185,6 +231,99 @@ describe('realtime.settled()', () => {
     await fork.realtime.settled()
     expect(received).toHaveLength(1)
     expect(base.realtime.status()).toMatchObject({ unclaimed: 0, backlog: 0 })
+  })
+
+  it('waits for a consumer that reconnects after reset({ consumers: \'keep\' }), then for its ack', async () => {
+    const world = createWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
+    const first = await consume(world, 'startup')
+    const startup = world.checkpoint()
+    // the socket dropped and the client is in its backoff when the reset comes
+    first.socket.close()
+    world.reset({ to: startup, consumers: 'keep' })
+    const token = (await call(world, 'POST', '/notification2/token', { subscription: 'startup', subscriber: 's' })).body.token as string
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
+    const received: string[] = []
+    socket.on('message', (text: string) => {
+      received.push(text)
+      socket.send(text.split('\n')[0])
+    })
+    expect(world.realtime.status().connecting).toBe(1)
+    await world.realtime.settled({ timeout: 2000 })
+    expect(world.realtime.consumers({ subscription: 'startup' })).toEqual([{ tenant: world.tenant, subscription: 'startup', subscriber: 's', token }])
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'after the reconnect' })
+    const { status } = await world.realtime.settled({ timeout: 2000 })
+    expect(received).toHaveLength(1)
+    expect(status).toMatchObject({ connecting: 0, unacknowledged: 0, backlog: 0 })
+  })
+
+  it('waits for the ack of a new consumer next to a stale token of the same subscription', async () => {
+    const world = createWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    // the token of a consumer that is gone: no socket uses it
+    await call(world, 'POST', '/notification2/token', { subscription: 'sub', subscriber: 'gone' })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const { received } = await consume(world, 'sub', () => gate, true, 'new')
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'for the new consumer' })
+    await expect(world.realtime.settled({ timeout: 50 })).rejects.toThrow('fake-c8y: realtime.settled() timed out after 50 ms (unacknowledged 1)')
+    const settled = world.realtime.settled({ timeout: 2000 })
+    release()
+    const { status } = await settled
+    expect(received).toHaveLength(1)
+    expect(status).toMatchObject({ unacknowledged: 0, backlog: 0, unclaimed: 0 })
+  })
+})
+
+describe('realtime.consumers()', () => {
+  it('lists open sockets, filtered like closeConsumers(), and drops closed ones', async () => {
+    const world = createWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'a' })
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'b' })
+    const first = await consume(world, 'a', undefined, true, 'one')
+    const second = await consume(world, 'b', undefined, true, 'two')
+    // a token without a socket is not a consumer
+    await call(world, 'POST', '/notification2/token', { subscription: 'a', subscriber: 'never' })
+    expect(world.realtime.consumers()).toEqual([
+      { tenant: world.tenant, subscription: 'a', subscriber: 'one', token: first.token },
+      { tenant: world.tenant, subscription: 'b', subscriber: 'two', token: second.token },
+    ])
+    expect(world.realtime.consumers({ subscription: 'b' })).toEqual([{ tenant: world.tenant, subscription: 'b', subscriber: 'two', token: second.token }])
+    expect(world.realtime.consumers({ subscriber: 'one', token: first.token })).toHaveLength(1)
+    expect(world.realtime.consumers({ subscriber: 'one', token: second.token })).toEqual([])
+    expect(world.realtime.consumers({ tenant: 'other' })).toEqual([])
+    // plain new objects
+    world.realtime.consumers()[0]!.subscriber = 'changed'
+    expect(world.realtime.consumers()[0]!.subscriber).toBe('one')
+    world.realtime.closeConsumers({ subscription: 'a' })
+    second.socket.close()
+    expect(world.realtime.consumers()).toEqual([])
+  })
+
+  it('lists only a fork\'s own sockets on the fork', async () => {
+    const base = createWorld()
+    await call(base, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const inBase = await consume(base, 'sub', undefined, true, 'base')
+    const fork = base.fork()
+    const inFork = await consume(fork, 'sub', undefined, true, 'fork')
+    expect(fork.realtime.consumers()).toEqual([{ tenant: fork.tenant, subscription: 'sub', subscriber: 'fork', token: inFork.token }])
+    expect(base.realtime.consumers()).toEqual([{ tenant: base.tenant, subscription: 'sub', subscriber: 'base', token: inBase.token }])
+  })
+
+  it('leaves out sockets still connecting', async () => {
+    const queue: Array<() => void> = []
+    const world = createWorld({ schedule: (callback) => queue.push(callback) })
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const token = (await call(world, 'POST', '/notification2/token', { subscription: 'sub', subscriber: 's' })).body.token as string
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
+    expect(socket.readyState).toBe(WebSocket.CONNECTING)
+    expect(world.realtime.consumers()).toEqual([])
+    queue.shift()!()
+    expect(world.realtime.consumers()).toEqual([{ tenant: world.tenant, subscription: 'sub', subscriber: 's', token }])
   })
 })
 
@@ -295,29 +434,5 @@ describe('timers', () => {
     expect(timerSource(globalThis).fake).toBe(false)
     vi.useFakeTimers()
     expect(timerSource(globalThis).fake).toBe(true)
-  })
-})
-
-describe('waitForRealtimeStartup()', () => {
-  it('works under fake timers', async () => {
-    const world = createWorld()
-    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
-    await consume(world, 'sub')
-    vi.useFakeTimers()
-    const result = await waitForRealtimeStartup(world.realtime, () => world.inflight, 1000)
-    expect(result).toMatchObject({ settled: true, unconnectedTokens: [] })
-  })
-
-  it('reports a timeout instead of returning silently', async () => {
-    const world = createWorld()
-    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
-    await call(world, 'POST', '/notification2/token', { subscription: 'sub', subscriber: 'neverConnects' })
-    const result = await waitForRealtimeStartup(world.realtime, () => world.inflight, 50)
-    expect(result.settled).toBe(false)
-    expect(result.waitedMs).toBeGreaterThanOrEqual(50)
-    expect(result.unconnectedTokens).toEqual([{ tenant: world.tenant, subscription: 'sub', subscriber: 'neverConnects' }])
-    await expect(waitForRealtimeStartup(world.realtime, () => world.inflight, { timeout: 50, onTimeout: 'throw' }))
-      .rejects
-      .toThrow(new RegExp(`^fake-c8y: waitForRealtimeStartup\\(\\) timed out after 50 ms \\(unconnectedTokens 1\\); tokens without a connected consumer: ${world.tenant}/sub/neverConnects$`))
   })
 })

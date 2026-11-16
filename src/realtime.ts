@@ -196,13 +196,15 @@ export interface RealtimeStatus {
    */
   unacknowledged: number
   /**
-   * Frames held for a persistent subscription that has a token (its consumer
-   * is connecting, or reconnecting).
+   * Frames held for a persistent subscription that has a token but no open
+   * consumer (it is connecting, reconnecting, or gone). Informational:
+   * `settled()` does not wait for them.
    */
   backlog: number
   /**
    * Frames held for a persistent subscription without any token: the
    * platform keeps them until a consumer connects, which may never happen.
+   * Informational: `settled()` does not wait for them.
    */
   unclaimed: number
 }
@@ -220,14 +222,19 @@ export interface RealtimeSettledOptions {
    * @default 20
    */
   quietMs?: number
+}
+
+/**
+ * An open consumer socket (`realtime.consumers()`).
+ */
+export interface RealtimeConsumer {
+  tenant: string
+  subscription: string
+  subscriber: string
   /**
-   * Frames held for persistent subscriptions without a token
-   * (`status().unclaimed`): `'wait'` waits until a consumer connects and
-   * acknowledges them, `'ignore'` does not wait for them (the result still
-   * reports them).
-   * @default 'wait'
+   * The token the socket connected with.
    */
-  unclaimed?: 'wait' | 'ignore'
+  token: string
 }
 
 /**
@@ -239,8 +246,8 @@ export interface RealtimeSettledResult {
    */
   waitedMs: number
   /**
-   * The status when it settled. `unclaimed` can be above 0 only with
-   * `unclaimed: 'ignore'`.
+   * The status when it settled. `backlog` and `unclaimed` can be above 0:
+   * `settled()` does not wait for stored frames.
    */
   status: RealtimeStatus
 }
@@ -264,10 +271,6 @@ export class Realtime {
    * delivered but not yet acknowledged frames, per socket
    */
   unacked: Map<NotificationSocket, Set<string>> = new Map()
-  /**
-   * frames scheduled for delivery
-   */
-  scheduled = 0
   /**
    * Runs a callback later (the `schedule` option), counted in
    * `status().scheduled` until it ran.
@@ -368,14 +371,12 @@ export class Realtime {
 
   deliver(socket: NotificationSocket, frame: NotificationFrame): void {
     const generation = this.generation
-    this.scheduled++
     this.outstanding.get(socket)?.set(frame.ackId, frame)
     this.schedule(() => {
       if (generation !== this.generation) {
-        // dropped by dropPending(), which already reset `scheduled`
+        // dropped by dropPending()
         return
       }
-      this.scheduled--
       if (socket.readyState !== SOCKET_STATE.OPEN) {
         return
       }
@@ -438,10 +439,10 @@ export class Realtime {
   }
 
   /**
-   * What is still on its way, split up. `pending()` is `inflight`, the
-   * scheduled frame deliveries, `unacknowledged`, and `backlog`; it leaves
-   * out `unclaimed` (frames of persistent subscriptions without a token),
-   * which may never be delivered.
+   * What is still on its way, split up. `settled()` and `pending()` count
+   * only the live work (`inflight`, `scheduled`, `connecting`,
+   * `unacknowledged`); `backlog` and `unclaimed` are frames stored for
+   * subscriptions without an open consumer, which may never be delivered.
    */
   status(): RealtimeStatus {
     let unacknowledged = 0
@@ -462,13 +463,13 @@ export class Realtime {
   }
 
   /**
-   * Waits until every delivered notification has been acknowledged,
-   * including notifications caused by the consumers' own writes: no request
-   * in flight, no callback scheduled, nothing unacknowledged, no backlog of a
-   * subscription with a token, and (unless `unclaimed: 'ignore'`) no frames
-   * held for a persistent subscription without a token, for `quietMs` on the
-   * real timers.
-   * @param options - `timeout` (default 5000 ms), `quietMs` (default 20 ms), `unclaimed` (default `'wait'`)
+   * Waits until the live work is done, including notifications caused by the
+   * consumers' own writes: no request in flight, no callback scheduled, no
+   * socket connecting, and nothing delivered and unacknowledged, for
+   * `quietMs` on the real timers. Frames stored for a subscription without
+   * an open consumer (`status().backlog` and `unclaimed`) are not waited for:
+   * like the platform, they stay stored until a consumer connects.
+   * @param options - `timeout` (default 5000 ms), `quietMs` (default 20 ms)
    * @returns How long it waited and the status it settled with
    * @throws {SettleTimeoutError} when it is not settled within the timeout
    * @example
@@ -480,45 +481,50 @@ export class Realtime {
    */
   async settled(options: RealtimeSettledOptions = {}): Promise<RealtimeSettledResult> {
     const timeout = options.timeout ?? 5000
-    const waitUnclaimed = options.unclaimed !== 'ignore'
-    const settled = () => {
-      const status = this.status()
-      return status.inflight === 0 && status.scheduled === 0 && status.unacknowledged === 0 && status.backlog === 0 && (!waitUnclaimed || status.unclaimed === 0)
-    }
-    const { quiet, waitedMs } = await waitForQuiet(settled, { timeout, quietMs: options.quietMs ?? 20 })
+    const { quiet, waitedMs } = await waitForQuiet(() => this.pending() === 0, { timeout, quietMs: options.quietMs ?? 20 })
     const status = this.status()
     if (!quiet) {
-      const claimed = new Set([...this.storedTokens()].map(([, token]) => this.key(token.tenant, token.subscription)))
-      const unclaimed = [...this.backlog].filter(([key, frames]) => frames.length > 0 && !claimed.has(key)).map(([key]) => key.replace('\u0000', '/'))
-      const detail = waitUnclaimed && unclaimed.length > 0
-        ? `; no consumer has a token for ${unclaimed.join(', ')}: connect one, or pass unclaimed: 'ignore'`
-        : ''
-      throw new SettleTimeoutError('realtime.settled()', timeout, { ...status }, detail)
+      throw new SettleTimeoutError('realtime.settled()', timeout, { inflight: status.inflight, scheduled: status.scheduled, connecting: status.connecting, unacknowledged: status.unacknowledged })
     }
     return { waitedMs, status }
   }
 
   /**
-   * Notifications on their way to a consumer or not yet acknowledged:
-   * requests in flight, scheduled frame deliveries, unacknowledged frames,
-   * and the backlog of subscriptions a consumer has a token for. Frames of
-   * persistent subscriptions without a token are not counted; `status()`
-   * has them as `unclaimed`.
+   * The live work `settled()` waits for: requests in flight, scheduled
+   * callbacks, sockets connecting, and frames delivered and not yet
+   * acknowledged. Stored frames (`status().backlog` and `unclaimed`) are not
+   * counted.
    */
   pending(): number {
-    let count = this.scheduled + this.inflight()
+    let count = this.inflight() + this.tasks + this.connecting.size
     for (const acks of this.unacked.values()) {
       count += acks.size
     }
-    // backlog of subscriptions a consumer has a token for (it is connecting)
-    const tokens = [...this.storedTokens()].map(([, token]) => token)
-    for (const [key, frames] of this.backlog) {
-      const [tenant, subscription] = key.split('\u0000')
-      if (tokens.some((token) => token.tenant === tenant && token.subscription === subscription)) {
-        count += frames.length
-      }
-    }
     return count
+  }
+
+  /**
+   * The open consumer sockets, one entry per socket (sockets still
+   * connecting are not listed).
+   * @param filter - Only sockets of this tenant, subscription, subscriber, or token (like `closeConsumers()`)
+   * @returns New objects, in the order the sockets opened
+   * @example
+   * ```ts
+   * await expect.poll(() => world.realtime.consumers({ subscription: 'alarms' }).length).toBe(1)
+   * ```
+   */
+  consumers(filter: Pick<CloseConsumersOptions, 'tenant' | 'subscription' | 'subscriber' | 'token'> = {}): RealtimeConsumer[] {
+    return [...this.sockets].filter((socket) => this.matches(socket, filter)).flatMap((socket) => socket.token
+      ? [{ tenant: socket.token.tenant, subscription: socket.token.subscription, subscriber: socket.token.subscriber, token: tokenOf(socket) }]
+      : [])
+  }
+
+  private matches(socket: NotificationSocket, filter: Pick<CloseConsumersOptions, 'tenant' | 'subscription' | 'subscriber' | 'token'>): boolean {
+    const token = socket.token
+    return (filter.tenant === undefined || token?.tenant === filter.tenant)
+      && (filter.subscription === undefined || token?.subscription === filter.subscription)
+      && (filter.subscriber === undefined || token?.subscriber === filter.subscriber)
+      && (filter.token === undefined || tokenOf(socket) === filter.token)
   }
 
   /**
@@ -527,7 +533,6 @@ export class Realtime {
    */
   dropPending(): void {
     this.generation++
-    this.scheduled = 0
     this.tasks = 0
     this.backlog.clear()
     for (const acks of this.unacked.values()) {
@@ -580,13 +585,10 @@ export class Realtime {
     }
     let closed = 0
     for (const socket of [...this.sockets]) {
-      const token = socket.token
-      if ((options.tenant !== undefined && token?.tenant !== options.tenant)
-        || (options.subscription !== undefined && token?.subscription !== options.subscription)
-        || (options.subscriber !== undefined && token?.subscriber !== options.subscriber)
-        || (options.token !== undefined && tokenOf(socket) !== options.token)) {
+      if (!this.matches(socket, options)) {
         continue
       }
+      const token = socket.token
       const frames = [...(this.outstanding.get(socket)?.values() ?? [])]
       this.closeFromServer(socket, code, reason)
       if (token) {

@@ -2,9 +2,8 @@
  * Consumer WebSockets for the fake's Notification 2.0, as a stand-in for the
  * `ws` WebSocket a consumer (e.g. c8y-realtime) opens. Entry: `fake-c8y/realtime`.
  */
-import type { NotificationSocket, NotificationToken, Realtime, RealtimeStatus } from './realtime'
+import type { NotificationSocket, NotificationToken, Realtime } from './realtime'
 import { SOCKET_STATE } from './realtime'
-import { SettleTimeoutError, waitForQuiet } from './timers'
 
 type Listener = (...args: any[]) => void
 
@@ -158,84 +157,4 @@ export function createFakeWebSocket(realtime: Realtime, options: FakeWebSocketOp
   }
 
   return Socket
-}
-
-export interface RealtimeStartupOptions {
-  /**
-   * Milliseconds to wait at most.
-   * @default 3000
-   */
-  timeout?: number
-  /**
-   * What happens when startup has not finished within the timeout:
-   * `'return'` resolves with `settled: false`, `'throw'` rejects with a
-   * `SettleTimeoutError`.
-   * @default 'return'
-   */
-  onTimeout?: 'return' | 'throw'
-  /**
-   * Milliseconds startup must stay done without interruption.
-   * @default 15
-   */
-  quietMs?: number
-}
-
-/**
- * Result of `waitForRealtimeStartup()`.
- */
-export interface RealtimeStartupResult {
-  /**
-   * Whether startup finished; `false` when the wait timed out.
-   */
-  settled: boolean
-  /**
-   * Milliseconds waited.
-   */
-  waitedMs: number
-  /**
-   * Requests in flight when the wait ended (the `inflight` argument).
-   */
-  inflight: number
-  /**
-   * What Notification 2.0 still had on its way when the wait ended.
-   */
-  status: RealtimeStatus
-  /**
-   * Stored tokens without a connected socket of their consumer when the wait
-   * ended (empty when `settled`).
-   */
-  unconnectedTokens: NotificationToken[]
-}
-
-/**
- * Waits until a service has finished starting up its realtime clients: no
- * request in flight, no callback scheduled (also no socket connecting), and
- * every minted token has a connected socket of its consumer (the same tenant,
- * subscription, and subscriber: a client that reconnected uses a newer
- * token), for `quietMs` (default 15 ms).
- *
- * Runs on the real timers captured when fake-c8y was loaded, so fake timers
- * (`vi.useFakeTimers()`) do not stop it. On timeout it resolves with
- * `settled: false` and what was still open (`onTimeout: 'return'`, the
- * default), or rejects with a `SettleTimeoutError` (`onTimeout: 'throw'`).
- * @param realtime - Notification 2.0 state of the world
- * @param inflight - Requests the world is answering right now
- * @param options - Milliseconds to wait at most (default 3000), or options
- */
-export async function waitForRealtimeStartup(realtime: Realtime, inflight: () => number, options: number | RealtimeStartupOptions = {}): Promise<RealtimeStartupResult> {
-  const { timeout = 3000, onTimeout = 'return', quietMs = 15 } = typeof options === 'number' ? { timeout: options } : options
-  const consumer = (token: NotificationToken) => `${token.tenant}\u0000${token.subscription}\u0000${token.subscriber}`
-  const unconnected = () => {
-    const connected = new Set([...realtime.sockets].flatMap((socket) => socket.token ? [consumer(socket.token)] : []))
-    return [...realtime.tokens.values()].filter((token) => !connected.has(consumer(token)))
-  }
-  const { quiet, waitedMs } = await waitForQuiet(() => inflight() === 0 && realtime.status().scheduled === 0 && unconnected().length === 0, { timeout, quietMs, interval: 5 })
-  const result: RealtimeStartupResult = { settled: quiet, waitedMs, inflight: inflight(), status: realtime.status(), unconnectedTokens: quiet ? [] : unconnected() }
-  if (!quiet && onTimeout === 'throw') {
-    const detail = result.unconnectedTokens.length > 0
-      ? `; tokens without a connected consumer: ${result.unconnectedTokens.map((token) => `${token.tenant}/${token.subscription}/${token.subscriber}`).join(', ')}`
-      : ''
-    throw new SettleTimeoutError('waitForRealtimeStartup()', timeout, { inflight: result.inflight, scheduled: result.status.scheduled, connecting: result.status.connecting, unconnectedTokens: result.unconnectedTokens.length }, detail)
-  }
-  return result
 }

@@ -381,15 +381,14 @@ world.realtime.closeConsumers({ subscription: 'alarms', code: 1011, reason: 'int
 
 ### Waiting for background work
 
-A service under test reacts to notifications in the background, so a test or a grader has to wait before it judges the world. Three waits do that. They run on the real `setTimeout` and `Date.now`, captured when fake-c8y is loaded, so `vi.useFakeTimers()` or sinon installed later does not stop them. Each wait counts only its own world: a fork waits for its own requests and sockets.
+A service under test reacts to notifications in the background, so a test or a grader has to wait before it judges the world. Two waits do that. They run on the real `setTimeout` and `Date.now`, captured when fake-c8y is loaded, so `vi.useFakeTimers()` or sinon installed later does not stop them. Each wait counts only its own world: a fork waits for its own requests and sockets.
 
-| Wait                                                         | Resolves When                                                                                                                                                                                                                                                | On Timeout                                   |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------- |
-| `world.realtime.settled({ timeout?, quietMs?, unclaimed? })` | Every notification is delivered and acknowledged, including the ones caused by the consumers' own writes: no request in flight, no callback scheduled, nothing unacknowledged, no backlog, and no unclaimed frames (see [below](#what-is-still-on-its-way)). | Rejects with `SettleTimeoutError`            |
-| `world.idle({ timeout?, quietMs? })`                         | No request is in flight and no callback is scheduled (deliveries, socket connects and events). Notifications that are delivered and not acknowledged yet do not count.                                                                                       | Rejects with `SettleTimeoutError`            |
-| `waitForRealtimeStartup(realtime, inflight, options?)`       | Startup is done: no request in flight, nothing scheduled, and every stored token has a connected socket of its consumer (same tenant, subscription, and subscriber).                                                                                         | Resolves with `settled: false`, or see below |
+| Wait                                             | Resolves When                                                                                                                                                                                                 | On Timeout                        |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
+| `world.realtime.settled({ timeout?, quietMs? })` | The live work is done, including notifications caused by the consumers' own writes: no request in flight, no callback scheduled, no socket connecting, and no delivered frame waiting for its acknowledgment. | Rejects with `SettleTimeoutError` |
+| `world.idle({ timeout?, quietMs? })`             | No request is in flight and no callback is scheduled (deliveries, socket connects and events). Notifications that are delivered and not acknowledged yet do not count.                                        | Rejects with `SettleTimeoutError` |
 
-Each resolves only after its condition held without interruption for `quietMs` (default 20 ms; 15 ms for `waitForRealtimeStartup()`), checked every few milliseconds, so a client that is between two requests is waited for. A consumer that acknowledges a frame and writes only after a longer await of its own is not visible meanwhile: raise `quietMs` above that await. `timeout` is in milliseconds: 5000 for `settled()` and `idle()`, 3000 for `waitForRealtimeStartup()`.
+Each resolves only after its condition held without interruption for `quietMs` (default 20 ms), checked every few milliseconds, so a client that is between two requests is waited for. A consumer that acknowledges a frame and writes only after a longer await of its own is not visible meanwhile: raise `quietMs` above that await. `timeout` is in milliseconds (default 5000).
 
 ```ts
 world.seed({ measurements: [{ source: pump, type: 'c8y_Temperature', c8y_Temperature: { T: { value: 95, unit: 'C' } } }] })
@@ -397,22 +396,76 @@ const { status } = await world.realtime.settled()
 expect(world.db.alarms.find({ source: pump })).toHaveLength(1)
 ```
 
-`settled()` resolves with `{ waitedMs, status }`, the `realtime.status()` it settled with. A timeout rejects with `SettleTimeoutError` (exported from `fake-c8y` and `fake-c8y/realtime`). Its message lists the counts that were still above 0 at the last check, for example `fake-c8y: realtime.settled() timed out after 5000 ms (unacknowledged 1)`, and its `status` has the same counts:
+`settled()` does not wait for frames stored for a subscription that has no open consumer (`status().backlog` and `unclaimed`, see [below](#what-is-still-on-its-way)). The platform does not wait for them either: it keeps them until a consumer connects, which may never happen (a stopped service leaves its token behind). When a consumer connects, it gets those frames at once, and `settled()` waits for them from then on.
 
-- `settled()`: every field of `realtime.status()`. When unclaimed frames held it, the message also names their subscriptions: `fake-c8y: realtime.settled() timed out after 5000 ms (unclaimed 1); no consumer has a token for t12345/alarms: connect one, or pass unclaimed: 'ignore'`.
+`settled()` resolves with `{ waitedMs, status }`, the `realtime.status()` it settled with (`backlog` and `unclaimed` can be above 0). A timeout rejects with `SettleTimeoutError` (exported from `fake-c8y` and `fake-c8y/realtime`). Its message lists the counts that were still above 0 at the last check, for example `fake-c8y: realtime.settled() timed out after 5000 ms (unacknowledged 1)`, and its `status` has the same counts:
+
+- `settled()`: `inflight`, `scheduled`, `connecting`, and `unacknowledged`.
 - `idle()`: `inflight` and `scheduled`.
-- `waitForRealtimeStartup()` with `onTimeout: 'throw'`: `inflight`, `scheduled`, `connecting`, and `unconnectedTokens`, the number of stored tokens without a connected consumer. The message names those tokens as `tenant/subscription/subscriber`.
 
-`waitForRealtimeStartup()` (from `fake-c8y/realtime`) takes the timeout as a number or as `{ timeout, onTimeout, quietMs }`. It resolves with `{ settled, waitedMs, inflight, status, unconnectedTokens }`; on timeout `settled` is `false` and `unconnectedTokens` lists the tokens no consumer connected with. `onTimeout: 'throw'` rejects with a `SettleTimeoutError` instead.
-
-```ts
-import { waitForRealtimeStartup } from 'fake-c8y/realtime'
-
-await startApp(world)
-await waitForRealtimeStartup(world.realtime, () => world.inflight, { timeout: 5000, onTimeout: 'throw' })
-```
+A consumer that never acknowledges a frame keeps `settled()` waiting until the timeout, with `unacknowledged` above 0. That happens, for example, with a client version that skips the acknowledgment when its handler throws.
 
 Load fake-c8y before fake timers are installed (for example, import it at the top of a setup file that calls `vi.useFakeTimers()`). If the timers were already fake when fake-c8y was loaded, it uses the global timers at the time of the wait when those are real again, and otherwise the wait throws a `TypeError` that says so instead of hanging. fake-c8y recognizes fake timers by the `clock` property that `@sinonjs/fake-timers` (used by Vitest and Jest) puts on `setTimeout` and `Date`.
+
+#### Open consumers
+
+`world.realtime.consumers(filter?)` lists the open consumer sockets, one entry per socket, as new objects `{ tenant, subscription, subscriber, token }` (`token` is the token the socket connected with). Sockets still connecting are not listed, and a closed socket drops out. The filter takes `tenant`, `subscription`, `subscriber`, and `token`, and matches like [`closeConsumers()`](#closing-consumers-from-the-server-side).
+
+```ts
+world.realtime.consumers() // [{ tenant: 't12345', subscription: 'alarms', subscriber: 'alarmService', token: 'eyJ…' }]
+expect(world.realtime.consumers({ subscription: 'alarms' })).toHaveLength(1)
+```
+
+#### When `settled()` is enough
+
+`settled()` sees everything that runs through the fake: requests, scheduled deliveries, connecting sockets, and frames waiting for their acknowledgment. c8y-realtime acknowledges a frame after its handler's promise resolves, so work the handler awaits is covered, also a new listener it opens in reaction to an event. Then `settled()` alone is enough:
+
+```ts
+it('raises an alarm for a hot pump', async () => {
+  // a write that triggers the service through its open listener
+  await client.measurement.create(hotMeasurement)
+  await world.realtime.settled()
+  expect(world.db.alarms.find({ source: pump })).toHaveLength(1)
+})
+
+it('ignores a normal reading', async () => {
+  // a negative check: nothing happened once the live work is done
+  await client.measurement.create(normalMeasurement)
+  await world.realtime.settled()
+  expect(world.db.alarms.find({ source: pump })).toHaveLength(0)
+})
+```
+
+The same holds for chains (the service writes, its own write notifies it again, it writes again), and for startup when the service connects its listeners while it starts:
+
+```ts
+beforeAll(async () => {
+  await startApp(world) // creates subscriptions and tokens, connects consumers
+  await world.realtime.settled()
+})
+```
+
+#### When to poll first
+
+Some work starts later than the fake can see. Poll until the listener you need is open (`expect.poll()` or `vi.waitFor()`), then call `settled()`:
+
+- After the fake dropped listeners: `closeConsumers()`, or a reset that closed them with `4410`. c8y-realtime reconnects on its own timer, about 1 s after a drop and longer after failed attempts.
+- A listener the service opens later on its own timer, a cron job, or a lazy route.
+- Work a handler starts on its own timer (`setTimeout`) after it resolved: the frame is acknowledged already. Poll for the result, or raise `quietMs` above the delay.
+- An external process (for example a microservice in another process) whose start the fake cannot see.
+- A service that yields on its own (a timer, or waiting in real time) between creating the subscription, minting the token, and connecting, or a test that writes before the service started: `settled()` does not wait for that listener. Poll `consumers()` first. Steps that follow each other directly are covered: a request is in flight or the socket is connecting.
+
+```ts
+world.realtime.closeConsumers({ subscription: 'alarms' })
+await expect.poll(() => world.realtime.consumers({ subscription: 'alarms' }).length, { timeout: 5000 }).toBe(1)
+await world.realtime.settled()
+```
+
+```ts
+await vi.waitFor(() => expect(world.realtime.consumers({ subscriber: 'reportService' })).toHaveLength(1), { timeout: 5000 })
+await client.event.create(reportRequest)
+await world.realtime.settled()
+```
 
 #### Changed: delivery runs on real timers
 
@@ -422,7 +475,15 @@ The default `schedule` is now the real `setTimeout(callback, 0)` captured when f
 const world = createWorld({ schedule: (callback) => setTimeout(callback, 0) }) // fake timers drive delivery again
 ```
 
-A custom `schedule` counts in `status().scheduled` until it runs the callback. One that never runs it (`schedule: () => {}`, to mute delivery) keeps `idle()` and `settled()` from resolving until the next `reset()`, `restore()`, or `realtime.clear()`, which drop the scheduled work and its count.
+A custom `schedule` counts in `status().scheduled` until it runs the callback. One that never runs it (`schedule: () => {}`, to mute delivery) keeps `idle()` from resolving until the next `reset()`, `restore()`, or `realtime.clear()`, which drop the scheduled work and its count. `settled()` and `pending()` also count a socket that is still connecting (`status().connecting`), and a reset or restore does not drop it: they stay busy until the socket connects, its client closes it, or `realtime.clear()` runs.
+
+#### Changed: `settled()` waits only for live work
+
+`settled()` and `pending()` no longer count stored frames (`backlog`), and `settled()` lost its `unclaimed` option: a token whose consumer is gone for good (a stopped service) made them hang. `waitForRealtimeStartup()` and its types (`RealtimeStartupOptions`, `RealtimeStartupResult`) are removed. To migrate:
+
+- `waitForRealtimeStartup(world.realtime, () => world.inflight)` becomes `await world.realtime.settled()`. To wait for a specific listener, poll `world.realtime.consumers()` first (see [When to poll first](#when-to-poll-first)).
+- Drop `unclaimed: 'wait'` or `unclaimed: 'ignore'` from `settled()`: it now waits for neither unclaimed frames nor the backlog.
+- A test that relied on `settled()` waiting for a consumer to connect polls `consumers()` first.
 
 ### What is still on its way
 
@@ -434,9 +495,7 @@ A custom `schedule` counts in `status().scheduled` until it runs the callback. O
 | `scheduled`      | Callbacks given to `schedule` since the last reset that have not run: frame deliveries, socket connects, and socket events (`open`, `close`, `pong`). |
 | `connecting`     | Sockets whose connect has not run yet.                                                                                                                |
 | `unacknowledged` | Frames delivered to a socket and not acknowledged.                                                                                                    |
-| `backlog`        | Frames held for a persistent subscription that has a token: its consumer is connecting or reconnecting.                                               |
+| `backlog`        | Frames held for a persistent subscription that has a token but no open consumer: it is connecting, reconnecting, or gone.                             |
 | `unclaimed`      | Frames held for a persistent subscription without any token. The platform keeps them until a consumer connects, which may never happen.               |
 
-`world.realtime.pending()` is `inflight`, the scheduled frame deliveries, `unacknowledged`, and `backlog`. It leaves out `unclaimed`.
-
-`settled()` waits for `unclaimed` frames by default. A notification published after a service created its subscription but before it minted a token is `unclaimed` until then, so a test that writes right after the service subscribed would otherwise see a settled world before the service got the notification. A persistent subscription that nobody consumes keeps `settled()` from resolving; the error names it. Pass `settled({ unclaimed: 'ignore' })` when that is expected: `unclaimed` frames are then not waited for, and the result's `status.unclaimed` still reports them.
+`world.realtime.pending()` is the live work `settled()` waits for: `inflight` + `scheduled` + `connecting` + `unacknowledged`. `backlog` and `unclaimed` are informational: neither `settled()` nor `pending()` waits for or counts them. Read `pending()` as zero or not zero, not as a number of tasks: it is a sum of the four counts, and a connecting socket counts twice (its connect callback in `scheduled`, the socket in `connecting`).
