@@ -48,10 +48,10 @@ const MANIFEST_TOP_LEVEL = ['livenessProbe', 'settings', 'apiVersion', 'billingM
 const API_MANIFEST = { requiredRoles: [], roles: [], billingMode: 'RESOURCES', deploymentMethod: 'CORE', noAppSwitcher: true }
 
 /**
- * A microservice manifest (`cumulocity.json`), the fields the fake reads.
- * Any other field is kept in `manifest` as given.
+ * The fields of a microservice manifest (`cumulocity.json`) the fake reads,
+ * without an index signature (see `C8yMicroserviceManifest`).
  */
-export interface C8yMicroserviceManifest {
+interface ManifestFields {
   /**
    * Application name.
    * @default the context path
@@ -87,9 +87,23 @@ export interface C8yMicroserviceManifest {
    * `cumulocity.json` fits).
    */
   isolation?: string
-  provider?: { name?: string, [field: string]: unknown }
-  [field: string]: unknown
+  /**
+   * @default 'RESOURCES'
+   */
+  billingMode?: string
+  provider?: { name?: string }
 }
+
+/**
+ * A microservice manifest (`cumulocity.json`): the fields the fake reads.
+ * Either an object with only known fields (so a manifest typed as an
+ * interface without an index signature fits) or one with more fields (an
+ * object literal, an imported `cumulocity.json`). Other fields are kept in
+ * the application's `manifest` as given.
+ */
+export type C8yMicroserviceManifest
+  = | ManifestFields
+    | (Omit<ManifestFields, 'provider'> & { provider?: { name?: string, [field: string]: unknown }, [field: string]: unknown })
 
 function nextApplicationId(data: TenantData): string {
   let id: string
@@ -286,8 +300,9 @@ export function microserviceFromManifest(data: TenantData, contextPath: string, 
     roles: [...stored.roles!],
   }
   for (const field of MANIFEST_TOP_LEVEL) {
-    if (stored[field] !== undefined) {
-      application[field] = clone(stored[field])
+    const value = (stored as Record<string, unknown>)[field]
+    if (value !== undefined) {
+      application[field] = clone(value)
     }
   }
   return application
