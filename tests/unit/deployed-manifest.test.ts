@@ -4,8 +4,8 @@
  * and passwords, and it behaves like a registered service otherwise.
  */
 import { Buffer } from 'node:buffer'
-import { describe, expect, it } from 'vitest'
-import { createWorld } from '../../src'
+import { describe, expect, expectTypeOf, it } from 'vitest'
+import { createWorld, defineService } from '../../src'
 import type { C8ySubscription, World, WorldOptions } from '../../src'
 
 async function send(world: World, method: string, path: string, login?: string, body?: unknown) {
@@ -291,6 +291,71 @@ describe('createWorld({ manifest })', () => {
     world.service('other', () => Response.json({ ok: true }))
     expect((await send(world, 'GET', '/service/other/x')).body).toEqual({ ok: true })
     expect((await send(world, 'GET', '/service/pumps/x')).status).toBe(501)
+  })
+})
+
+describe('manifest types', () => {
+  // the type checks run in `pnpm typecheck` (tsc covers tests/)
+  interface StrictManifest {
+    name: string
+    contextPath?: string
+    provider?: { name: string, domain?: string, support?: string }
+    requiredRoles?: string[]
+  }
+  interface ProviderManifest {
+    name: string
+    contextPath?: string
+    provider: { name: string, domain?: string, support?: string }
+  }
+
+  const handler = () => Response.json({})
+
+  it('takes a manifest typed as an interface', () => {
+    const strict: StrictManifest = { name: 'strict', contextPath: 'strict', provider: { name: 'acme', domain: 'acme.com' } }
+    const withProvider: ProviderManifest = { name: 'provided', contextPath: 'provided', provider: { name: 'acme' } }
+    for (const manifest of [strict, withProvider]) {
+      createWorld({ manifest })
+      defineService({ manifest })
+      createWorld().service({ manifest })
+      createWorld().service(manifest.contextPath!, handler, { manifest })
+    }
+  })
+
+  it('takes literals with more fields', () => {
+    createWorld({ manifest: { name: 'extra', livenessProbe: {}, provider: { name: 'acme', support: 'help@acme.com' } } })
+    defineService({ manifest: { contextPath: 'extra', livenessProbe: {}, provider: { name: 'acme', support: 'help@acme.com' } } })
+    createWorld().service({ contextPath: 'extra', manifest: { livenessProbe: {}, provider: { name: 'acme', support: 'help@acme.com' } } })
+    createWorld().service('extra', handler, { manifest: { livenessProbe: {}, provider: { name: 'acme', support: 'help@acme.com' } } })
+    createWorld().service(defineService({ contextPath: 'nested', manifest: { livenessProbe: {} } }))
+    const options: WorldOptions = { manifest: { name: 'extra', livenessProbe: {} } }
+    createWorld(options)
+  })
+
+  it('rejects wrong types on known fields and unknown definition fields', () => {
+    // @ts-expect-error a known field with the wrong type
+    expect(() => createWorld({ manifest: { name: 1 } })).toThrow()
+    // @ts-expect-error a known field with the wrong type
+    createWorld({ manifest: { name: 'wrong', provider: { name: 1 } } })
+    // @ts-expect-error a known field with the wrong type
+    expect(() => defineService({ manifest: { contextPath: 1 } })).toThrow()
+    // @ts-expect-error a known field with the wrong type
+    expect(() => createWorld().service({ manifest: { contextPath: 1 } })).toThrow()
+    // @ts-expect-error a known field with the wrong type
+    createWorld().service('wrong', handler, { manifest: { name: 1 } })
+    // @ts-expect-error a typo in a definition field
+    expect(() => createWorld().service({ contextPat: 'typo', manifest: { name: 'typo' } })).toThrow()
+
+    const world = createWorld()
+    world.service({ contextPath: 'read', manifest: { livenessProbe: {} } })
+    expectTypeOf(world.services.get('read')!.manifest!.contextPath).toEqualTypeOf<string | undefined>()
+    // @ts-expect-error reading an unknown field
+    expect(world.services.get('read')!.manifest!.livenessProbe).toEqual({})
+  })
+
+  it('stores unknown manifest fields on the application', () => {
+    const world = createWorld({ manifest: { name: 'extra', x_custom: { level: 2 }, provider: { name: 'acme', support: 'help@acme.com' } } })
+    const [application] = world.db.applications.find({ name: 'extra' })
+    expect(application!.manifest).toMatchObject({ x_custom: { level: 2 }, provider: { name: 'acme', support: 'help@acme.com' } })
   })
 })
 

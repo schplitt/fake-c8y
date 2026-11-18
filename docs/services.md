@@ -113,6 +113,8 @@ world.db.applications.find({ name: 'pump-service' }) // [{ type: 'MICROSERVICE',
 world.options.get('interval', { category: 'pumpcfg', tenant: 't200' }) // '5'
 ```
 
+The type `C8yMicroserviceManifest` names only these fields. A manifest with more fields fits too: one typed as your own interface, an object literal, or an imported `cumulocity.json`. Other fields (`livenessProbe`, `provider.support`, ...) are kept on the application as given; the type does not show them, so cast to read one (`(manifest as Record<string, unknown>).livenessProbe`).
+
 The world creates:
 
 - **Application.** A MICROSERVICE application in the owner tenant with the manifest, its `requiredRoles` and `roles`, and the manifest fields the platform copies to the top level. Settings get the platform's `editable`, `inheritFromOwner`, and `overwriteOnUpdate` flags.
