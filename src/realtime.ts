@@ -43,6 +43,11 @@ export interface NotificationToken {
   tenant: string
   subscription: string
   subscriber: string
+  /**
+   * When the token expires (epoch milliseconds); a socket cannot connect with
+   * it from then on. Missing: it never expires (tokens of older snapshots).
+   */
+  expires?: number
 }
 
 export interface NotificationFrame {
@@ -172,6 +177,11 @@ export interface RealtimeOptions {
    * @default none
    */
   tokens?: () => Iterable<[string, NotificationToken]>
+  /**
+   * The current time in epoch milliseconds (expired tokens are refused on connect).
+   * @default `Date.now`
+   */
+  now?: () => number
 }
 
 /**
@@ -288,6 +298,7 @@ export class Realtime {
   private readonly inflight: () => number
   private readonly storedSubscriptions: () => Iterable<NotificationSubscription>
   private readonly storedTokens: () => Iterable<[string, NotificationToken]>
+  private readonly now: () => number
   /**
    * frames scheduled for or delivered to a socket and not yet acknowledged,
    * by ack id (put back into the backlog when the socket closes)
@@ -319,6 +330,7 @@ export class Realtime {
     this.inflight = options.inflight ?? (() => 0)
     this.storedSubscriptions = options.subscriptions ?? (() => [])
     this.storedTokens = options.tokens ?? (() => [])
+    this.now = options.now ?? Date.now
   }
 
   /**
@@ -342,7 +354,8 @@ export class Realtime {
       return
     }
     const token = this.tokens.get(tokenOf(socket))
-    if (!token) {
+    // an expired token is refused like an unknown one; an open socket stays open
+    if (!token || (typeof token.expires === 'number' && this.now() >= token.expires)) {
       socket.readyState = SOCKET_STATE.CLOSED
       socket.emit('error', new Error('Invalid notification token'))
       socket.emit('close', 1008, 'invalid token')
