@@ -286,7 +286,7 @@ export class Realtime {
   private readonly storedTokens: () => Iterable<[string, NotificationToken]>
   /**
    * frames scheduled for or delivered to a socket and not yet acknowledged,
-   * by ack id (put back into the backlog when `closeConsumers()` closes it)
+   * by ack id (put back into the backlog when the socket closes)
    */
   private readonly outstanding: Map<NotificationSocket, Map<string, NotificationFrame>> = new Map()
   /**
@@ -333,8 +333,12 @@ export class Realtime {
 
   connect(socket: NotificationSocket): void {
     this.connecting.delete(socket)
+    if (socket.readyState === SOCKET_STATE.CLOSED) {
+      // the client closed it while connecting: its close event is on its way
+      return
+    }
     const token = this.tokens.get(tokenOf(socket))
-    if (!token || socket.readyState === SOCKET_STATE.CLOSED) {
+    if (!token) {
       socket.readyState = SOCKET_STATE.CLOSED
       socket.emit('error', new Error('Invalid notification token'))
       socket.emit('close', 1008, 'invalid token')
@@ -353,11 +357,29 @@ export class Realtime {
     }
   }
 
+  /**
+   * Removes a closed consumer socket. Its unacknowledged frames go back into
+   * the subscription's backlog (`requeue()`), unless its token is no longer
+   * stored (unsubscribe removed the consumer).
+   * @param socket - The closed socket
+   */
   disconnect(socket: NotificationSocket): void {
+    const frames = [...(this.outstanding.get(socket)?.values() ?? [])]
     this.connecting.delete(socket)
     this.sockets.delete(socket)
     this.unacked.delete(socket)
     this.outstanding.delete(socket)
+    const token = socket.token
+    if (!token || frames.length === 0) {
+      return
+    }
+    const key = tokenOf(socket)
+    for (const [stored] of this.storedTokens()) {
+      if (stored === key) {
+        this.requeue(token, frames)
+        return
+      }
+    }
   }
 
   acknowledge(socket: NotificationSocket, ackId: string): void {
@@ -588,12 +610,8 @@ export class Realtime {
       if (!this.matches(socket, options)) {
         continue
       }
-      const token = socket.token
-      const frames = [...(this.outstanding.get(socket)?.values() ?? [])]
+      // disconnect() puts the unacknowledged frames back
       this.closeFromServer(socket, code, reason)
-      if (token) {
-        this.requeue(token, frames)
-      }
       closed++
     }
     return closed
