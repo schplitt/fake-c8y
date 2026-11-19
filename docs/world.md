@@ -370,9 +370,9 @@ world.advance(6 * 60_000) // a new socket with this token now gets error and clo
 
 ### Close codes
 
-Only `reset()` and `restore()` use a distinct close code: when one of them removes a consumer's token or its subscription, the consumer's open socket closes with code `4410` and reason `notification token removed`, exported as `CONSUMER_REMOVED` (from `fake-c8y` and `fake-c8y/realtime`). The consumer no longer exists, so a client should stop instead of reconnecting. The platform documents no close code for this case: `4410` is fake-c8y's own, in the application range (4000-4999), modeled on HTTP 410 Gone.
+Only `reset()` and `restore()` use a distinct close code: when one of them removes a consumer's token or its subscription, the consumer's socket closes with code `4410` and reason `notification token removed`. The code is exported as `CONSUMER_REMOVED` (from `fake-c8y` and `fake-c8y/realtime`). This also applies to a socket that is still connecting, which then gets no `open` and no `error`. The consumer no longer exists, so a client should stop instead of reconnecting. The platform documents no close code for this case: `4410` is fake-c8y's own, in the application range (4000-4999), modeled on HTTP 410 Gone.
 
-- A socket still connecting when a reset or restore removes its token is not closed by it: its connect then fails like any connect with an unknown token.
+- A socket still connecting when a reset or restore removes its token or subscription closes right away with `4410`, once. It never opens.
 - A connect with an unknown or expired token emits `error` and closes with `1008` (`invalid token`).
 - A socket the client closes itself (`close()` or `terminate()`) closes with `1000`, also while it is still connecting (then without `open` or `error`). Every socket on `world.realtime.clear()` closes with `1000` too.
 - A client close (`close()` or `terminate()`) keeps the frames the socket had not acknowledged, like `closeConsumers()` (see [below](#closing-consumers-from-the-server-side)). This holds only for a persistent subscription, and only when no other consumer of the subscription is still open. Then the next consumer of the subscription gets them first, with the same ack ids. Otherwise they are lost.
@@ -490,7 +490,7 @@ The default `schedule` is now the real `setTimeout(callback, 0)` captured when f
 const world = createWorld({ schedule: (callback) => setTimeout(callback, 0) }) // fake timers drive delivery again
 ```
 
-A custom `schedule` counts in `status().scheduled` until it runs the callback. One that never runs it (`schedule: () => {}`, to mute delivery) keeps `idle()` from resolving until the next `reset()`, `restore()`, or `realtime.clear()`, which drop the scheduled work and its count. `settled()` and `pending()` also count a socket that is still connecting (`status().connecting`), and a reset or restore does not drop it: they stay busy until the socket connects, its client closes it, or `realtime.clear()` runs.
+A custom `schedule` counts in `status().scheduled` until it runs the callback. One that never runs it (`schedule: () => {}`, to mute delivery) keeps `idle()` from resolving until the next `reset()`, `restore()`, or `realtime.clear()`, which drop the scheduled work and its count. `settled()` and `pending()` also count a socket that is still connecting (`status().connecting`). A reset or restore drops it only when it closes the socket (its token or subscription is gone): otherwise they stay busy until the socket connects, its client closes it, or `realtime.clear()` runs.
 
 #### Changed: `settled()` waits only for live work
 
