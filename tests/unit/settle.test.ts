@@ -51,15 +51,17 @@ afterEach(() => {
 })
 
 describe('realtime.status()', () => {
-  it('reports stored frames as backlog or unclaimed, and pending() leaves both out', async () => {
+  it('reports stored frames as backlog, never as unclaimed, and pending() leaves them out', async () => {
     const world = createWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'nobody' })
+    // no consumer has connected yet: nothing is kept
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'dropped' })
+    expect(world.realtime.status()).toMatchObject({ backlog: 0, unclaimed: 0, unacknowledged: 0 })
+    const { socket } = await consume(world, 'nobody')
+    socket.close()
     await call(world, 'POST', '/inventory/managedObjects', { name: 'held' })
-    expect(world.realtime.status()).toMatchObject({ backlog: 0, unclaimed: 1, unacknowledged: 0 })
-    expect(world.realtime.pending()).toBe(0)
-    // a token claims it: now it is backlog, still not counted
-    await call(world, 'POST', '/notification2/token', { subscription: 'nobody', subscriber: 's' })
-    expect(world.realtime.status()).toMatchObject({ backlog: 1, unclaimed: 0 })
+    expect(world.realtime.status()).toMatchObject({ backlog: 1, unclaimed: 0, unacknowledged: 0 })
+    await world.realtime.settled({ timeout: 1000 })
     expect(world.realtime.pending()).toBe(0)
   })
 
@@ -149,8 +151,9 @@ describe('realtime.settled()', () => {
   it('does not wait for a token whose consumer is gone (issue #31)', async () => {
     const world = createWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'stopped' })
-    // the token of a service that stopped: no socket will ever connect with it
-    await call(world, 'POST', '/notification2/token', { subscription: 'stopped', subscriber: 's' })
+    // a service that stopped: no socket will ever connect with its token again
+    const { socket } = await consume(world, 'stopped')
+    socket.close()
     await call(world, 'POST', '/inventory/managedObjects', { name: 'for nobody' })
     const { status, waitedMs } = await world.realtime.settled({ timeout: 1000 })
     expect(waitedMs).toBeLessThan(500)
@@ -159,12 +162,12 @@ describe('realtime.settled()', () => {
     expect(world.realtime.pending()).toBe(0)
   })
 
-  it('does not wait for unclaimed frames', async () => {
+  it('keeps nothing for a subscription no consumer has connected to', async () => {
     const world = createWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'nobody' })
-    await call(world, 'POST', '/inventory/managedObjects', { name: 'held' })
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'dropped' })
     const { status } = await world.realtime.settled({ timeout: 1000 })
-    expect(status).toMatchObject({ unclaimed: 1, backlog: 0 })
+    expect(status).toMatchObject({ unclaimed: 0, backlog: 0 })
   })
 
   it('stays busy until an open consumer acknowledges', async () => {
@@ -187,9 +190,12 @@ describe('realtime.settled()', () => {
   it('delivers the backlog to a consumer that connects later, polled with consumers()', async () => {
     const world = createWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'late' })
+    // connected once, so the subscription keeps a backlog
+    const first = await consume(world, 'late')
+    first.socket.close()
     await call(world, 'POST', '/inventory/managedObjects', { name: 'before the consumer' })
     await world.realtime.settled({ timeout: 1000 })
-    expect(world.realtime.status().unclaimed).toBe(1)
+    expect(world.realtime.status().backlog).toBe(1)
     // the client connects only after a backoff, longer than the quiet window
     let received: string[] = []
     setTimeout(() => {

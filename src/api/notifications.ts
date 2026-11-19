@@ -260,6 +260,9 @@ export function notifications(call: C8yRequest, segments: string[], data: Tenant
     for (const socket of consumers) {
       socket.close()
     }
+    // the platform destroys the consumer's backlog: nothing is kept until a
+    // consumer connects again
+    data.world.realtime.unsubscribed(stored.tenant, subscription)
     return Response.json({ result: 'DONE' })
   }
 

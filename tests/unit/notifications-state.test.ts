@@ -433,7 +433,7 @@ describe('client close()', () => {
     expect((await call(world, 'POST', `/notification2/unsubscribe?token=${a.token}`)).status).toBe(200)
     run()
     expect(a.closes).toEqual([[1000, '']])
-    expect(world.realtime.status().backlog + world.realtime.status().unclaimed).toBe(0)
+    expect(world.realtime.status().backlog).toBe(0)
     const again = await open(world, run, 'sub', 'a')
     expect(again.received).toEqual([])
   })
@@ -450,7 +450,7 @@ describe('client close()', () => {
     expect(world.realtime.status().backlog).toBe(1)
     world.reset({ to: start })
     expect(await names(world)).toEqual(['sub'])
-    expect(world.realtime.status().backlog + world.realtime.status().unclaimed).toBe(0)
+    expect(world.realtime.status().backlog).toBe(0)
     const again = await open(world, run, 'sub', 'a')
     expect(again.received).toEqual([])
   })
@@ -524,5 +524,131 @@ describe('client close()', () => {
     const again = await connect()
     expect(again.received.map(name)).toEqual(['A', 'B'])
     expect(ackId(again.received[0]!)).toBe(ackId(a.received[0]!))
+  })
+})
+
+describe('backlog before a first connect', () => {
+  const name = (frame: string) => JSON.parse(frame.split('\n\n')[1]!).name
+
+  async function persistent() {
+    const { world, run } = manualWorld()
+    const id = (await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })).body.id as string
+    return { world, run, id }
+  }
+
+  it('drops a write before any consumer connected', async () => {
+    const { world, run } = await persistent()
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'early' })
+    expect(world.realtime.status()).toMatchObject({ backlog: 0, unclaimed: 0 })
+    const a = await open(world, run, 'sub', 'a')
+    run()
+    expect(a.received).toEqual([])
+  })
+
+  it('keeps a write after a consumer connected and closed, for a new token of the same subscriber', async () => {
+    const { world, run } = await persistent()
+    const a = await open(world, run, 'sub', 'a')
+    a.socket.close()
+    run()
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'kept' })
+    expect(world.realtime.status()).toMatchObject({ backlog: 1, unclaimed: 0 })
+    const again = await open(world, run, 'sub', 'a')
+    expect(again.token).not.toBe(a.token)
+    expect(again.received.map(name)).toEqual(['kept'])
+  })
+
+  it('keeps nothing after an unsubscribe until a consumer connects again', async () => {
+    const { world, run } = await persistent()
+    const a = await open(world, run, 'sub', 'a')
+    expect((await call(world, 'POST', `/notification2/unsubscribe?token=${a.token}`)).status).toBe(200)
+    run()
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'dropped' })
+    expect(world.realtime.status().backlog).toBe(0)
+    const b = await open(world, run, 'sub', 'a')
+    expect(b.received).toEqual([])
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'live' })
+    run()
+    expect(b.received.map(name)).toEqual(['live'])
+    b.socket.send(ackId(b.received[0]!))
+    b.socket.close()
+    run()
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'kept' })
+    const c = await open(world, run, 'sub', 'a')
+    expect(c.received.map(name)).toEqual(['kept'])
+  })
+
+  it('is forgotten by reset(), restore(), and a fork', async () => {
+    const { world, run } = await persistent()
+    const start = world.checkpoint()
+    const snapshot = world.snapshot()
+    const connectOnce = async () => {
+      const a = await open(world, run, 'sub', 'a')
+      a.socket.close()
+      run()
+    }
+    await connectOnce()
+    world.reset({ to: start })
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'after reset' })
+    expect(world.realtime.status().backlog).toBe(0)
+
+    await connectOnce()
+    world.restore(snapshot)
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'after restore' })
+    expect(world.realtime.status().backlog).toBe(0)
+
+    await connectOnce()
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'on the base' })
+    expect(world.realtime.status().backlog).toBe(1)
+    const fork = world.fork()
+    await call(fork, 'POST', '/inventory/managedObjects', { name: 'on the fork' })
+    expect(fork.realtime.status().backlog).toBe(0)
+  })
+
+  it('counts a consumer kept open across reset({ to, consumers: \'keep\' }) as connected', async () => {
+    const { world, run } = await persistent()
+    const start = world.checkpoint()
+    const a = await open(world, run, 'sub', 'a')
+    world.reset({ to: start, consumers: 'keep' })
+    expect(a.socket.readyState).toBe(1)
+    a.socket.close()
+    run()
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'kept' })
+    expect(world.realtime.status().backlog).toBe(1)
+  })
+
+  it('keeps the backlog after an unsubscribe while another consumer is open', async () => {
+    const { world, run } = await persistent()
+    const a = await open(world, run, 'sub', 'a')
+    const b = await open(world, run, 'sub', 'b')
+    expect((await call(world, 'POST', `/notification2/unsubscribe?token=${a.token}`)).status).toBe(200)
+    run()
+    b.socket.close()
+    run()
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'kept' })
+    expect(world.realtime.status().backlog).toBe(1)
+    const again = await open(world, run, 'sub', 'b')
+    expect(again.received.map(name)).toEqual(['kept'])
+  })
+
+  it('counts a socket that stays open across restore() as connected', async () => {
+    const { world, run } = await persistent()
+    const a = await open(world, run, 'sub', 'a')
+    // the snapshot still has the socket's token
+    world.restore(world.snapshot())
+    expect(a.socket.readyState).toBe(1)
+    a.socket.close()
+    run()
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'kept' })
+    expect(world.realtime.status().backlog).toBe(1)
+  })
+
+  it('keeps the backlog when the subscription is deleted', async () => {
+    const { world, run, id } = await persistent()
+    const a = await open(world, run, 'sub', 'a')
+    a.socket.close()
+    run()
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'kept' })
+    expect((await call(world, 'DELETE', `/notification2/subscriptions/${id}`)).status).toBe(204)
+    expect(world.realtime.status().backlog).toBe(1)
   })
 })
