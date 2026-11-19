@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest'
 import { createClock, createWorld } from '../../src'
 import type { World } from '../../src'
+import { createFakeWebSocket } from '../../src/realtime-entry'
 
 /**
  * A binary upload body (`POST /inventory/binaries`).
@@ -171,8 +172,15 @@ describe('forks have their own state', () => {
   })
 
   it('mute async operations until they settle', async () => {
-    const world = createWorld({ schedule: () => {} })
+    const queue: Array<() => void> = []
+    const world = createWorld({ schedule: (callback) => queue.push(callback) })
     await world.fetch(new Request(`${world.baseUrl}/notification2/subscriptions`, { method: 'POST', headers: json, body: JSON.stringify({ context: 'tenant', subscription: 'all' }) }))
+    // a consumer connects once and closes, so the subscription keeps a backlog
+    const { token } = await (await world.fetch(new Request(`${world.baseUrl}/notification2/token`, { method: 'POST', headers: json, body: JSON.stringify({ subscription: 'all', subscriber: 's' }) }))).json() as { token: string }
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
+    queue.shift()!()
+    socket.close()
     await world.muted(async () => {
       await Promise.resolve()
       await world.fetch(new Request(`${world.baseUrl}/inventory/managedObjects`, { method: 'POST', headers: json, body: JSON.stringify({ name: 'quiet' }) }))

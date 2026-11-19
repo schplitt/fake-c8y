@@ -8,6 +8,7 @@
 import { describe, expect, it } from 'vitest'
 import { createWorld, diffSnapshots } from '../../src'
 import type { C8yMeasurementGeneratorInput, C8yWave, GeneratorSnapshot, World, WorldSnapshot } from '../../src'
+import { createFakeWebSocket } from '../../src/realtime-entry'
 
 const T0 = Date.parse('2026-05-10T12:34:00.000Z')
 const HOUR = 3_600_000
@@ -515,6 +516,13 @@ describe('generated measurements', () => {
       for (const body of [{ context: 'tenant', subscription: 'all', subscriptionFilter: { apis: ['measurements'] } }, { context: 'mo', source: { id: pair.devices[2]! }, subscription: 'one' }]) {
         const response = await world.fetch(new Request(`${world.baseUrl}/notification2/subscriptions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }))
         expect(response.status).toBe(201)
+        // a consumer connects once and closes, so the subscription keeps a backlog
+        const token = (await (await world.fetch(new Request(`${world.baseUrl}/notification2/token`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ subscription: body.subscription, subscriber: 's' }) }))).json() as { token: string }).token
+        const socket = new (createFakeWebSocket(world.realtime))(`wss://example.test/notification2/consumer/?token=${token}`)
+        await new Promise<void>((resolve) => {
+          socket.on('open', () => resolve())
+        })
+        socket.close()
       }
     }
     await randomWrites(pair, 30)

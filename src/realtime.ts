@@ -196,15 +196,14 @@ export interface RealtimeStatus {
    */
   unacknowledged: number
   /**
-   * Frames held for a persistent subscription that has a token but no open
-   * consumer (it is connecting, reconnecting, or gone). Informational:
-   * `settled()` does not wait for them.
+   * Frames held for a persistent subscription without an open consumer. They
+   * are kept only once a consumer of the subscription has connected, like on
+   * the platform. Informational: `settled()` does not wait for them.
    */
   backlog: number
   /**
-   * Frames held for a persistent subscription without any token: the
-   * platform keeps them until a consumer connects, which may never happen.
-   * Informational: `settled()` does not wait for them.
+   * Always 0.
+   * @deprecated Nothing is kept before a consumer has connected, so no frame is held without a consumer.
    */
   unclaimed: number
 }
@@ -246,7 +245,7 @@ export interface RealtimeSettledResult {
    */
   waitedMs: number
   /**
-   * The status when it settled. `backlog` and `unclaimed` can be above 0:
+   * The status when it settled. `backlog` can be above 0:
    * `settled()` does not wait for stored frames.
    */
   status: RealtimeStatus
@@ -267,6 +266,11 @@ export class Realtime {
    * frames waiting for a consumer of a subscription name (persistent subscriptions)
    */
   backlog: Map<string, NotificationFrame[]> = new Map()
+  /**
+   * subscriptions (by `key()`) a consumer has connected to: only they keep a
+   * backlog, like on the platform
+   */
+  private connected: Set<string> = new Set()
   /**
    * delivered but not yet acknowledged frames, per socket
    */
@@ -350,8 +354,10 @@ export class Realtime {
     this.unacked.set(socket, new Set())
     this.outstanding.set(socket, new Map())
     socket.emit('open')
-    const waiting = this.backlog.get(this.key(token.tenant, token.subscription)) ?? []
-    this.backlog.delete(this.key(token.tenant, token.subscription))
+    const key = this.key(token.tenant, token.subscription)
+    this.connected.add(key)
+    const waiting = this.backlog.get(key) ?? []
+    this.backlog.delete(key)
     for (const frame of waiting) {
       this.deliver(socket, frame)
     }
@@ -380,6 +386,23 @@ export class Realtime {
         return
       }
     }
+  }
+
+  /**
+   * After an unsubscribe closed its consumer's sockets: drops the
+   * subscription's backlog and forgets that a consumer connected, like the
+   * platform. Does nothing while another consumer of the subscription is
+   * still open, so that consumer keeps its backlog once it closes.
+   * @param tenant - The subscription's tenant
+   * @param subscription - The subscription name
+   */
+  unsubscribed(tenant: string, subscription: string): void {
+    if ([...this.sockets].some((socket) => socket.token?.tenant === tenant && socket.token.subscription === subscription)) {
+      return
+    }
+    const key = this.key(tenant, subscription)
+    this.backlog.delete(key)
+    this.connected.delete(key)
   }
 
   acknowledge(socket: NotificationSocket, ackId: string): void {
@@ -452,8 +475,8 @@ export class Realtime {
           this.deliver(socket, frame)
         }
       } else {
-        if (!subscription.nonPersistent) {
-          const key = this.key(tenant, name)
+        const key = this.key(tenant, name)
+        if (!subscription.nonPersistent && this.connected.has(key)) {
           this.backlog.set(key, [...(this.backlog.get(key) ?? []), frame])
         }
       }
@@ -463,25 +486,19 @@ export class Realtime {
   /**
    * What is still on its way, split up. `settled()` and `pending()` count
    * only the live work (`inflight`, `scheduled`, `connecting`,
-   * `unacknowledged`); `backlog` and `unclaimed` are frames stored for
-   * subscriptions without an open consumer, which may never be delivered.
+   * `unacknowledged`); `backlog` is frames stored for subscriptions without
+   * an open consumer, which may never be delivered. `unclaimed` is always 0.
    */
   status(): RealtimeStatus {
     let unacknowledged = 0
     for (const acks of this.unacked.values()) {
       unacknowledged += acks.size
     }
-    const claimed = new Set([...this.storedTokens()].map(([, token]) => this.key(token.tenant, token.subscription)))
     let backlog = 0
-    let unclaimed = 0
-    for (const [key, frames] of this.backlog) {
-      if (claimed.has(key)) {
-        backlog += frames.length
-      } else {
-        unclaimed += frames.length
-      }
+    for (const frames of this.backlog.values()) {
+      backlog += frames.length
     }
-    return { inflight: this.inflight(), scheduled: this.tasks, connecting: this.connecting.size, unacknowledged, backlog, unclaimed }
+    return { inflight: this.inflight(), scheduled: this.tasks, connecting: this.connecting.size, unacknowledged, backlog, unclaimed: 0 }
   }
 
   /**
@@ -489,8 +506,8 @@ export class Realtime {
    * consumers' own writes: no request in flight, no callback scheduled, no
    * socket connecting, and nothing delivered and unacknowledged, for
    * `quietMs` on the real timers. Frames stored for a subscription without
-   * an open consumer (`status().backlog` and `unclaimed`) are not waited for:
-   * like the platform, they stay stored until a consumer connects.
+   * an open consumer (`status().backlog`) are not waited for: like the
+   * platform, they stay stored until a consumer connects.
    * @param options - `timeout` (default 5000 ms), `quietMs` (default 20 ms)
    * @returns How long it waited and the status it settled with
    * @throws {SettleTimeoutError} when it is not settled within the timeout
@@ -514,8 +531,7 @@ export class Realtime {
   /**
    * The live work `settled()` waits for: requests in flight, scheduled
    * callbacks, sockets connecting, and frames delivered and not yet
-   * acknowledged. Stored frames (`status().backlog` and `unclaimed`) are not
-   * counted.
+   * acknowledged. Stored frames (`status().backlog`) are not counted.
    */
   pending(): number {
     let count = this.inflight() + this.tasks + this.connecting.size
@@ -551,12 +567,13 @@ export class Realtime {
 
   /**
    * Drops undelivered notifications, also the ones already scheduled (data
-   * reset between tests).
+   * reset between tests), and forgets which subscriptions had a consumer.
    */
   dropPending(): void {
     this.generation++
     this.tasks = 0
     this.backlog.clear()
+    this.connected.clear()
     for (const acks of this.unacked.values()) {
       acks.clear()
     }
@@ -568,7 +585,7 @@ export class Realtime {
   /**
    * Drops undelivered notifications and closes the sockets whose token or
    * subscription is no longer stored (after the data was reset or restored),
-   * with `CONSUMER_REMOVED`.
+   * with `CONSUMER_REMOVED`. The sockets that stay open count as connected.
    */
   resync(): void {
     this.dropPending()
@@ -578,6 +595,8 @@ export class Realtime {
       const token = tokens.get(tokenOf(socket))
       if (token === undefined || !subscriptions.has(this.key(token.tenant, token.subscription))) {
         this.closeFromServer(socket, CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason)
+      } else {
+        this.connected.add(this.key(token.tenant, token.subscription))
       }
     }
   }

@@ -354,6 +354,8 @@ const WebSocket = createFakeWebSocket(world.realtime, { flavor: 'ws' })
 
 Sockets belong to one world, so use `createFakeWebSocket(fork.realtime)` for a fork. Subscriptions and tokens are tenant data: a fork inherits the base's, `reset()` drops the ones created since (`reset({ to, consumers: 'keep' })` keeps open consumers, see [Checkpoints](trials.md#checkpoints)), `restore()` brings back the snapshot's, and `diff()` lists subscriptions under `notificationSubscriptions`.
 
+A persistent subscription keeps frames for later only once a consumer of it has connected, like on the platform. Frames published before the first connect are dropped. `reset()` and `restore()` forget that a consumer connected, and a fork starts without it. Sockets that stay open across a reset or restore still count as connected.
+
 ### Close codes
 
 Only `reset()` and `restore()` use a distinct close code: when one of them removes a consumer's token or its subscription, the consumer's open socket closes with code `4410` and reason `notification token removed`, exported as `CONSUMER_REMOVED` (from `fake-c8y` and `fake-c8y/realtime`). The consumer no longer exists, so a client should stop instead of reconnecting. The platform documents no close code for this case: `4410` is fake-c8y's own, in the application range (4000-4999), modeled on HTTP 410 Gone.
@@ -362,8 +364,8 @@ Only `reset()` and `restore()` use a distinct close code: when one of them remov
 - A connect with an unknown token emits `error` and closes with `1008` (`invalid token`).
 - A socket the client closes itself (`close()` or `terminate()`) closes with `1000`, also while it is still connecting (then without `open` or `error`). Every socket on `world.realtime.clear()` closes with `1000` too.
 - A client close (`close()` or `terminate()`) keeps the frames the socket had not acknowledged, like `closeConsumers()` (see [below](#closing-consumers-from-the-server-side)). This holds only for a persistent subscription, and only when no other consumer of the subscription is still open. Then the next consumer of the subscription gets them first, with the same ack ids. Otherwise they are lost.
-- `POST /notification2/unsubscribe` closes the consumer's socket with `1000` and keeps none of its unacknowledged frames.
-- Removing a subscription through the API (`DELETE /notification2/subscriptions/{id}`, `DELETE /notification2/subscriptions?source=…`, or deleting the managed object a subscription is for) closes no socket: the consumer stays open and receives nothing more. What the platform does there is not verified.
+- `POST /notification2/unsubscribe` closes the consumer's socket with `1000` and keeps none of its unacknowledged frames. It also drops the subscription's backlog, and nothing is kept until a consumer of the subscription connects again.
+- Removing a subscription through the API (`DELETE /notification2/subscriptions/{id}`, `DELETE /notification2/subscriptions?source=…`, or deleting the managed object a subscription is for) closes no socket: the consumer stays open and receives nothing more. The backlog stays. What the platform does there is not verified.
 
 ### Closing consumers from the server side
 
@@ -397,9 +399,9 @@ const { status } = await world.realtime.settled()
 expect(world.db.alarms.find({ source: pump })).toHaveLength(1)
 ```
 
-`settled()` does not wait for frames stored for a subscription that has no open consumer (`status().backlog` and `unclaimed`, see [below](#what-is-still-on-its-way)). The platform does not wait for them either: it keeps them until a consumer connects, which may never happen (a stopped service leaves its token behind). When a consumer connects, it gets those frames at once, and `settled()` waits for them from then on.
+`settled()` does not wait for frames stored for a subscription that has no open consumer (`status().backlog`, see [below](#what-is-still-on-its-way)). They are kept for a subscription a consumer has connected to before, until a consumer connects again, which may never happen (a stopped service leaves its token behind). When a consumer connects, it gets those frames at once, and `settled()` waits for them from then on.
 
-`settled()` resolves with `{ waitedMs, status }`, the `realtime.status()` it settled with (`backlog` and `unclaimed` can be above 0). A timeout rejects with `SettleTimeoutError` (exported from `fake-c8y` and `fake-c8y/realtime`). Its message lists the counts that were still above 0 at the last check, for example `fake-c8y: realtime.settled() timed out after 5000 ms (unacknowledged 1)`, and its `status` has the same counts:
+`settled()` resolves with `{ waitedMs, status }`, the `realtime.status()` it settled with (`backlog` can be above 0). A timeout rejects with `SettleTimeoutError` (exported from `fake-c8y` and `fake-c8y/realtime`). Its message lists the counts that were still above 0 at the last check, for example `fake-c8y: realtime.settled() timed out after 5000 ms (unacknowledged 1)`, and its `status` has the same counts:
 
 - `settled()`: `inflight`, `scheduled`, `connecting`, and `unacknowledged`.
 - `idle()`: `inflight` and `scheduled`.
@@ -486,6 +488,10 @@ A custom `schedule` counts in `status().scheduled` until it runs the callback. O
 - Drop `unclaimed: 'wait'` or `unclaimed: 'ignore'` from `settled()`: it now waits for neither unclaimed frames nor the backlog.
 - A test that relied on `settled()` waiting for a consumer to connect polls `consumers()` first.
 
+#### Changed: nothing is kept before a consumer connects
+
+A persistent subscription used to keep every frame from the moment it existed, and the first consumer to connect got them all. Now frames are kept only once a consumer of the subscription has connected, because the platform keeps nothing before a first connect. `status().unclaimed` is always 0 and deprecated. A test that writes data for a consumer must connect the consumer first, then write.
+
 ### What is still on its way
 
 `world.realtime.status()` splits up what Notification 2.0 still has on its way:
@@ -496,7 +502,7 @@ A custom `schedule` counts in `status().scheduled` until it runs the callback. O
 | `scheduled`      | Callbacks given to `schedule` since the last reset that have not run: frame deliveries, socket connects, and socket events (`open`, `close`, `pong`). |
 | `connecting`     | Sockets whose connect has not run yet.                                                                                                                |
 | `unacknowledged` | Frames delivered to a socket and not acknowledged.                                                                                                    |
-| `backlog`        | Frames held for a persistent subscription that has a token but no open consumer: it is connecting, reconnecting, or gone.                             |
-| `unclaimed`      | Frames held for a persistent subscription without any token. The platform keeps them until a consumer connects, which may never happen.               |
+| `backlog`        | Frames held for a persistent subscription without an open consumer, kept only once a consumer of it has connected.                                    |
+| `unclaimed`      | Always 0 (deprecated): nothing is kept before a consumer connects.                                                                                    |
 
-`world.realtime.pending()` is the live work `settled()` waits for: `inflight` + `scheduled` + `connecting` + `unacknowledged`. `backlog` and `unclaimed` are informational: neither `settled()` nor `pending()` waits for or counts them. Read `pending()` as zero or not zero, not as a number of tasks: it is a sum of the four counts, and a connecting socket counts twice (its connect callback in `scheduled`, the socket in `connecting`).
+`world.realtime.pending()` is the live work `settled()` waits for: `inflight` + `scheduled` + `connecting` + `unacknowledged`. `backlog` is informational: neither `settled()` nor `pending()` waits for or counts it. Read `pending()` as zero or not zero, not as a number of tasks: it is a sum of the four counts, and a connecting socket counts twice (its connect callback in `scheduled`, the socket in `connecting`).
