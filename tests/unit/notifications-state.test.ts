@@ -374,3 +374,155 @@ describe('closeConsumers()', () => {
     expect(onBase.closes).toEqual([])
   })
 })
+
+describe('client close()', () => {
+  async function persistent() {
+    const { world, run } = manualWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    return { world, run }
+  }
+
+  const name = (frame: string) => JSON.parse(frame.split('\n\n')[1]!).name
+
+  it('keeps the unacknowledged frames for the next consumer, before the ones published meanwhile, with their ack ids', async () => {
+    const { world, run } = await persistent()
+    const a = await open(world, run, 'sub', 'a')
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'A' })
+    run()
+    expect(a.received).toHaveLength(1)
+    a.socket.close()
+    run()
+    expect(a.closes).toEqual([[1000, '']])
+    for (const next of ['B', 'C', 'D']) {
+      await call(world, 'POST', '/inventory/managedObjects', { name: next })
+    }
+    const again = await open(world, run, 'sub', 'a')
+    expect(again.received.map(name)).toEqual(['A', 'B', 'C', 'D'])
+    expect(ackId(again.received[0]!)).toBe(ackId(a.received[0]!))
+  })
+
+  it('does the same on terminate()', async () => {
+    const { world, run } = await persistent()
+    const a = await open(world, run, 'sub', 'a')
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'A' })
+    run()
+    a.socket.terminate()
+    run()
+    const again = await open(world, run, 'sub', 'a')
+    expect(again.received).toEqual(a.received)
+  })
+
+  it('does not redeliver acknowledged frames', async () => {
+    const { world, run } = await persistent()
+    const a = await open(world, run, 'sub', 'a')
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'acknowledged' })
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'delivered' })
+    run()
+    a.socket.send(ackId(a.received[0]!))
+    a.socket.close()
+    run()
+    const again = await open(world, run, 'sub', 'a')
+    expect(again.received.map(name)).toEqual(['delivered'])
+  })
+
+  it('keeps nothing after an unsubscribe', async () => {
+    const { world, run } = await persistent()
+    const a = await open(world, run, 'sub', 'a')
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'A' })
+    run()
+    expect((await call(world, 'POST', `/notification2/unsubscribe?token=${a.token}`)).status).toBe(200)
+    run()
+    expect(a.closes).toEqual([[1000, '']])
+    expect(world.realtime.status().backlog + world.realtime.status().unclaimed).toBe(0)
+    const again = await open(world, run, 'sub', 'a')
+    expect(again.received).toEqual([])
+  })
+
+  it('keeps nothing across a reset', async () => {
+    const { world, run } = manualWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const start = world.checkpoint()
+    const a = await open(world, run, 'sub', 'a')
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'A' })
+    run()
+    a.socket.close()
+    run()
+    expect(world.realtime.status().backlog).toBe(1)
+    world.reset({ to: start })
+    expect(await names(world)).toEqual(['sub'])
+    expect(world.realtime.status().backlog + world.realtime.status().unclaimed).toBe(0)
+    const again = await open(world, run, 'sub', 'a')
+    expect(again.received).toEqual([])
+  })
+
+  it('drops the unacknowledged frames of a non-persistent subscription', async () => {
+    const { world, run } = manualWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'live', nonPersistent: true })
+    const a = await open(world, run, 'live', 'a')
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'A' })
+    run()
+    a.socket.close()
+    run()
+    const again = await open(world, run, 'live', 'a')
+    expect(again.received).toEqual([])
+  })
+
+  it('emits one close 1000 for a socket that is still connecting, and no error or open', async () => {
+    const { world, run } = await persistent()
+    const token = (await call(world, 'POST', '/notification2/token', { subscription: 'sub', subscriber: 'a' })).body.token
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
+    const events: unknown[][] = []
+    socket.on('close', (...args: unknown[]) => events.push(['close', ...args]))
+    socket.on('error', () => events.push(['error']))
+    socket.on('open', () => events.push(['open']))
+    socket.close()
+    expect(world.realtime.status().connecting).toBe(0)
+    run()
+    expect(events).toEqual([['close', 1000, '']])
+    expect(socket.readyState).toBe(3)
+    expect(world.realtime.sockets.size).toBe(0)
+    expect(world.realtime.pending()).toBe(0)
+  })
+
+  it('emits one close 1000 for a connecting socket on the real schedule, and settled() resolves', async () => {
+    const world = createWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const token = (await call(world, 'POST', '/notification2/token', { subscription: 'sub', subscriber: 'a' })).body.token
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
+    const events: unknown[][] = []
+    socket.on('close', (...args: unknown[]) => events.push(['close', ...args]))
+    socket.on('error', () => events.push(['error']))
+    socket.on('open', () => events.push(['open']))
+    socket.close()
+    await world.realtime.settled({ timeout: 1000 })
+    expect(events).toEqual([['close', 1000, '']])
+  })
+
+  it('redelivers with the ws flavor too', async () => {
+    const { world, run } = await persistent()
+    const WebSocket = createFakeWebSocket(world.realtime, { flavor: 'ws' })
+    const connect = async () => {
+      const token = (await call(world, 'POST', '/notification2/token', { subscription: 'sub', subscriber: 'a' })).body.token
+      const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
+      const received: string[] = []
+      socket.on('message', (data: Uint8Array, isBinary: boolean) => {
+        expect(isBinary).toBe(false)
+        expect(typeof data).not.toBe('string')
+        received.push(new TextDecoder().decode(data))
+      })
+      run()
+      return { socket, received }
+    }
+    const a = await connect()
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'A' })
+    run()
+    a.socket.close()
+    run()
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'B' })
+    const again = await connect()
+    expect(again.received.map(name)).toEqual(['A', 'B'])
+    expect(ackId(again.received[0]!)).toBe(ackId(a.received[0]!))
+  })
+})

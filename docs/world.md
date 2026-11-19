@@ -360,8 +360,9 @@ Only `reset()` and `restore()` use a distinct close code: when one of them remov
 
 - A socket still connecting when a reset or restore removes its token is not closed by it: its connect then fails like any connect with an unknown token.
 - A connect with an unknown token emits `error` and closes with `1008` (`invalid token`).
-- A socket the client closes itself closes with `1000`, and so does every socket on `world.realtime.clear()`.
-- `POST /notification2/unsubscribe` closes the consumer's socket with `1000`.
+- A socket the client closes itself (`close()` or `terminate()`) closes with `1000`, also while it is still connecting (then without `open` or `error`). Every socket on `world.realtime.clear()` closes with `1000` too.
+- A client close (`close()` or `terminate()`) keeps the frames the socket had not acknowledged, like `closeConsumers()` (see [below](#closing-consumers-from-the-server-side)). This holds only for a persistent subscription, and only when no other consumer of the subscription is still open. Then the next consumer of the subscription gets them first, with the same ack ids. Otherwise they are lost.
+- `POST /notification2/unsubscribe` closes the consumer's socket with `1000` and keeps none of its unacknowledged frames.
 - Removing a subscription through the API (`DELETE /notification2/subscriptions/{id}`, `DELETE /notification2/subscriptions?source=…`, or deleting the managed object a subscription is for) closes no socket: the consumer stays open and receives nothing more. What the platform does there is not verified.
 
 ### Closing consumers from the server side
