@@ -5,7 +5,7 @@
  * their way are dropped by a reset.
  */
 import { describe, expect, it } from 'vitest'
-import { CONSUMER_REMOVED, createWorld } from '../../src'
+import { CONSUMER_REMOVED, createClock, createWorld } from '../../src'
 import type { World } from '../../src'
 import { createFakeWebSocket } from '../../src/realtime-entry'
 
@@ -650,5 +650,148 @@ describe('backlog before a first connect', () => {
     await call(world, 'POST', '/inventory/managedObjects', { name: 'kept' })
     expect((await call(world, 'DELETE', `/notification2/subscriptions/${id}`)).status).toBe(204)
     expect(world.realtime.status().backlog).toBe(1)
+  })
+})
+
+describe('token expiry', () => {
+  const START = Date.parse('2026-01-01T00:00:00.000Z')
+  const MINUTE = 60_000
+  const name = (frame: string) => JSON.parse(frame.split('\n\n')[1]!).name
+
+  async function clockWorld() {
+    const queue: Array<() => void> = []
+    const world = createWorld({ clock: createClock({ start: START, realtime: false }), schedule: (callback) => queue.push(callback) })
+    const run = () => {
+      while (queue.length > 0) {
+        queue.shift()!()
+      }
+    }
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    return { world, run }
+  }
+
+  async function token(world: World, body: Record<string, unknown> = {}) {
+    const response = await call(world, 'POST', '/notification2/token', { subscription: 'sub', subscriber: 'a', ...body })
+    expect(response.status).toBe(200)
+    expect(Object.keys(response.body)).toEqual(['token'])
+    return response.body.token as string
+  }
+
+  function connect(world: World, run: () => void, value: string) {
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${value}`)
+    const events: unknown[][] = []
+    const received: string[] = []
+    socket.on('open', () => events.push(['open']))
+    socket.on('error', () => events.push(['error']))
+    socket.on('close', (...args: unknown[]) => events.push(['close', ...args]))
+    socket.on('message', (text: string) => received.push(text))
+    run()
+    return { socket, events, received }
+  }
+
+  it('refuses an expired token like an unknown one', async () => {
+    const { world, run } = await clockWorld()
+    const value = await token(world, { expiresInMinutes: 5 })
+    expect(world.realtime.tokens.get(value)!.expires).toBe(START + 5 * MINUTE)
+    world.advance(6 * MINUTE)
+    expect(connect(world, run, value).events).toEqual([['error'], ['close', 1008, 'invalid token']])
+  })
+
+  it('keeps a socket open past expiry, and it still receives', async () => {
+    const { world, run } = await clockWorld()
+    const consumer = connect(world, run, await token(world, { expiresInMinutes: 5 }))
+    expect(consumer.events).toEqual([['open']])
+    world.advance(6 * MINUTE)
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'late' })
+    run()
+    expect(consumer.socket.readyState).toBe(1)
+    expect(consumer.received.map(name)).toEqual(['late'])
+  })
+
+  it('lets a new token of the same consumer connect after expiry, with the backlog', async () => {
+    const { world, run } = await clockWorld()
+    const value = await token(world, { expiresInMinutes: 5 })
+    const first = connect(world, run, value)
+    first.socket.close()
+    run()
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'away' })
+    world.advance(6 * MINUTE)
+    expect(connect(world, run, value).events).toEqual([['error'], ['close', 1008, 'invalid token']])
+    const again = connect(world, run, await token(world))
+    expect(again.events).toEqual([['open']])
+    expect(again.received.map(name)).toEqual(['away'])
+  })
+
+  it('expires after 1440 minutes without expiresInMinutes', async () => {
+    const { world, run } = await clockWorld()
+    const value = await token(world)
+    world.advance(1439 * MINUTE)
+    const before = connect(world, run, value)
+    expect(before.events).toEqual([['open']])
+    before.socket.close()
+    run()
+    world.advance(MINUTE)
+    expect(connect(world, run, value).events).toEqual([['error'], ['close', 1008, 'invalid token']])
+  })
+
+  it('follows the now option of the world', async () => {
+    let now = START
+    const queue: Array<() => void> = []
+    const world = createWorld({ now: () => now, schedule: (callback) => queue.push(callback) })
+    const run = () => queue.splice(0).forEach((callback) => callback())
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const value = await token(world, { expiresInMinutes: 5 })
+    expect(world.realtime.tokens.get(value)!.expires).toBe(START + 5 * MINUTE)
+    now += 5 * MINUTE
+    expect(connect(world, run, value).events).toEqual([['error'], ['close', 1008, 'invalid token']])
+  })
+
+  it('uses the clock of a fork', async () => {
+    const { world, run } = await clockWorld()
+    const value = await token(world, { expiresInMinutes: 5 })
+    const late = world.fork({ clock: createClock({ start: START + 10 * MINUTE, realtime: false }) })
+    expect(connect(late, run, value).events).toEqual([['error'], ['close', 1008, 'invalid token']])
+    const early = world.fork({ clock: createClock({ start: START, realtime: false }) })
+    expect(connect(early, run, value).events).toEqual([['open']])
+  })
+
+  it('keeps expires in a snapshot; a token without it never expires', async () => {
+    const { world, run } = await clockWorld()
+    const value = await token(world, { expiresInMinutes: 5 })
+    const snapshot = world.snapshot()
+    const tokensOf = (state: typeof snapshot) => state.tenants.find((item) => item.tenant === world.tenant)!
+    expect(tokensOf(snapshot).notificationTokens).toEqual([[value, { tenant: world.tenant, subscription: 'sub', subscriber: 'a', expires: START + 5 * MINUTE }]])
+    world.restore(snapshot)
+    expect(world.realtime.tokens.get(value)!.expires).toBe(START + 5 * MINUTE)
+
+    const old = JSON.parse(JSON.stringify(snapshot)) as typeof snapshot
+    tokensOf(old).notificationTokens = [[value, { tenant: world.tenant, subscription: 'sub', subscriber: 'a' }]]
+    world.restore(old)
+    world.advance(10 * 1440 * MINUTE)
+    expect(connect(world, run, value).events).toEqual([['open']])
+  })
+
+  it('keeps expires and the open socket across reset({ to, consumers: \'keep\' })', async () => {
+    const { world, run } = await clockWorld()
+    const start = world.checkpoint()
+    const value = await token(world, { expiresInMinutes: 5 })
+    const consumer = connect(world, run, value)
+    world.advance(6 * MINUTE)
+    world.reset({ to: start, consumers: 'keep' })
+    run()
+    expect(consumer.socket.readyState).toBe(1)
+    expect(world.realtime.tokens.get(value)!.expires).toBe(START + 5 * MINUTE)
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'after reset' })
+    run()
+    expect(consumer.received.map(name)).toEqual(['after reset'])
+  })
+
+  it('never expires a token whose expiresInMinutes is too large, also after a JSON snapshot round trip', async () => {
+    const { world, run } = await clockWorld()
+    const value = await token(world, { expiresInMinutes: '9'.repeat(400) })
+    expect(connect(world, run, value).events).toEqual([['open']])
+    world.restore(JSON.parse(JSON.stringify(world.snapshot())))
+    expect(connect(world, run, value).events).toEqual([['open']])
   })
 })

@@ -1047,6 +1047,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     inflight: () => inflight,
     subscriptions: () => [...tenants.values()].flatMap((data) => [...data.notificationSubscriptions.values()]),
     tokens: () => [...tenants.values()].flatMap((data) => [...data.notificationTokens.entries()]),
+    now: clock,
   })
 
   const context: WorldContext = {

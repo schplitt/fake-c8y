@@ -45,7 +45,7 @@ const FIXTURES: Record<TenantCollection, () => [string, unknown]> = {
   },
   measurementTombstones: () => ['12', { kind: 'point', id: '12', document: { id: '12' } }],
   notificationSubscriptions: () => ['13', { id: '13', tenant: 't1', context: 'tenant', subscription: 'sub' }],
-  notificationTokens: () => ['token', { tenant: 't1', subscription: 'sub', subscriber: 'me' }],
+  notificationTokens: () => ['token', { tenant: 't1', subscription: 'sub', subscriber: 'me', expires: 1767225600000 }],
   serviceState: () => ['pumps/default/count', { n: 1 }],
   applications: () => ['120001', { id: '120001', name: 'fixture', key: 'fixture-key', type: 'HOSTED', availability: 'PRIVATE', owner: 't1' }],
   applicationSubscriptions: () => ['120001', { id: '120001', owner: 't1' }],

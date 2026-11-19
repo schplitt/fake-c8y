@@ -356,12 +356,24 @@ Sockets belong to one world, so use `createFakeWebSocket(fork.realtime)` for a f
 
 A persistent subscription keeps frames for later only once a consumer of it has connected, like on the platform. Frames published before the first connect are dropped. `reset()` and `restore()` forget that a consumer connected, and a fork starts without it. Sockets that stay open across a reset or restore still count as connected.
 
+A token expires `expiresInMinutes` after it was created (default 1440, one day), by the world's clock. A socket that is already open stays open and keeps receiving. A reconnect needs a new token: a connect with an expired token fails like one with an unknown token (`error`, then close `1008`). The platform's exact answer there is not verified. To move time in a test, create the world with a `clock` and call `world.advance()`, or pass a `now` function you control.
+
+```ts
+import { createClock, createWorld } from 'fake-c8y'
+
+const world = createWorld({ clock: createClock({ start: '2026-01-01T00:00:00Z', realtime: false }) })
+await world.fetch(new Request(`${world.baseUrl}/notification2/subscriptions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ context: 'tenant', subscription: 'alarms' }) }))
+const response = await world.fetch(new Request(`${world.baseUrl}/notification2/token`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ subscription: 'alarms', subscriber: 'alarmService', expiresInMinutes: 5 }) }))
+const { token } = await response.json()
+world.advance(6 * 60_000) // a new socket with this token now gets error and close 1008
+```
+
 ### Close codes
 
 Only `reset()` and `restore()` use a distinct close code: when one of them removes a consumer's token or its subscription, the consumer's open socket closes with code `4410` and reason `notification token removed`, exported as `CONSUMER_REMOVED` (from `fake-c8y` and `fake-c8y/realtime`). The consumer no longer exists, so a client should stop instead of reconnecting. The platform documents no close code for this case: `4410` is fake-c8y's own, in the application range (4000-4999), modeled on HTTP 410 Gone.
 
 - A socket still connecting when a reset or restore removes its token is not closed by it: its connect then fails like any connect with an unknown token.
-- A connect with an unknown token emits `error` and closes with `1008` (`invalid token`).
+- A connect with an unknown or expired token emits `error` and closes with `1008` (`invalid token`).
 - A socket the client closes itself (`close()` or `terminate()`) closes with `1000`, also while it is still connecting (then without `open` or `error`). Every socket on `world.realtime.clear()` closes with `1000` too.
 - A client close (`close()` or `terminate()`) keeps the frames the socket had not acknowledged, like `closeConsumers()` (see [below](#closing-consumers-from-the-server-side)). This holds only for a persistent subscription, and only when no other consumer of the subscription is still open. Then the next consumer of the subscription gets them first, with the same ack ids. Otherwise they are lost.
 - `POST /notification2/unsubscribe` closes the consumer's socket with `1000` and keeps none of its unacknowledged frames. It also drops the subscription's backlog, and nothing is kept until a consumer of the subscription connects again.

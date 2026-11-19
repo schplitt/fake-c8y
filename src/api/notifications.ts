@@ -3,6 +3,7 @@ import type { TenantData } from '../store'
 import type { NotificationSubscription } from '../realtime'
 import { tokenOf } from '../realtime'
 import { nextSequence } from '../store'
+import { parseIsoTime } from '../utils'
 import { apiError, checkQuery, paged, UnsupportedRequestError } from './http'
 import { moSelf } from './inventory'
 import { auditSubscriptionCreated, auditSubscriptionDeleted, auditSubscriptionsDeletedBySource, auditTokenCreated, auditUnsubscribed } from './audit'
@@ -237,7 +238,9 @@ export function notifications(call: C8yRequest, segments: string[], data: Tenant
     // with the subscriber: the numbers start over after a reset, so two
     // consumers of one subscription never get the same token
     const token = `fake-token-${nextSequence(data, 'notificationToken')}-${body.subscription}-${body.subscriber}`
-    data.notificationTokens.set(token, { tenant, subscription: body.subscription, subscriber: body.subscriber })
+    // the platform's default lifetime is one day (1440 minutes)
+    const expires = parseIsoTime(data.world.now()) + Number(body.expiresInMinutes ?? 1440) * 60_000
+    data.notificationTokens.set(token, { tenant, subscription: body.subscription, subscriber: body.subscriber, expires })
     auditTokenCreated(data, String(body.subscription))
     return Response.json({ token })
   }
