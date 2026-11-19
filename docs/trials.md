@@ -52,7 +52,7 @@ beforeEach(() => {
 
 `settled()` here covers the listeners the service connects while it starts, not ones it opens later (on a timer or a lazy route): poll `world.realtime.consumers()` for those first, see [When to poll first](world.md#when-to-poll-first).
 
-- `consumers: 'keep'` keeps every open (or still connecting) socket whose subscription the checkpoint has, with its token, also a token minted after the checkpoint (clients mint a new one on every reconnect). Tokens of the same subscription and subscriber that have no socket and are older than a kept token are dropped (a reconnect replaced them); newer tokens that are not connected yet stay if the checkpoint has them. Subscriptions created after the checkpoint are deleted and their sockets closed. The default, `'close'`, closes every socket whose token or subscription the checkpoint does not have. Either way the closed sockets get code `4410` (`CONSUMER_REMOVED`). Sockets still connecting are not closed by the reset: with `'close'`, one whose token is gone fails when it connects (`1008`, like any unknown token). Undelivered notifications are dropped either way.
+- `consumers: 'keep'` keeps every open (or still connecting) socket whose subscription the checkpoint has, with its token, also a token minted after the checkpoint (clients mint a new one on every reconnect). Tokens of the same subscription and subscriber that have no socket and are older than a kept token are dropped (a reconnect replaced them); newer tokens that are not connected yet stay if the checkpoint has them. Subscriptions created after the checkpoint are deleted and their sockets closed. The default, `'close'`, closes every socket whose token or subscription the checkpoint does not have. Either way the closed sockets get code `4410` (`CONSUMER_REMOVED`). This applies to sockets still connecting too: a kept one opens when it connects. Undelivered notifications are dropped either way.
 - With `to`, state fields (`tenant`, `user`, `subscriptions`, `tenantOptions`) apply on top without changing the baseline; a plain `reset()` still goes back to the baseline.
 - Services registered after the checkpoint stay registered and are installed again; the applications of services removed since are deleted.
 - The clock is not part of a checkpoint and stays where it is.
@@ -63,7 +63,7 @@ beforeEach(() => {
 
 ## Snapshots and diffs
 
-`world.snapshot()` returns the data and platform state as plain JSON, with Notification 2.0 subscriptions and tokens, but without overrides and sockets. `world.restore(snapshot)` puts it back, and closes sockets whose token or subscription the snapshot does not have with `CONSUMER_REMOVED`. You can store a snapshot as a fixture.
+`world.snapshot()` returns the data and platform state as plain JSON, with Notification 2.0 subscriptions and tokens, but without overrides and sockets. `world.restore(snapshot)` puts it back, and closes sockets (open or still connecting) whose token or subscription the snapshot does not have with `CONSUMER_REMOVED`. You can store a snapshot as a fixture.
 
 `world.diff(snapshot)` lists what changed since a snapshot, per tenant (`tenants`) and for tenant options (`options`):
 

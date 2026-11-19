@@ -15,8 +15,8 @@
  * `TenantData.notificationTokens`): they fork, reset, snapshot, and diff with
  * the rest of the data. `Realtime` keeps what is not data: the consumer
  * sockets and the frames on their way. `world.reset()` and `world.restore()`
- * drop undelivered frames and close the sockets whose token or subscription is gone (with
- * `CONSUMER_REMOVED`). `closeConsumers()` closes sockets from the server side
+ * drop undelivered frames and close the sockets (open or connecting) whose token or
+ * subscription is gone (with `CONSUMER_REMOVED`). `closeConsumers()` closes sockets from the server side
  * to test a client's reconnect path.
  * The consumer WebSocket is in `./websocket` (the `fake-c8y/realtime` entry).
  */
@@ -598,17 +598,18 @@ export class Realtime {
   /**
    * Drops undelivered notifications and closes the sockets whose token or
    * subscription is no longer stored (after the data was reset or restored),
-   * with `CONSUMER_REMOVED`. The sockets that stay open count as connected.
+   * with `CONSUMER_REMOVED`, also the ones still connecting. The sockets that
+   * stay open count as connected; a connecting one that stays counts once it opens.
    */
   resync(): void {
     this.dropPending()
     const tokens = new Map(this.storedTokens())
     const subscriptions = new Set([...this.storedSubscriptions()].map((subscription) => this.key(subscription.tenant, subscription.subscription)))
-    for (const socket of [...this.sockets]) {
+    for (const socket of [...this.sockets, ...this.connecting]) {
       const token = tokens.get(tokenOf(socket))
       if (token === undefined || !subscriptions.has(this.key(token.tenant, token.subscription))) {
         this.closeFromServer(socket, CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason)
-      } else {
+      } else if (socket.readyState === SOCKET_STATE.OPEN) {
         this.connected.add(this.key(token.tenant, token.subscription))
       }
     }

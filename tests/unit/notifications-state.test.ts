@@ -152,20 +152,75 @@ describe('notification 2.0 state', () => {
     expect(consumer.closes).toEqual([[CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason]])
   })
 
-  it('does not close a socket that is still connecting; its connect fails instead', async () => {
+  it('closes a socket that is still connecting with CONSUMER_REMOVED on reset, without open or error', async () => {
     const { world, run } = manualWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
-    const token = (await call(world, 'POST', '/notification2/token', { subscription: 'sub', subscriber: 'a' })).body.token
-    const WebSocket = createFakeWebSocket(world.realtime)
-    const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
-    const closes: unknown[][] = []
-    socket.on('close', (...args: unknown[]) => closes.push(args))
-    socket.on('error', () => {})
+    const connecting = await connectingSocket(world, 'sub', 'a')
     world.reset()
-    expect(closes).toEqual([])
-    expect(socket.readyState).toBe(0)
+    expect(connecting.events).toEqual([['close', CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason]])
+    expect(connecting.socket.readyState).toBe(3)
+    expect(world.realtime.status().connecting).toBe(0)
     run()
-    expect(closes).toEqual([[1008, 'invalid token']])
+    expect(connecting.events).toEqual([['close', CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason]])
+    expect(world.realtime.sockets.size).toBe(0)
+    expect(world.realtime.pending()).toBe(0)
+  })
+
+  it('closes a ws-flavor socket that is still connecting with CONSUMER_REMOVED on reset', async () => {
+    const { world, run } = manualWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const connecting = await connectingSocket(world, 'sub', 'a', 'ws')
+    world.reset()
+    run()
+    expect(connecting.events.map(([event, code]) => [event, code])).toEqual([['close', CONSUMER_REMOVED.code]])
+    expect(new TextDecoder().decode(connecting.events[0]![2] as Uint8Array)).toBe(CONSUMER_REMOVED.reason)
+  })
+
+  it('closes a socket that is still connecting with CONSUMER_REMOVED on restore', async () => {
+    const { world, run } = manualWorld()
+    const snapshot = world.snapshot()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const connecting = await connectingSocket(world, 'sub', 'a')
+    world.restore(snapshot)
+    expect(connecting.events).toEqual([['close', CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason]])
+    run()
+    expect(connecting.events).toEqual([['close', CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason]])
+    expect(world.realtime.pending()).toBe(0)
+  })
+
+  it('settles after a reset closed a socket that is still connecting, on the real schedule', async () => {
+    const world = createWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const connecting = await connectingSocket(world, 'sub', 'a')
+    world.reset()
+    expect(world.realtime.status().connecting).toBe(0)
+    await world.realtime.settled({ timeout: 1000 })
+    expect(connecting.events).toEqual([['close', CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason]])
+    expect(world.realtime.pending()).toBe(0)
+  })
+
+  it('opens a socket that is still connecting when reset({ to, consumers: \'keep\' }) keeps its token', async () => {
+    const { world, run } = manualWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const start = world.checkpoint()
+    const connecting = await connectingSocket(world, 'sub', 'a')
+    world.reset({ to: start, consumers: 'keep' })
+    expect(connecting.events).toEqual([])
+    run()
+    expect(connecting.events).toEqual([['open']])
+    expect(connecting.socket.readyState).toBe(1)
+    expect(world.realtime.status().connecting).toBe(0)
+  })
+
+  it('opens a socket that is still connecting when a restored snapshot has its token', async () => {
+    const { world, run } = manualWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const connecting = await connectingSocket(world, 'sub', 'a')
+    world.restore(world.snapshot())
+    expect(connecting.events).toEqual([])
+    run()
+    expect(connecting.events).toEqual([['open']])
+    expect(connecting.socket.readyState).toBe(1)
   })
 
   it('closes the sockets of a fork with CONSUMER_REMOVED and leaves the base\'s open', async () => {
@@ -186,6 +241,17 @@ describe('notification 2.0 state', () => {
     expect(onBase.socket.readyState).toBe(1)
   })
 })
+
+async function connectingSocket(world: World, subscription: string, subscriber: string, flavor: 'text' | 'ws' = 'text') {
+  const token = (await call(world, 'POST', '/notification2/token', { subscription, subscriber })).body.token
+  const WebSocket = createFakeWebSocket(world.realtime, { flavor })
+  const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
+  const events: unknown[][] = []
+  socket.on('close', (...args: unknown[]) => events.push(['close', ...args]))
+  socket.on('error', () => events.push(['error']))
+  socket.on('open', () => events.push(['open']))
+  return { socket, events }
+}
 
 async function open(world: World, run: () => void, subscription: string, subscriber: string, tenant?: string) {
   const headers: Record<string, string> = { 'accept': 'application/json', 'content-type': 'application/json' }
