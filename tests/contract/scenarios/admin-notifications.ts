@@ -80,6 +80,8 @@ export const adminNotificationScenarios: ContractScenario[] = [
     { m: 'POST', p: '/notification2/token', b: { subscription: '{{u}}a' }, status: 422, error: 'undefined/validationError', message: 'subscriber is required' },
     { m: 'POST', p: '/notification2/token', b: { subscriber: '{{u}}s1', subscription: '{{u}}a', expiresInMinutes: -1 }, status: 422, error: 'reliable-notification/Invalid Data', message: 'Invalid value for expiresInMinutes argument!' },
     { m: 'POST', p: '/notification2/token', b: { subscriber: '{{u}}s1', subscription: '{{u}}a', expiresInMinutes: 'x' }, status: 400, error: 'Failed to parse JSON string' },
+    { m: 'POST', p: '/notification2/token', b: { subscriber: '{{u}}s1', subscription: '{{u}}a', expiresInMinutes: 0 }, status: 200, match: {} },
+    { m: 'POST', p: '/notification2/token', b: { subscriber: '{{u}}s1', subscription: 'a-b' }, status: 422, error: 'reliable-notification/Invalid Data' },
     { m: 'POST', p: '/notification2/token', b: { subscriber: '{{u}}s1', subscription: '{{u}}a', type: 'nope' }, status: 422, error: 'reliable-notification/Invalid Data', message: 'Invalid value for type argument. : Type argument <\'nope\'> has to one of the allowed types!' },
     { m: 'POST', p: '/notification2/token', raw: '', status: 400, error: 'Failed to parse JSON string' },
     { m: 'DELETE', p: '/notification2/subscriptions/{{a}}', status: 204, empty: true },

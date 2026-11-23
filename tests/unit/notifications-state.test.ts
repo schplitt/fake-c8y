@@ -801,6 +801,29 @@ describe('token expiry', () => {
     expect(connect(world, run, value).events).toEqual([['error'], ['close', 1008, 'invalid token']])
   })
 
+  it('expires after 1440 minutes with expiresInMinutes 0', async () => {
+    const { world, run } = await clockWorld()
+    const value = await token(world, { expiresInMinutes: 0 })
+    expect(world.realtime.tokens.get(value)!.expires).toBe(START + 1440 * MINUTE)
+    world.advance(1439 * MINUTE)
+    const before = connect(world, run, value)
+    expect(before.events).toEqual([['open']])
+    before.socket.close()
+    run()
+    world.advance(MINUTE)
+    expect(connect(world, run, value).events).toEqual([['error'], ['close', 1008, 'invalid token']])
+  })
+
+  it('answers 422 for a negative expiresInMinutes and a subscription name that is not alphanumeric', async () => {
+    const { world } = await clockWorld()
+    const negative = await call(world, 'POST', '/notification2/token', { subscription: 'sub', subscriber: 'a', expiresInMinutes: -1 })
+    expect(negative.status).toBe(422)
+    expect(negative.body.message).toBe('Invalid value for expiresInMinutes argument!')
+    const badName = await call(world, 'POST', '/notification2/token', { subscription: 'a-b', subscriber: 'a' })
+    expect(badName.status).toBe(422)
+    expect(badName.body.error).toBe('reliable-notification/Invalid Data')
+  })
+
   it('follows the now option of the world', async () => {
     let now = START
     const queue: Array<() => void> = []
