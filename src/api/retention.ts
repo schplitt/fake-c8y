@@ -166,9 +166,10 @@ export function retention(call: C8yRequest, segments: string[], data: TenantData
  * (`*` for every filter, `editable: true`).
  * @param data - Tenant data
  * @param body - The rule
+ * @param id - Its id (a seed's), else a new one
  * @returns The stored rule, or the error response
  */
-export function createRetentionRule(data: TenantData, body: Record<string, unknown>): StoredDocument | Response {
+export function createRetentionRule(data: TenantData, body: Record<string, unknown>, id?: string): StoredDocument | Response {
   const fields = ruleFields(body, { dataType: '*', fragmentType: '*', type: '*', source: '*' })
   if (fields instanceof Response) {
     return fields
@@ -177,7 +178,7 @@ export function createRetentionRule(data: TenantData, body: Record<string, unkno
     return apiError(422, 'undefined/validationError', 'id is not allowed here')
   }
   // verified: `editable` can only be changed by the management tenant
-  const rule: StoredDocument = { id: data.world.newId(), ...fields, editable: true }
+  const rule: StoredDocument = { id: id ?? data.world.newId(), ...fields, editable: true }
   data.retentionRules.set(rule.id, rule)
   return rule
 }

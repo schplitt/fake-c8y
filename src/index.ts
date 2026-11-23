@@ -20,7 +20,7 @@ import { UsageLog } from './api/statistics'
 import { applicationAccess, authorize, userAccess } from './api/access'
 import { apiError, rawRequests } from './api/http'
 import { mediaType, negotiate, notAcceptable, withLocation, withMediaType } from './api/media'
-import { applySeed, createBinaryFromInput, createDb, createFromInput } from './data'
+import { applySeed, createBinaryFromInput, createDb, createFromInput, givenIds } from './data'
 import { diffSnapshots, diffWorld, restoreTenants, snapshotOptions, snapshotTenants, touchedSnapshots } from './snapshot'
 import { advanceBulkOperations } from './api/bulkoperations'
 import { advanceAvailability } from './availability'
@@ -1058,6 +1058,24 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       nextId += count
       return first
     },
+    jumpPast: (id) => {
+      const digits = /^[1-9]\d*$/.test(id)
+      // sequential: the number itself; scattered: a document's counter
+      // (`100000 + n`), a managed object's counter behind its two-digit
+      // prefix (only if the prefix is the one `n` gets), a measurement's
+      const numbers = options.ids === 'sequential'
+        ? [digits ? Number(id) : Number.NaN]
+        : [
+            digits ? Number(id) - 100_000 : Number.NaN,
+            digits && id[2] !== '0' && Number(id.slice(0, 2)) === 10 + (mix(Number(id.slice(2)) - 100_000) % 90) ? Number(id.slice(2)) - 100_000 : Number.NaN,
+            context.measurementSequence(id),
+          ]
+      for (const n of numbers) {
+        if (Number.isInteger(n) && n >= 1 && n <= 2 ** 31) {
+          nextId = Math.max(nextId, n + 1)
+        }
+      }
+    },
     measurementId: (n) => (options.ids === 'sequential' ? String(n) : scatteredId(n, 'measurement')),
     measurementSequence: (id) => {
       if (options.ids === 'sequential') {
@@ -2039,6 +2057,12 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         data.serviceState.set(serviceStateKey(contextPath, store, key), toJson(value))
       }
       const serviceUser = serviceUserOf(service, contextPath, subscriber).name
+      try {
+        // all given ids first, so the objects without one get other ids
+        givenIds(data, 'managedObjects', tenantSeed.managedObjects ?? [], 'invalid managed object: ').forEach(context.jumpPast)
+      } catch (error) {
+        throw new TypeError(`fake-c8y: service ${contextPath}: seed for ${subscriber}: ${(error as Error).message}`)
+      }
       for (const input of tenantSeed.managedObjects ?? []) {
         try {
           createFromInput(data, input, serviceUser)
@@ -2616,18 +2640,28 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     },
 
     managedObject(input = {}) {
-      return createFromInput(tenantData(input.tenant ?? tenant), input, owner())
+      writable()
+      const data = tenantData(input.tenant ?? tenant)
+      givenIds(data, 'managedObjects', [input], 'managedObject(): ').forEach(context.jumpPast)
+      return createFromInput(data, input, owner())
     },
 
     device(input = {}) {
-      return createFromInput(tenantData(input.tenant ?? tenant), { c8y_IsDevice: {}, ...input }, owner())
+      writable()
+      const data = tenantData(input.tenant ?? tenant)
+      givenIds(data, 'managedObjects', [input], 'device(): ').forEach(context.jumpPast)
+      return createFromInput(data, { c8y_IsDevice: {}, ...input }, owner())
     },
 
     binary(input) {
-      return createBinaryFromInput(tenantData(input.tenant ?? tenant), input, owner())
+      writable()
+      const data = tenantData(input.tenant ?? tenant)
+      givenIds(data, 'managedObjects', [input], 'binary(): ').forEach(context.jumpPast)
+      return createBinaryFromInput(data, input, owner())
     },
 
     seed(seed) {
+      writable()
       for (const { service } of seed.serviceState ?? []) {
         if (!services.has(service)) {
           throw new TypeError(`fake-c8y: seed(): service ${service} is not registered (register it with world.service() first)`)

@@ -292,9 +292,10 @@ function beyondYear9999(time: number): boolean {
  * @param request - Answering a request: alarms go through maintenance
  * suppression and the tenant's `alarm.type.mapping` options (seeding stores
  * them as given)
+ * @param id - Its id (a seed's), else a new one
  * @returns The stored document, or an error response
  */
-export function createDocument(data: TenantData, resource: Resource, body: Record<string, unknown>, now: string = data.world.now(), request: boolean = false): StoredDocument | Response {
+export function createDocument(data: TenantData, resource: Resource, body: Record<string, unknown>, now: string = data.world.now(), request: boolean = false, id?: string): StoredDocument | Response {
   const endpoint = `POST ${resource.path}` as C8yEndpoint
   if (resource.collection !== 'operations') {
     body = textTime(body)
@@ -450,7 +451,7 @@ export function createDocument(data: TenantData, resource: Resource, body: Recor
 
   const document: StoredDocument = {
     ...omitServerFields(body, resource),
-    id: data.world.newId(resource.collection === 'measurements' ? 'measurement' : 'document'),
+    id: id ?? data.world.newId(resource.collection === 'measurements' ? 'measurement' : 'document'),
     creationTime: now,
   }
   if (source !== undefined && resource.collection !== 'operations') {
@@ -590,7 +591,7 @@ export function alarmsBySource(data: TenantData): (source: string) => readonly s
  * @param source - Managed object id
  * @param type - Alarm type
  */
-function openAlarm(data: TenantData, source: string, type: string): Readonly<StoredDocument> | undefined {
+export function openAlarm(data: TenantData, source: string, type: string): Readonly<StoredDocument> | undefined {
   let found: Readonly<StoredDocument> | undefined
   for (const key of alarmsBySource(data)(source)) {
     const alarm = data.alarms.get(key)!

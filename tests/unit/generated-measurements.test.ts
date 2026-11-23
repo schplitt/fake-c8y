@@ -551,6 +551,33 @@ describe('generated measurements', () => {
     expect((await call(world, 'GET', `/measurement/measurements/${id}`)).status).toBe(405)
   })
 
+  it('take given measurement ids around their blocks', async () => {
+    const world = createWorld({ now: () => T0 })
+    const device = world.device()
+    const generator: C8yMeasurementGeneratorInput = { source: device, type: 't', from: new Date(T0 - 2 * HOUR).toISOString(), interval: '1h', series: [{ fragment: 'f', series: 's', value: 1 }] }
+    // a given id the sequence could make: the next generator's block starts past it
+    const given = measurementId(500, 'scattered')
+    world.seed({ measurements: [{ id: given, source: device, type: 't', time: new Date(T0 - HOUR).toISOString(), f: { s: { value: 2 } } }] })
+    world.seed({ measurementGenerators: [generator, { ...generator, type: 'u' }] })
+    const [entry, second] = world.snapshot().tenants[0]!.measurementGenerators!
+    expect(entry!.idStart).toBe(501)
+    // the block's ids are taken, also those of points still to come
+    for (const n of [entry!.idStart, second!.idStart + second!.block - 1]) {
+      expect(() => world.seed({ measurements: [{ id: measurementId(n, 'scattered'), source: device, type: 't' }] })).toThrow(`seed(): invalid measurement: measurement ${measurementId(n, 'scattered')} already exists`)
+    }
+    expect(() => world.seed({ measurements: [{ id: given, source: device, type: 't' }] })).toThrow(/already exists/)
+
+    // an id the format does not make sorts after the generated one of the same time
+    const other = '0123456789abcdef01234567'
+    world.seed({ measurements: [{ id: other, source: device, type: 't', time: new Date(T0 - HOUR).toISOString(), g: { s: { value: 3 } } }] })
+    const list = JSON.parse((await call(world, 'GET', `/measurement/measurements?source=${device}&pageSize=10`)).text)
+    // newest first, the same time by ascending id: the given one (500) first
+    const generated = (stream: typeof entry, i: number) => measurementId(stream!.idStart + i, 'scattered')
+    expect(list.measurements.map((item: { id: string }) => item.id)).toEqual([generated(entry, 2), generated(second, 2), given, generated(entry, 1), generated(second, 1), other, generated(entry, 0), generated(second, 0)])
+    const series = JSON.parse((await call(world, 'GET', `/inventory/managedObjects/${device}/supportedSeries`)).text)
+    expect(series.c8y_SupportedSeries).toEqual(['f.s', 'g.s'])
+  })
+
   it('rejects invalid generators', () => {
     const world = createWorld()
     const device = world.device()

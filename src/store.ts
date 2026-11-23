@@ -65,6 +65,13 @@ export interface WorldContext {
    */
   reserveIds: (count: number) => number
   /**
+   * Moves the sequence past every number that could make this id, for any
+   * kind, in the world's id format (a seed gave it): `newId()` and
+   * `reserveIds()` never hand it out. Numbers above 2^31 are left alone, the
+   * sequence never gets there.
+   */
+  jumpPast: (id: string) => void
+  /**
    * The id of the measurement with this sequence number, in the world's id
    * format (`newId('measurement')` hands out the same).
    */
