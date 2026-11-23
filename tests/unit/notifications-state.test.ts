@@ -1,13 +1,14 @@
 /**
- * Notification 2.0 subscriptions and tokens are tenant data: forks inherit
- * them, `reset()` drops the ones written since, `restore()` brings back the
- * ones of the snapshot, and `snapshot()`/`diff()` contain them. Frames on
- * their way are dropped by a reset.
+ * Notification 2.0 subscriptions are tenant data: forks inherit them,
+ * `reset()` drops the ones written since, `restore()` brings back the ones of
+ * the snapshot, and `snapshot()`/`diff()` contain them. Tokens are stateless.
+ * Frames on their way are dropped by a reset.
  */
 import { describe, expect, it } from 'vitest'
-import { CONSUMER_REMOVED, createClock, createWorld } from '../../src'
+import { createClock, createWorld } from '../../src'
 import type { World } from '../../src'
 import { createFakeWebSocket } from '../../src/realtime-entry'
+import { parseToken } from '../../src/token'
 
 async function call(world: World, method: string, path: string, body?: unknown) {
   const response = await world.fetch(new Request(`${world.baseUrl}${path}`, {
@@ -58,7 +59,6 @@ describe('notification 2.0 state', () => {
     const token = (await call(fork, 'POST', '/notification2/token', { subscription: 'agentSub', subscriber: 'a' })).body.token
     fork.reset()
     expect(await names(fork)).toEqual(['baseSub'])
-    expect(fork.realtime.tokens.has(token)).toBe(false)
     // the same request answers the same after a reset
     expect((await call(fork, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'agentSub' })).status).toBe(201)
     expect((await call(fork, 'POST', '/notification2/token', { subscription: 'agentSub', subscriber: 'a' })).body.token).toBe(token)
@@ -80,11 +80,12 @@ describe('notification 2.0 state', () => {
 
     const snapshot = JSON.parse(JSON.stringify(fork.snapshot()))
     expect(snapshot.tenants[0].notificationSubscriptions).toHaveLength(1)
-    expect(snapshot.tenants[0].notificationTokens).toHaveLength(1)
+    // tokens are stateless: nothing of them is stored
+    expect(snapshot.tenants[0]).not.toHaveProperty('notificationTokens')
+    expect(snapshot.tenants[0].sequences).not.toHaveProperty('notificationToken')
     const restored = createWorld()
     restored.restore(snapshot)
     expect(await names(restored)).toEqual(['agentSub'])
-    expect(restored.realtime.tokens.size).toBe(1)
     expect(restored.snapshot()).toEqual(snapshot)
 
     fork.reset()
@@ -100,7 +101,7 @@ describe('notification 2.0 state', () => {
     expect(await names(world)).toEqual([])
   })
 
-  it('drops frames scheduled before a reset and closes sockets whose token is gone', async () => {
+  it('drops frames scheduled before a reset and closes sockets whose subscription is gone', async () => {
     const { world, run } = manualWorld()
     const base = world
     await call(base, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
@@ -122,69 +123,71 @@ describe('notification 2.0 state', () => {
     expect(base.realtime.pending()).toBe(0)
     run()
     expect(received).toEqual([])
-    // a plain world's reset drops the token too, so its socket is closed
-    // with the code that tells the client not to reconnect
-    expect(closed).toEqual([CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason])
-    expect(CONSUMER_REMOVED.code).toBe(4410)
+    // a plain world's reset drops the subscription, so its socket is closed
+    // as a dropped connection
+    expect(closed).toEqual([1006, ''])
   })
 
-  it('closes sockets whose token a restore removed with CONSUMER_REMOVED', async () => {
+  it('closes sockets whose subscription a restore removed as a dropped connection', async () => {
     const { world, run } = manualWorld()
     const snapshot = world.snapshot()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
     const consumer = await open(world, run, 'sub', 'a')
     world.restore(snapshot)
-    expect(consumer.closes).toEqual([[4410, 'notification token removed']])
+    expect(consumer.closes).toEqual([[1006, '']])
     expect(consumer.socket.readyState).toBe(3)
   })
 
-  it('closes sockets whose subscription a restore removed, also when the token stays', async () => {
+  it('closes sockets whose subscription a restore removed, and keeps the ones whose subscription stays', async () => {
     const { world, run } = manualWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'kept' })
     const consumer = await open(world, run, 'sub', 'a')
+    const stays = await open(world, run, 'kept', 'a')
     const snapshot = world.snapshot()
     for (const tenant of snapshot.tenants) {
-      tenant.notificationSubscriptions = []
+      tenant.notificationSubscriptions = (tenant.notificationSubscriptions ?? []).filter((subscription) => subscription.subscription !== 'sub')
     }
-    expect(snapshot.tenants.some((tenant) => (tenant.notificationTokens ?? []).length > 0)).toBe(true)
     world.restore(snapshot)
-    expect(world.realtime.tokens.has(consumer.token)).toBe(true)
-    expect(consumer.closes).toEqual([[CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason]])
+    expect(consumer.closes).toEqual([[1006, '']])
+    expect(stays.closes).toEqual([])
+    expect(stays.socket.readyState).toBe(1)
   })
 
-  it('closes a socket that is still connecting with CONSUMER_REMOVED on reset, without open or error', async () => {
+  it('closes a socket that is still connecting with 1006 on reset, without open or error', async () => {
     const { world, run } = manualWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
     const connecting = await connectingSocket(world, 'sub', 'a')
     world.reset()
-    expect(connecting.events).toEqual([['close', CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason]])
+    expect(connecting.events).toEqual([['close', 1006, '']])
     expect(connecting.socket.readyState).toBe(3)
     expect(world.realtime.status().connecting).toBe(0)
     run()
-    expect(connecting.events).toEqual([['close', CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason]])
+    expect(connecting.events).toEqual([['close', 1006, '']])
     expect(world.realtime.sockets.size).toBe(0)
     expect(world.realtime.pending()).toBe(0)
   })
 
-  it('closes a ws-flavor socket that is still connecting with CONSUMER_REMOVED on reset', async () => {
+  it('closes a ws-flavor socket that is still connecting with 1006 on reset', async () => {
     const { world, run } = manualWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
     const connecting = await connectingSocket(world, 'sub', 'a', 'ws')
     world.reset()
     run()
-    expect(connecting.events.map(([event, code]) => [event, code])).toEqual([['close', CONSUMER_REMOVED.code]])
-    expect(new TextDecoder().decode(connecting.events[0]![2] as Uint8Array)).toBe(CONSUMER_REMOVED.reason)
+    expect(connecting.events.map(([event, code]) => [event, code])).toEqual([['close', 1006]])
+    // the ws flavor hands out the reason as bytes: none
+    expect(new TextDecoder().decode(connecting.events[0]![2] as Uint8Array)).toBe('')
   })
 
-  it('closes a socket that is still connecting with CONSUMER_REMOVED on restore', async () => {
+  it('closes a socket that is still connecting with 1006 on restore', async () => {
     const { world, run } = manualWorld()
     const snapshot = world.snapshot()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
     const connecting = await connectingSocket(world, 'sub', 'a')
     world.restore(snapshot)
-    expect(connecting.events).toEqual([['close', CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason]])
+    expect(connecting.events).toEqual([['close', 1006, '']])
     run()
-    expect(connecting.events).toEqual([['close', CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason]])
+    expect(connecting.events).toEqual([['close', 1006, '']])
     expect(world.realtime.pending()).toBe(0)
   })
 
@@ -195,11 +198,11 @@ describe('notification 2.0 state', () => {
     world.reset()
     expect(world.realtime.status().connecting).toBe(0)
     await world.realtime.settled({ timeout: 1000 })
-    expect(connecting.events).toEqual([['close', CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason]])
+    expect(connecting.events).toEqual([['close', 1006, '']])
     expect(world.realtime.pending()).toBe(0)
   })
 
-  it('opens a socket that is still connecting when reset({ to, consumers: \'keep\' }) keeps its token', async () => {
+  it('opens a socket that is still connecting across reset({ to, consumers: \'keep\' })', async () => {
     const { world, run } = manualWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
     const start = world.checkpoint()
@@ -212,7 +215,7 @@ describe('notification 2.0 state', () => {
     expect(world.realtime.status().connecting).toBe(0)
   })
 
-  it('opens a socket that is still connecting when a restored snapshot has its token', async () => {
+  it('opens a socket that is still connecting when a restored snapshot has its subscription', async () => {
     const { world, run } = manualWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
     const connecting = await connectingSocket(world, 'sub', 'a')
@@ -223,20 +226,25 @@ describe('notification 2.0 state', () => {
     expect(connecting.socket.readyState).toBe(1)
   })
 
-  it('closes the sockets of a fork with CONSUMER_REMOVED and leaves the base\'s open', async () => {
+  it('closes the sockets of a fork with 1006 and leaves the base\'s open', async () => {
     const { world: base, run } = manualWorld()
     await call(base, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
     const onBase = await open(base, run, 'sub', 'base')
     const fork = base.fork()
-    const onFork = await open(fork, run, 'sub', 'fork')
+    // the fork's own subscription: a reset of the fork removes it
+    await call(fork, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'forkSub' })
+    const onFork = await open(fork, run, 'forkSub', 'fork')
+    const onForkBaseSub = await open(fork, run, 'sub', 'fork')
     fork.reset()
-    expect(onFork.closes).toEqual([[CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason]])
+    expect(onFork.closes).toEqual([[1006, '']])
+    expect(onForkBaseSub.closes).toEqual([])
     expect(onBase.closes).toEqual([])
 
     const snapshot = fork.snapshot()
-    const again = await open(fork, run, 'sub', 'fork2')
+    await call(fork, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'forkSub' })
+    const again = await open(fork, run, 'forkSub', 'fork2')
     fork.restore(snapshot)
-    expect(again.closes).toEqual([[CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason]])
+    expect(again.closes).toEqual([[1006, '']])
     expect(onBase.closes).toEqual([])
     expect(onBase.socket.readyState).toBe(1)
   })
@@ -253,12 +261,12 @@ async function connectingSocket(world: World, subscription: string, subscriber: 
   return { socket, events }
 }
 
-async function open(world: World, run: () => void, subscription: string, subscriber: string, tenant?: string) {
+async function open(world: World, run: () => void, subscription: string, subscriber: string, tenant?: string, expiresInMinutes?: number) {
   const headers: Record<string, string> = { 'accept': 'application/json', 'content-type': 'application/json' }
   if (tenant) {
     headers.authorization = `Basic ${btoa(`${tenant}/service_${tenant}:p`)}`
   }
-  const response = await world.fetch(new Request(`${world.baseUrl}/notification2/token`, { method: 'POST', headers, body: JSON.stringify({ subscription, subscriber }) }))
+  const response = await world.fetch(new Request(`${world.baseUrl}/notification2/token`, { method: 'POST', headers, body: JSON.stringify({ subscription, subscriber, ...(expiresInMinutes ? { expiresInMinutes } : {}) }) }))
   expect(response.status).toBe(200)
   const token = (await response.json() as { token: string }).token
   const WebSocket = createFakeWebSocket(world.realtime)
@@ -370,11 +378,10 @@ describe('closeConsumers()', () => {
     expect(a.closes).toEqual([[1011, '']])
   })
 
-  it('keeps tokens and subscriptions, so the client reconnects with the same token', async () => {
+  it('keeps subscriptions, so the client reconnects with the same token', async () => {
     const { world, run } = await twoSubscriptions()
     const a = await open(world, run, 'one', 'a')
     world.realtime.closeConsumers()
-    expect(world.realtime.tokens.has(a.token)).toBe(true)
     expect(await names(world)).toEqual(['one', 'two'])
     const WebSocket = createFakeWebSocket(world.realtime)
     const again = new WebSocket(`wss://example.test/notification2/consumer/?token=${a.token}`)
@@ -618,7 +625,8 @@ describe('backlog before a first connect', () => {
     run()
     await call(world, 'POST', '/inventory/managedObjects', { name: 'kept' })
     expect(world.realtime.status()).toMatchObject({ backlog: 1, unclaimed: 0 })
-    const again = await open(world, run, 'sub', 'a')
+    // another expiry gives a new token
+    const again = await open(world, run, 'sub', 'a', undefined, 60)
     expect(again.token).not.toBe(a.token)
     expect(again.received.map(name)).toEqual(['kept'])
   })
@@ -699,7 +707,7 @@ describe('backlog before a first connect', () => {
   it('counts a socket that stays open across restore() as connected', async () => {
     const { world, run } = await persistent()
     const a = await open(world, run, 'sub', 'a')
-    // the snapshot still has the socket's token
+    // the snapshot still has the socket's subscription
     world.restore(world.snapshot())
     expect(a.socket.readyState).toBe(1)
     a.socket.close()
@@ -759,7 +767,7 @@ describe('token expiry', () => {
   it('refuses an expired token like an unknown one', async () => {
     const { world, run } = await clockWorld()
     const value = await token(world, { expiresInMinutes: 5 })
-    expect(world.realtime.tokens.get(value)!.expires).toBe(START + 5 * MINUTE)
+    expect(parseToken(value, START)!.expires).toBe(START + 5 * MINUTE)
     world.advance(6 * MINUTE)
     expect(connect(world, run, value).events).toEqual([['error'], ['close', 1008, 'invalid token']])
   })
@@ -773,6 +781,17 @@ describe('token expiry', () => {
     run()
     expect(consumer.socket.readyState).toBe(1)
     expect(consumer.received.map(name)).toEqual(['late'])
+  })
+
+  it('does not unsubscribe with an expired token, and the socket stays open', async () => {
+    const { world, run } = await clockWorld()
+    const value = await token(world, { expiresInMinutes: 5 })
+    const consumer = connect(world, run, value)
+    world.advance(6 * MINUTE)
+    expect((await call(world, 'POST', `/notification2/unsubscribe?token=${value}`)).status).toBe(500)
+    run()
+    expect(consumer.events).toEqual([['open']])
+    expect(consumer.socket.readyState).toBe(1)
   })
 
   it('lets a new token of the same consumer connect after expiry, with the backlog', async () => {
@@ -804,7 +823,7 @@ describe('token expiry', () => {
   it('expires after 1440 minutes with expiresInMinutes 0', async () => {
     const { world, run } = await clockWorld()
     const value = await token(world, { expiresInMinutes: 0 })
-    expect(world.realtime.tokens.get(value)!.expires).toBe(START + 1440 * MINUTE)
+    expect(parseToken(value, START)!.expires).toBe(START + 1440 * MINUTE)
     world.advance(1439 * MINUTE)
     const before = connect(world, run, value)
     expect(before.events).toEqual([['open']])
@@ -831,7 +850,7 @@ describe('token expiry', () => {
     const run = () => queue.splice(0).forEach((callback) => callback())
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
     const value = await token(world, { expiresInMinutes: 5 })
-    expect(world.realtime.tokens.get(value)!.expires).toBe(START + 5 * MINUTE)
+    expect(parseToken(value, START)!.expires).toBe(START + 5 * MINUTE)
     now += 5 * MINUTE
     expect(connect(world, run, value).events).toEqual([['error'], ['close', 1008, 'invalid token']])
   })
@@ -845,20 +864,32 @@ describe('token expiry', () => {
     expect(connect(early, run, value).events).toEqual([['open']])
   })
 
-  it('keeps expires in a snapshot; a token without it never expires', async () => {
+  it('keeps its expiry after a restore: the token carries it', async () => {
     const { world, run } = await clockWorld()
     const value = await token(world, { expiresInMinutes: 5 })
-    const snapshot = world.snapshot()
-    const tokensOf = (state: typeof snapshot) => state.tenants.find((item) => item.tenant === world.tenant)!
-    expect(tokensOf(snapshot).notificationTokens).toEqual([[value, { tenant: world.tenant, subscription: 'sub', subscriber: 'a', expires: START + 5 * MINUTE }]])
-    world.restore(snapshot)
-    expect(world.realtime.tokens.get(value)!.expires).toBe(START + 5 * MINUTE)
+    world.restore(world.snapshot())
+    world.advance(4 * MINUTE)
+    const before = connect(world, run, value)
+    expect(before.events).toEqual([['open']])
+    expect(before.socket.token).toEqual({ tenant: world.tenant, subscription: 'sub', subscriber: 'a', expires: START + 5 * MINUTE })
+    before.socket.close()
+    run()
+    world.advance(MINUTE)
+    expect(connect(world, run, value).events).toEqual([['error'], ['close', 1008, 'invalid token']])
+  })
 
-    const old = JSON.parse(JSON.stringify(snapshot)) as typeof snapshot
-    tokensOf(old).notificationTokens = [[value, { tenant: world.tenant, subscription: 'sub', subscriber: 'a' }]]
-    world.restore(old)
-    world.advance(10 * 1440 * MINUTE)
-    expect(connect(world, run, value).events).toEqual([['open']])
+  it('ignores the stored tokens and token sequence of an older snapshot', async () => {
+    const { world, run } = await clockWorld()
+    const snapshot = JSON.parse(JSON.stringify(world.snapshot()))
+    const own = snapshot.tenants.find((item: { tenant: string }) => item.tenant === world.tenant)
+    own.notificationTokens = [['fake-token-7-sub-a', { tenant: world.tenant, subscription: 'sub', subscriber: 'a' }]]
+    own.sequences.notificationToken = 8
+    world.restore(snapshot)
+    const again = world.snapshot().tenants.find((item) => item.tenant === world.tenant)!
+    expect(again).not.toHaveProperty('notificationTokens')
+    expect(again.sequences).not.toHaveProperty('notificationToken')
+    expect(connect(world, run, 'fake-token-7-sub-a').events).toEqual([['error'], ['close', 1008, 'invalid token']])
+    expect(connect(world, run, await token(world)).events).toEqual([['open']])
   })
 
   it('keeps expires and the open socket across reset({ to, consumers: \'keep\' })', async () => {
@@ -870,7 +901,7 @@ describe('token expiry', () => {
     world.reset({ to: start, consumers: 'keep' })
     run()
     expect(consumer.socket.readyState).toBe(1)
-    expect(world.realtime.tokens.get(value)!.expires).toBe(START + 5 * MINUTE)
+    expect(consumer.socket.token!.expires).toBe(START + 5 * MINUTE)
     await call(world, 'POST', '/inventory/managedObjects', { name: 'after reset' })
     run()
     expect(consumer.received.map(name)).toEqual(['after reset'])
@@ -882,5 +913,161 @@ describe('token expiry', () => {
     expect(connect(world, run, value).events).toEqual([['open']])
     world.restore(JSON.parse(JSON.stringify(world.snapshot())))
     expect(connect(world, run, value).events).toEqual([['open']])
+  })
+})
+
+describe('stateless tokens', () => {
+  const START = Date.parse('2026-01-01T00:00:00.000Z')
+
+  function clockWorld() {
+    const queue: Array<() => void> = []
+    const world = createWorld({ clock: createClock({ start: START, realtime: false }), schedule: (callback) => queue.push(callback) })
+    const run = () => {
+      while (queue.length > 0) {
+        queue.shift()!()
+      }
+    }
+    return { world, run }
+  }
+
+  const mint = async (world: World, body: Record<string, unknown> = {}) => (await call(world, 'POST', '/notification2/token', { subscription: 'sub', subscriber: 'a', ...body })).body.token as string
+
+  function connect(world: World, run: () => void, value: string) {
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${value}`)
+    const events: unknown[][] = []
+    const received: string[] = []
+    socket.on('open', () => events.push(['open']))
+    socket.on('error', () => events.push(['error']))
+    socket.on('close', (...args: unknown[]) => events.push(['close', ...args]))
+    socket.on('message', (text: string) => received.push(text))
+    run()
+    return { socket, events, received }
+  }
+
+  it('is JWT-shaped, and the same input gives the same token', async () => {
+    const one = clockWorld().world
+    const two = clockWorld().world
+    const token = await mint(one)
+    expect(token.split('.')).toHaveLength(3)
+    expect(token).toMatch(/^[\w-]+\.[\w-]+\.[\w-]+$/)
+    expect(await mint(one)).toBe(token)
+    expect(await mint(two)).toBe(token)
+    expect(await mint(one, { subscriber: 'b' })).not.toBe(token)
+    expect(await mint(one, { shared: true })).not.toBe(token)
+  })
+
+  it('carries its claims on the socket, with shared only when minted shared', async () => {
+    const { world, run } = clockWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    expect(connect(world, run, await mint(world)).socket.token).toEqual({ tenant: world.tenant, subscription: 'sub', subscriber: 'a', expires: START + 1440 * 60_000 })
+    expect(connect(world, run, await mint(world, { subscriber: 'b', shared: true, nonPersistent: true })).socket.token).toEqual({ tenant: world.tenant, subscription: 'sub', subscriber: 'b', expires: START + 1440 * 60_000, shared: true })
+  })
+
+  it('refuses a tampered or malformed token', async () => {
+    const { world, run } = clockWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const token = await mint(world)
+    const [header, claims, sum] = token.split('.') as [string, string, string]
+    const other = (await mint(world, { subscriber: 'b' })).split('.')[1]!
+    const refused = [['error'], ['close', 1008, 'invalid token']]
+    for (const bad of [`${header}.${other}.${sum}`, `${header}.${claims}.${sum.slice(1)}x`, `${header}.${claims}`, `${token}.x`, '', 'garbage', `${header}.!!!.${sum}`]) {
+      expect(connect(world, run, bad).events).toEqual(refused)
+    }
+    expect(parseToken(token, START)).toBeDefined()
+    expect(connect(world, run, token).events).toEqual([['open']])
+  })
+
+  it('connects in another world and in a fork', async () => {
+    const minted = clockWorld().world
+    const token = await mint(minted)
+    const { world, run } = clockWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const consumer = connect(world, run, token)
+    expect(consumer.events).toEqual([['open']])
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'in another world' })
+    run()
+    expect(consumer.received).toHaveLength(1)
+    const fork = world.fork()
+    expect(connect(fork, run, token).events).toEqual([['open']])
+  })
+
+  it('reconnects with its old token after a reset, and receives while the subscription exists', async () => {
+    const { world, run } = clockWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const start = world.checkpoint()
+    const token = await mint(world)
+    const first = connect(world, run, token)
+    first.socket.close()
+    run()
+    world.reset({ to: start })
+    const again = connect(world, run, token)
+    expect(again.events).toEqual([['open']])
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'after reset' })
+    run()
+    expect(again.received).toHaveLength(1)
+  })
+
+  it('closes by subscription on a default reset, and nothing with keep', async () => {
+    const { world, run } = clockWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const start = world.checkpoint()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'later' })
+    const stays = connect(world, run, await mint(world))
+    const gone = connect(world, run, await mint(world, { subscription: 'later' }))
+    world.reset({ to: start })
+    expect(stays.events).toEqual([['open']])
+    expect(gone.events).toEqual([['open'], ['close', 1006, '']])
+
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'later' })
+    const kept = connect(world, run, await mint(world, { subscription: 'later' }))
+    world.reset({ to: start, consumers: 'keep' })
+    run()
+    expect(kept.events).toEqual([['open']])
+    expect(stays.events).toEqual([['open']])
+  })
+
+  it('unsubscribes the consumer of the token\'s claims, and the token stays valid', async () => {
+    const { world, run } = clockWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const token = await mint(world)
+    const consumer = connect(world, run, token)
+    const other = connect(world, run, await mint(world, { subscriber: 'b' }))
+    // another token of the same subscriber matches the same consumer
+    world.advance(60_000)
+    const later = await mint(world)
+    expect(later).not.toBe(token)
+    expect((await call(world, 'POST', '/notification2/unsubscribe?token=garbage')).status).toBe(500)
+    expect((await call(world, 'POST', `/notification2/unsubscribe?token=${later}`)).body).toEqual({ result: 'DONE' })
+    run()
+    expect(consumer.events).toEqual([['open'], ['close', 1000, '']])
+    expect(other.events).toEqual([['open']])
+    // no open socket of that subscriber any more
+    expect((await call(world, 'POST', `/notification2/unsubscribe?token=${token}`)).status).toBe(500)
+    expect(connect(world, run, token).events).toEqual([['open']])
+  })
+
+  it('does not unsubscribe with a token of another tenant', async () => {
+    const queue: Array<() => void> = []
+    const world = createWorld({ clock: createClock({ start: START, realtime: false }), schedule: (callback) => queue.push(callback), subscriptions: [{ tenant: 't12345', user: 'service_t12345', password: 'p' }, { tenant: 't2', user: 'service_t2', password: 'p' }] })
+    const run = () => {
+      while (queue.length > 0) {
+        queue.shift()!()
+      }
+    }
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const token = await mint(world)
+    expect(parseToken(token)!.tenant).toBe('t12345')
+    const consumer = connect(world, run, token)
+    const audits = async (tenant: string) => {
+      const response = await world.fetch(new Request(`${world.baseUrl}/audit/auditRecords?pageSize=2000`, { headers: { accept: 'application/json', authorization: `Basic ${btoa(`${tenant}/service_${tenant}:p`)}` } }))
+      return ((await response.json()) as { auditRecords: unknown[] }).auditRecords.length
+    }
+    const before = await audits('t2')
+    const response = await world.fetch(new Request(`${world.baseUrl}/notification2/unsubscribe?token=${token}`, { method: 'POST', headers: { accept: 'application/json', authorization: `Basic ${btoa('t2/service_t2:p')}` } }))
+    expect(response.status).toBe(500)
+    run()
+    expect(consumer.events).toEqual([['open']])
+    expect(await audits('t2')).toBe(before)
   })
 })

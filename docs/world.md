@@ -375,11 +375,13 @@ import { createFakeWebSocket } from 'fake-c8y/realtime'
 const WebSocket = createFakeWebSocket(world.realtime, { flavor: 'ws' })
 ```
 
-Sockets belong to one world, so use `createFakeWebSocket(fork.realtime)` for a fork. Subscriptions and tokens are tenant data: a fork inherits the base's, `reset()` drops the ones created since (`reset({ to, consumers: 'keep' })` keeps open consumers, see [Checkpoints](trials.md#checkpoints)), `restore()` brings back the snapshot's, and `diff()` lists subscriptions under `notificationSubscriptions`.
+Sockets belong to one world, so use `createFakeWebSocket(fork.realtime)` for a fork. Subscriptions are tenant data: a fork inherits the base's, `reset()` drops the ones created since (`reset({ to, consumers: 'keep' })` closes no socket, see [Checkpoints](trials.md#checkpoints)), `restore()` brings back the snapshot's, and `diff()` lists them under `notificationSubscriptions`.
+
+A token is stateless and JWT-shaped: `<header>.<claims>.<checksum>` in base64url. The claims hold the tenant, subscription, subscriber, expiry (`exp`, in seconds), and `shared` (only when minted with `shared: true`); an open socket shows them as `socket.token` (`NotificationToken`, with `expires` in epoch milliseconds). The checksum only catches a changed or broken token. It is not a security measure: a token works in any world, also in a fork and after a reset or restore, until it expires. Nothing is random, so the same request at the same time gives the same token. Minting does not check that the subscription exists: such a socket opens and gets frames once a subscription of that name exists.
 
 A persistent subscription keeps frames for later only once a consumer of it has connected, like on the platform. Frames published before the first connect are dropped. `reset()` and `restore()` forget that a consumer connected, and a fork starts without it. Sockets that stay open across a reset or restore still count as connected.
 
-A token expires `expiresInMinutes` after it was created (default 1440, one day; 0 also means the default), by the world's clock. A negative `expiresInMinutes` or a subscriber or subscription name that is not alphanumeric answers 422. A socket that is already open stays open and keeps receiving. A reconnect needs a new token: a connect with an expired token fails like one with an unknown token (`error`, then close `1008`). The platform's exact answer there is not verified. To move time in a test, create the world with a `clock` and call `world.advance()`, or pass a `now` function you control.
+A token expires `expiresInMinutes` after it was created (default 1440, one day; 0 also means the default), by the world's clock. A negative `expiresInMinutes` or a subscriber or subscription name that is not alphanumeric answers 422. A socket that is already open stays open and keeps receiving. A reconnect needs a new token: a connect with an expired token fails like one with a token that does not parse or fails its checksum (`error`, then close `1008`). The platform's exact answer there is not verified. To move time in a test, create the world with a `clock` and call `world.advance()`, or pass a `now` function you control.
 
 ```ts
 import { createClock, createWorld } from 'fake-c8y'
@@ -393,13 +395,13 @@ world.advance(6 * 60_000) // a new socket with this token now gets error and clo
 
 ### Close codes
 
-Only `reset()` and `restore()` use a distinct close code: when one of them removes a consumer's token or its subscription, the consumer's socket closes with code `4410` and reason `notification token removed`. The code is exported as `CONSUMER_REMOVED` (from `fake-c8y` and `fake-c8y/realtime`). This also applies to a socket that is still connecting, which then gets no `open` and no `error`. The consumer no longer exists, so a client should stop instead of reconnecting. The platform documents no close code for this case: `4410` is fake-c8y's own, in the application range (4000-4999), modeled on HTTP 410 Gone.
+`reset()` and `restore()` close a socket (open or still connecting) whose subscription (tenant and name) the new state does not have, as a dropped connection: code `1006`, empty reason. A socket whose subscription stays is kept. `reset({ consumers: 'keep' })` closes nothing. The token stays valid, so a client may reconnect with it. The platform's behavior here is inferred, not verified.
 
-- A socket still connecting when a reset or restore removes its token or subscription closes right away with `4410`, once. It never opens.
-- A connect with an unknown or expired token emits `error` and closes with `1008` (`invalid token`).
+- A socket still connecting when a reset or restore removes its subscription closes right away with `1006`, once. It never opens and gets no `error`.
+- A connect with a token that does not parse, fails its checksum, or has expired emits `error` and closes with `1008` (`invalid token`).
 - A socket the client closes itself (`close()` or `terminate()`) closes with `1000`, also while it is still connecting (then without `open` or `error`). Every socket on `world.realtime.clear()` closes with `1000` too.
 - A client close (`close()` or `terminate()`) keeps the frames the socket had not acknowledged, like `closeConsumers()` (see [below](#closing-consumers-from-the-server-side)). This holds only for a persistent subscription, and only when no other consumer of the subscription is still open. Then the next consumer of the subscription gets them first, with the same ack ids. Otherwise they are lost.
-- `POST /notification2/unsubscribe` closes the consumer's socket with `1000` and keeps none of its unacknowledged frames. It also drops the subscription's backlog, and nothing is kept until a consumer of the subscription connects again.
+- `POST /notification2/unsubscribe` finds the consumer by the token's claims (tenant, subscription, subscriber), not by the token text, closes its sockets with `1000`, and keeps none of their unacknowledged frames. The token stays valid. It answers 500 for a token that does not parse, fails its checksum, has expired, belongs to another tenant, or has no open socket of its subscriber; then no socket closes. That an expired token answers 500 is inferred: the platform checks the token (signature and expiry) before it unsubscribes. It also drops the subscription's backlog, and nothing is kept until a consumer of the subscription connects again.
 - Removing a subscription through the API (`DELETE /notification2/subscriptions/{id}`, `DELETE /notification2/subscriptions?source=…`, or deleting the managed object a subscription is for) closes no socket: the consumer stays open and receives nothing more. The backlog stays. What the platform does there is not verified.
 
 ### Closing consumers from the server side
@@ -413,7 +415,7 @@ world.realtime.closeConsumers({ subscription: 'alarms', code: 1011, reason: 'int
 
 - `tenant`, `subscription`, `subscriber`, and `token` select the sockets (all open ones by default). Sockets still connecting are not closed.
 - `code` (default `1006`, what a client sees when the connection drops) must be an integer from 1000 to 4999, and `reason` defaults to `''`. `1006` is allowed on purpose: a peer never sends it in a close frame, but a client sees it when the connection drops.
-- Subscriptions and tokens stay stored, so the client can reconnect with the same token or mint a new one.
+- Subscriptions stay stored and the token stays valid, so the client can reconnect with the same token or mint a new one.
 - Frames are kept for the reconnect only when the subscription is persistent and no other consumer of it stays open (the backlog is per subscription, and filled only while no consumer of it is connected). Then the frames the closed socket had not acknowledged (delivered or still scheduled) go back into the backlog, frames published meanwhile wait there too, and the next consumer of the subscription that connects gets them. If another consumer of the subscription stays open, the frames published meanwhile go to it, and the closed consumer's unacknowledged frames are lost. The platform's redelivery is not verified.
 - The `close` event is emitted synchronously, like the closes of a reset.
 
@@ -487,7 +489,7 @@ beforeAll(async () => {
 
 Some work starts later than the fake can see. Poll until the listener you need is open (`expect.poll()` or `vi.waitFor()`), then call `settled()`:
 
-- After the fake dropped listeners: `closeConsumers()`, or a reset that closed them with `4410`. c8y-realtime reconnects on its own timer, about 1 s after a drop and longer after failed attempts.
+- After the fake dropped listeners: `closeConsumers()`, or a reset or restore that closed them with `1006`. c8y-realtime reconnects on its own timer, about 1 s after a drop and longer after failed attempts.
 - A listener the service opens later on its own timer, a cron job, or a lazy route.
 - Work a handler starts on its own timer (`setTimeout`) after it resolved: the frame is acknowledged already. Poll for the result, or raise `quietMs` above the delay.
 - An external process (for example a microservice in another process) whose start the fake cannot see.
@@ -513,7 +515,7 @@ The default `schedule` is now the real `setTimeout(callback, 0)` captured when f
 const world = createWorld({ schedule: (callback) => setTimeout(callback, 0) }) // fake timers drive delivery again
 ```
 
-A custom `schedule` counts in `status().scheduled` until it runs the callback. One that never runs it (`schedule: () => {}`, to mute delivery) keeps `idle()` from resolving until the next `reset()`, `restore()`, or `realtime.clear()`, which drop the scheduled work and its count. `settled()` and `pending()` also count a socket that is still connecting (`status().connecting`). A reset or restore drops it only when it closes the socket (its token or subscription is gone): otherwise they stay busy until the socket connects, its client closes it, or `realtime.clear()` runs.
+A custom `schedule` counts in `status().scheduled` until it runs the callback. One that never runs it (`schedule: () => {}`, to mute delivery) keeps `idle()` from resolving until the next `reset()`, `restore()`, or `realtime.clear()`, which drop the scheduled work and its count. `settled()` and `pending()` also count a socket that is still connecting (`status().connecting`). A reset or restore drops it only when it closes the socket (its subscription is gone): otherwise they stay busy until the socket connects, its client closes it, or `realtime.clear()` runs.
 
 #### Changed: `settled()` waits only for live work
 
@@ -522,6 +524,16 @@ A custom `schedule` counts in `status().scheduled` until it runs the callback. O
 - `waitForRealtimeStartup(world.realtime, () => world.inflight)` becomes `await world.realtime.settled()`. To wait for a specific listener, poll `world.realtime.consumers()` first (see [When to poll first](#when-to-poll-first)).
 - Drop `unclaimed: 'wait'` or `unclaimed: 'ignore'` from `settled()`: it now waits for neither unclaimed frames nor the backlog.
 - A test that relied on `settled()` waiting for a consumer to connect polls `consumers()` first.
+
+#### Changed: stateless tokens, and resets close by subscription
+
+Tokens used to be stored (`fake-token-<n>-<subscription>-<subscriber>`), and a reset or restore closed the sockets whose token or subscription was gone with `4410` (`CONSUMER_REMOVED`). Now tokens are JWT-shaped and stateless (see [Notification 2.0](#notification-20)), and a reset or restore closes only the sockets whose subscription is gone, with `1006` and an empty reason. To migrate:
+
+- Drop `CONSUMER_REMOVED` (from `fake-c8y` and `fake-c8y/realtime`) and checks for `4410`: expect `1006` and `''`. A client sees the close as a dropped connection and may reconnect; its old token still works.
+- `realtime.tokens`, the `tokens` option of `Realtime`, and the `notificationTokens` collection are removed. Read a socket's claims from `socket.token`. Snapshots no longer have `notificationTokens` or `sequences.notificationToken`; `restore()` ignores them in older snapshots.
+- `reset({ consumers: 'keep' })` now closes nothing, also not a socket whose subscription the state reset to does not have. The default closes by subscription only, so a socket with a token minted after a checkpoint stays open when the checkpoint has its subscription.
+- Two requests with the same claims at the same time get the same token. Mint with another subscriber or expiry to get another one.
+- The public type `NotificationToken` changed: `expires` (epoch milliseconds) is always set, and it has a new optional `shared`.
 
 #### Changed: nothing is kept before a consumer connects
 

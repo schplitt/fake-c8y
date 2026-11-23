@@ -87,6 +87,30 @@ export function decodeBase64(text: string): Uint8Array {
 }
 
 /**
+ * Base64url (no padding) of bytes, or of a string's UTF-8 bytes.
+ * @param input - Text or bytes to encode
+ */
+export function encodeBase64Url(input: string | Uint8Array): string {
+  return encodeBase64(typeof input === 'string' ? new TextEncoder().encode(input) : input).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+/**
+ * Decodes base64url (no padding) into text.
+ * @param text - Base64url text
+ * @returns The text, or `undefined` for characters outside base64url or bytes that are not UTF-8
+ */
+export function decodeBase64Url(text: string): string | undefined {
+  if (!/^[\w-]*$/.test(text) || text.length % 4 === 1) {
+    return undefined
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(decodeBase64(text))
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Hex encoding of a string's UTF-8 bytes.
  * @param text - Text to encode
  */

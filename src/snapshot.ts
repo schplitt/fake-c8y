@@ -4,7 +4,7 @@ import type { Collection } from './collection'
 import type { BinaryContent, ChildKind, DocumentCollection, ExternalId, SequenceName, StoredDocument, TenantData, WorldContext, TenantCollection } from './store'
 import { CHILD_KINDS, emptyTenant, externalIdKey, forkTenant, TENANT_COLLECTIONS } from './store'
 import { clone, decodeBase64, encodeBase64 } from './utils'
-import type { NotificationSubscription, NotificationToken } from './realtime'
+import type { NotificationSubscription } from './realtime'
 import type { GeneratorSnapshot, MeasurementTombstone, RangeTombstone } from './generators'
 import { compileGenerator } from './generators'
 import type { C8yJson } from './services'
@@ -34,15 +34,10 @@ export interface UserSequences {
   permission: number
   assignment: number
   /**
-   * Next number of Notification 2.0 subscription ids (and of tokens in
-   * snapshots of older versions). Missing in snapshots of older versions.
+   * Next number of Notification 2.0 subscription ids. Missing in snapshots
+   * of older versions.
    */
   notification?: number
-  /**
-   * Next number of Notification 2.0 tokens, once a token was minted. Missing
-   * in snapshots of older versions, where tokens counted with `notification`.
-   */
-  notificationToken?: number
   /**
    * Next number of application ids. Missing in snapshots of older versions.
    */
@@ -125,10 +120,6 @@ export interface TenantSnapshot {
    */
   notificationSubscriptions?: NotificationSubscription[]
   /**
-   * Notification 2.0 tokens: `[token, owner]`. Optional when reading snapshots of older versions.
-   */
-  notificationTokens?: Array<[string, NotificationToken]>
-  /**
    * State of service emulations: `[<service>/<store>/<key>, value]`. Only
    * present when the tenant has some.
    */
@@ -156,8 +147,8 @@ export interface TenantSnapshot {
 /**
  * A world's data and platform state as JSON: `JSON.stringify` it to store it
  * as a fixture, `world.restore()` it to go back to it. Overrides (functions)
- * and live Notification 2.0 sockets are not part of it; subscriptions and
- * tokens are.
+ * and live Notification 2.0 sockets are not part of it; subscriptions are
+ * (tokens are stateless, nothing to keep).
  */
 export interface WorldSnapshot {
   version: 1
@@ -224,7 +215,7 @@ export interface TenantDiff {
    */
   auditRecords: CollectionDiff
   /**
-   * Notification 2.0 subscriptions (tokens are left out).
+   * Notification 2.0 subscriptions (tokens are stateless, not tenant data).
    */
   notificationSubscriptions: CollectionDiff
   /**
@@ -345,14 +336,13 @@ function tenantSnapshot(data: TenantData, entries: EntryPicker): TenantSnapshot 
     roles: [...entries(data.roles)].map(([name]) => name),
     inventoryRoles: documents(data.inventoryRoles),
     inventoryAssignments: documents(data.inventoryAssignments),
-    sequences: { group: sequence('group'), inventoryRole: sequence('inventoryRole'), permission: sequence('permission'), assignment: sequence('assignment'), notification: sequence('notification'), ...(data.sequences.has('notificationToken') ? { notificationToken: sequence('notificationToken') } : {}), ...(data.sequences.has('application') ? { application: sequence('application') } : {}) },
+    sequences: { group: sequence('group'), inventoryRole: sequence('inventoryRole'), permission: sequence('permission'), assignment: sequence('assignment'), notification: sequence('notification'), ...(data.sequences.has('application') ? { application: sequence('application') } : {}) },
     bulkOperations: documents(data.bulkOperations),
     nextBulkOperationId: sequence('bulkOperation'),
     newDeviceRequests: documents(data.newDeviceRequests),
     retentionRules: documents(data.retentionRules),
     auditRecords: documents(data.auditRecords),
     notificationSubscriptions: [...entries(data.notificationSubscriptions)].map(([, subscription]) => clone(subscription)),
-    notificationTokens: [...entries(data.notificationTokens)].map(([token, owner]): [string, NotificationToken] => [token, { ...owner }]),
     ...(serviceState.length > 0 ? { serviceState } : {}),
     applications: documents(data.applications),
     applicationSubscriptions: documents(data.applicationSubscriptions),
@@ -440,7 +430,8 @@ export function restoreTenants(snapshots: TenantSnapshot[], world: WorldContext,
       data.roles.replace(snapshot.roles.map((role) => [role, role]))
     }
     const sequences = snapshot.sequences ?? { group: data.sequences.get('group') ?? 1, inventoryRole: data.sequences.get('inventoryRole') ?? 1, permission: data.sequences.get('permission') ?? 1, assignment: data.sequences.get('assignment') ?? 1 }
-    data.sequences.replace([...Object.entries({ notification: 1, ...sequences }), ['bulkOperation', snapshot.nextBulkOperationId ?? 1]])
+    // tokens are stateless: the token sequence of older snapshots is ignored
+    data.sequences.replace([...Object.entries({ notification: 1, ...sequences }).filter(([name]) => name !== 'notificationToken'), ['bulkOperation', snapshot.nextBulkOperationId ?? 1]])
     for (const collection of APPLICATION_COLLECTIONS) {
       const list = snapshot[collection]
       if (list) {
@@ -456,7 +447,7 @@ export function restoreTenants(snapshots: TenantSnapshot[], world: WorldContext,
     data.measurementTombstones.replace((snapshot.measurementTombstones ?? []).map((tombstone, index) => [tombstone.kind === 'point' ? tombstone.id : `range#${index}`, clone(tombstone)]))
     data.auditRecords.replace(documents(snapshot.auditRecords))
     data.notificationSubscriptions.replace((snapshot.notificationSubscriptions ?? []).map((subscription) => [subscription.id, clone(subscription)]))
-    data.notificationTokens.replace((snapshot.notificationTokens ?? []).map(([token, owner]) => [token, { ...owner }]))
+    // the `notificationTokens` of older snapshots are ignored: tokens are stateless
     data.serviceState.replace((snapshot.serviceState ?? []).map(([id, value]) => [id, clone(value)]))
     data.usageStatistics.replace((snapshot.usageStatistics ?? []).map((day) => [day.day, clone(day)]))
     data.trustedCertificates.replace((snapshot.trustedCertificates ?? []).map((certificate) => [certificate.fingerprint, { ...certificate }]))
