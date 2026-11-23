@@ -15,7 +15,8 @@ import { createRealtimeClient } from 'c8y-realtime'
 import type { RealtimeClient, WebSocketFactory } from 'c8y-realtime'
 import { WebSocket } from 'ws'
 import { afterEach, describe, it } from 'vitest'
-import { sleep } from './helpers'
+import { openSocket, sleep } from './helpers'
+import type { RawSocket } from './helpers'
 import { scenarios } from './scenarios'
 
 if (existsSync('.env')) {
@@ -33,6 +34,7 @@ const configured = Boolean(baseUrl && credentials.tenant && credentials.user && 
 const client = configured ? new Client(new BasicAuth(credentials as { tenant: string, user: string, password: string }), baseUrl) : undefined
 let current: string | undefined
 const realtimeClients: RealtimeClient[] = []
+const rawSockets: RawSocket[] = []
 
 /**
  * Deletes everything a scenario created (all names contain the run id).
@@ -61,6 +63,14 @@ async function cleanup(unique: string) {
 describe.skipIf(!configured)('contract scenarios against a real tenant', () => {
   afterEach(async () => {
     await Promise.all(realtimeClients.splice(0).map((client) => client.close()))
+    for (const socket of rawSockets.splice(0)) {
+      // a persistent subscription with a connected consumer survives its
+      // deletion, and unsubscribe works only while the consumer is connected
+      if (socket.opened && socket.closes.length === 0) {
+        await client!.core.fetch(`/notification2/unsubscribe?${new URLSearchParams({ token: socket.token })}`, { method: 'POST' }).catch(() => {})
+      }
+      socket.close()
+    }
     if (current) {
       await cleanup(current)
       current = undefined
@@ -89,6 +99,7 @@ describe.skipIf(!configured)('contract scenarios against a real tenant', () => {
           realtimeClients.push(realtime)
           return realtime
         },
+        socket: (token) => openSocket(WebSocket, baseUrl!, token, rawSockets),
       })
     }, 60_000)
   }

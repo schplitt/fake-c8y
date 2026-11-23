@@ -27,11 +27,91 @@ export interface ContractContext {
    */
   realtime: () => RealtimeClient
   /**
+   * Opens a raw Notification 2.0 consumer socket with a token and records
+   * what happens (closed after the scenario). Resolves once the socket opened
+   * or the connect failed.
+   */
+  socket: (token: string) => Promise<RawSocket>
+  /**
    * Waits for a write the platform applies asynchronously before asserting
    * that nothing changed (a negative wait). The fake applies writes at once,
    * so its runner shortens the wait.
    */
   settle: (ms: number) => Promise<void>
+}
+
+/**
+ * A consumer socket without a client library on top, so a scenario sees
+ * refused connects, close codes, and frames as they are.
+ */
+export interface RawSocket {
+  token: string
+  opened: boolean
+  /**
+   * HTTP status of a refused connect, where the transport shows it.
+   */
+  refused?: number
+  /**
+   * Frame texts, in arrival order.
+   */
+  messages: string[]
+  closes: Array<[code: number, reason: string]>
+  send: (text: string) => void
+  close: () => void
+}
+
+/**
+ * The parts of a WebSocket (`ws` or the fake's `ws` flavor) that `openSocket()` uses.
+ */
+export interface EventSocket {
+  on: (event: string, listener: (...args: any[]) => void) => unknown
+  send: (data: string) => void
+  close: () => void
+  terminate: () => void
+}
+
+/**
+ * Opens a consumer socket for a token and records its events. The socket is
+ * added to `sockets` at once, so a connect that never resolves is still
+ * closed by the caller's cleanup. Resolves once it opened or closed.
+ * @param WebSocket - A `ws`-like WebSocket constructor
+ * @param baseUrl - The tenant's base URL
+ * @param token - A token of `POST /notification2/token`
+ * @param sockets - The caller's cleanup list
+ */
+export function openSocket(WebSocket: new (url: string) => EventSocket, baseUrl: string, token: string, sockets: RawSocket[]): Promise<RawSocket> {
+  // the consumer URL, built like c8y-realtime does
+  const url = `${baseUrl.replace(/\/+$/, '')}/notification2/consumer/?${new URLSearchParams({ token })}`
+  const socket = new WebSocket(url.replace(/^http:\/\//i, 'ws://').replace(/^https:\/\//i, 'wss://'))
+  const raw: RawSocket = {
+    token,
+    opened: false,
+    messages: [],
+    closes: [],
+    send: (text) => socket.send(text),
+    close: () => socket.close(),
+  }
+  sockets.push(raw)
+  return new Promise((resolve) => {
+    // with this listener, ws leaves a refused upgrade to the caller
+    socket.on('unexpected-response', (_request: unknown, response: { statusCode: number }) => {
+      raw.refused = response.statusCode
+      socket.terminate()
+    })
+    socket.on('open', () => {
+      raw.opened = true
+      resolve(raw)
+    })
+    socket.on('message', (data: unknown) => {
+      raw.messages.push(String(data))
+    })
+    socket.on('close', (code: number, reason: unknown) => {
+      raw.closes.push([code, String(reason)])
+      resolve(raw)
+    })
+    // a failed connect also emits an error; its close is recorded
+    socket.on('error', () => {})
+  })
 }
 
 export interface ContractScenario {

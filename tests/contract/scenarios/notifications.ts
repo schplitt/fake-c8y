@@ -205,6 +205,52 @@ export const notificationsScenarios: ContractScenario[] = [
     },
   },
   {
+    name: 'notification2: a raw consumer socket receives a frame, and an ack keeps it open',
+    async run({ client, unique, tenant, socket, settle }) {
+      const { data: device } = await client.inventory.create({ name: `nr-${unique}`, c8y_IsDevice: {} })
+      const name = `raw${unique}`
+      const created = await api(client, 'POST', '/notification2/subscriptions', { context: 'mo', subscription: name, source: { id: device.id }, subscriptionFilter: { apis: ['measurements'] } })
+      expect(created.status).toBe(201)
+      const minted = await api(client, 'POST', '/notification2/token', { subscription: name, subscriber: `c${unique}` })
+      expect(minted.status).toBe(200)
+
+      const consumer = await socket(minted.body.token)
+      expect(consumer.opened).toBe(true)
+      expect(consumer.refused).toBeUndefined()
+      expect(consumer.closes).toEqual([])
+      // give the consumer a moment to attach before the data change
+      await settle(2000)
+
+      const measurement = await api(client, 'POST', '/measurement/measurements', { source: { id: device.id }, type: 'c8y_Temperature', time: new Date().toISOString(), c8y_Temperature: { T: { value: 21, unit: 'C' } } })
+      expect(measurement.status).toBe(201)
+      // <ackId>, /<tenant>/<api>/<source>, the action, a blank line, the payload
+      await eventually(async () => {
+        expect(consumer.messages).toHaveLength(1)
+      }, 15_000)
+      // the header ends at the first blank line; the rest is the payload
+      const frame = consumer.messages[0]!.replace(/\r\n/g, '\n')
+      const separator = frame.indexOf('\n\n')
+      const header = frame.slice(0, separator)
+      const payload = frame.slice(separator + 2)
+      const [ackId, description, action] = header.split('\n')
+      expect(ackId).toMatch(/\S/)
+      expect(description).toBe(`/${tenant}/measurements/${device.id}`)
+      expect(action).toBe('CREATE')
+      expect(JSON.parse(payload)).toMatchObject({ id: measurement.body.id, type: 'c8y_Temperature' })
+
+      consumer.send(ackId!)
+      await settle(2000)
+      expect(consumer.closes).toEqual([])
+
+      // a connected persistent consumer outlives its subscription's deletion,
+      // so unsubscribe while it is connected
+      const unsubscribed = await api(client, 'POST', `/notification2/unsubscribe?token=${consumer.token}`)
+      expect(unsubscribed.status).toBe(200)
+      expect(unsubscribed.body).toEqual({ result: 'DONE' })
+      expect((await api(client, 'DELETE', `/notification2/subscriptions/${created.body.id}`)).status).toBe(204)
+    },
+  },
+  {
     name: 'realtime: notifications for measurements, alarms, and managed objects',
     async run({ client, unique, realtime }) {
       const { data: device } = await client.inventory.create({ name: `rt-${unique}`, c8y_IsDevice: {} })
