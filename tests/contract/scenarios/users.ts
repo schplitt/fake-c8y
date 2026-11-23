@@ -402,14 +402,16 @@ export const usersScenarios: ContractScenario[] = [
           [{ scope: 'ALARM', type: '*' }, 'permission is required'],
           [{ permission: 'READ', type: '*' }, 'scope is required'],
           [{ permission: 'READ', scope: 'ALARM' }, 'type is required'],
-          // the required fields in order: type, permission, scope
-          [{}, 'type is required'],
-          [{ scope: 'ALARM' }, 'type is required'],
-          [{ type: '*' }, 'permission is required'],
-          [{ permission: 'WRITE' }, 'type is required'],
           [{ scope: 'FOO', type: '*' }, 'permission is required'],
+          // several missing fields: the platform names any one of them (which one is not stable)
+          [{}, ['type is required', 'permission is required', 'scope is required']],
+          [{ scope: 'ALARM' }, ['type is required', 'permission is required']],
+          [{ type: '*' }, ['permission is required', 'scope is required']],
+          [{ permission: 'WRITE' }, ['type is required', 'scope is required']],
         ] as const) {
-          expect(await api(client, 'POST', '/user/inventoryroles', { name: `${name}-x`, permissions: [permission] })).toMatchObject({ status: 422, body: { error: 'undefined/validationError', message } })
+          const answer = await api(client, 'POST', '/user/inventoryroles', { name: `${name}-x`, permissions: [permission] })
+          expect(answer).toMatchObject({ status: 422, body: { error: 'undefined/validationError' } })
+          expect([message].flat()).toContain(answer.body.message)
         }
         expect((await api(client, 'GET', `/user/inventoryroles/${role.id}`)).body.name).toBe(name)
         expect(await api(client, 'GET', '/user/inventoryroles/999999')).toMatchObject({ status: 404, body: { error: 'users/Not Found', message: 'Cannot find document with ID 999999' } })
@@ -432,7 +434,7 @@ export const usersScenarios: ContractScenario[] = [
         expect(assigned.body).toMatchObject({ id: expect.any(Number), managedObject: device.id, roles: [{ id: role.id, name, description: 'new' }] })
         expect(url(assigned.body.self)).toBe(`/user/${userName}/roles/inventory/${assigned.body.id}`)
         expect(await api(client, 'POST', assignments, { managedObject: device.id, roles: [{ id: 1 }] })).toMatchObject({ status: 409, body: { error: 'users/Duplicate', message: `Error adding user inventory assignments ${userName}! : Inventory role is already assigned to the '${device.id}' managed object!` } })
-        expect(await api(client, 'POST', assignments, { managedObject: device.id, roles: [{ id: 999999 }] })).toMatchObject({ status: 404, body: { message: `Error adding user inventory assignments ${userName}! : Inventory role 'null' with id 'ID [type=com_cumulocity_model_idtype_GId, value=999999]' does not exist!` } })
+        expect(await api(client, 'POST', assignments, { managedObject: device.id, roles: [{ id: 999999 }] })).toMatchObject({ status: 404, body: { message: `Error adding user inventory assignments ${userName}! : Inventory role 'null' with id '999999' does not exist!` } })
         expect(await api(client, 'POST', assignments, { managedObject: '999999999', roles: [{ id: role.id }] })).toMatchObject({ status: 404, body: { message: 'Managed object with id \'999999999\' does not exist! : Cannot find document with ID 999999999' } })
         expect(await api(client, 'POST', assignments, { roles: [{ id: role.id }] })).toMatchObject({ status: 422, body: { message: 'managedObject is required' } })
         expect(await api(client, 'POST', `/user/${tenant}/users/${userName}.nope/roles/inventory`, { managedObject: device.id, roles: [] })).toMatchObject({ status: 404, body: { message: `User with username '${userName}.nope' does not exist! : Cannot find document with ID ${userName}.nope` } })
@@ -443,7 +445,7 @@ export const usersScenarios: ContractScenario[] = [
         expect(list.body).not.toHaveProperty('statistics')
         const one = `${assignments}/${assigned.body.id}`
         expect((await api(client, 'GET', one)).body).toEqual(assigned.body)
-        expect(await api(client, 'GET', `${assignments}/999999`)).toMatchObject({ status: 404, body: { message: `Inventory Assignment with id 'ID [type=com_cumulocity_model_idtype_GId, value=999999]' not found in user '${userName}' : Inventory assignment not found!` } })
+        expect(await api(client, 'GET', `${assignments}/999999`)).toMatchObject({ status: 404, body: { message: `Inventory Assignment with id '999999' not found in user '${userName}' : Inventory assignment not found!` } })
         const replaced = await api(client, 'PUT', one, { roles: [{ id: 1 }, { id: role.id }] })
         expect(replaced.body.roles.map((item: any) => item.id)).toEqual([1, role.id])
         expect((await api(client, 'PUT', `${assignments}/999999`, { roles: [] })).status).toBe(404)

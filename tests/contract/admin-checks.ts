@@ -33,8 +33,9 @@ export interface Check {
   error?: string
   /**
    * Expected `message`; ids are written as `<id>`, the host as `HOST`, the tenant as `TENANT`.
+   * A list accepts any of its messages (several missing fields: the platform's order varies).
    */
-  message?: string
+  message?: string | string[]
   /**
    * Scalar fields of the response (`toMatchObject`).
    */
@@ -82,7 +83,7 @@ export async function runChecks(client: Client, tenant: string, prefix: string, 
       expect(json?.error, label).toBe(check.error)
     }
     if (check.message !== undefined) {
-      expect(normalize(String(json?.message), tenant), label).toBe(normalize(sub(check.message), tenant))
+      expect([check.message].flat().map((message) => normalize(sub(message), tenant)), label).toContain(normalize(String(json?.message), tenant))
     }
     if (check.empty) {
       expect(text, label).toBe('')

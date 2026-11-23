@@ -75,7 +75,7 @@ function notFound(id: string): Response {
 }
 
 function notActive(id: string): Response {
-  return apiError(404, 'devicecontrol/Not Found', `Finding bulk operation from database failed : Could not find ACTIVE or IN_PROGRESS entity BulkOperation by ID ID [type=com_cumulocity_model_idtype_GId, value=${id}]!`)
+  return apiError(404, 'devicecontrol/Not Found', `Finding bulk operation from database failed : Could not find ACTIVE or IN_PROGRESS entity BulkOperation by ID ${id}!`)
 }
 
 /**
@@ -311,7 +311,7 @@ function create(data: TenantData, input: BulkInput, deviceIds?: string[]): Store
     }
     targets = [...data.children.get(group.id)?.childAssets ?? []]
     if (targets.length === 0) {
-      return invalid(`Cannot execute bulk operation on empty group. Group with id='ID [type=com_cumulocity_model_idtype_GId, value=${group.id}]' doesn't have child assets.`)
+      return invalid(`Cannot execute bulk operation on empty group. Group with id='${group.id}' doesn't have child assets.`)
     }
   }
   const id = String(nextSequence(data, 'bulkOperation'))

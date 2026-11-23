@@ -56,7 +56,7 @@ describe('audit records', () => {
     await world.fetch(new Request(`${world.baseUrl}/notification2/subscriptions`, { method: 'POST', headers: json, body: JSON.stringify({ context: 'tenant', subscription: 'all', subscriptionFilter: { apis: ['alarms'] } }) }))
     await world.fetch(new Request(`${world.baseUrl}/notification2/token`, { method: 'POST', headers: json, body: JSON.stringify({ subscriber: 'me', subscription: 'all' }) }))
     const [created, token] = world.db.auditRecords.find()
-    expect(created!.text).toBe(`Reliable notification subscription ID [type=com_cumulocity_model_idtype_GId, value=${created!.source.id}] created: context='tenant', subscriptionFilter='NotificationSubscriptionFilter(apis=[alarms], typeFilter=null)', source='ID [type=com_cumulocity_model_idtype_GId, value=t12345]', id='ID [type=com_cumulocity_model_idtype_GId, value=${created!.source.id}]', subscription='all'`)
+    expect(created!.text).toBe(`Reliable notification subscription ${created!.source.id} created: source='t12345', context='tenant', id='${created!.source.id}', subscription='all', subscriptionFilter='NotificationSubscriptionFilter(apis=[alarms], typeFilter=null)'`)
     expect(token).toMatchObject({ activity: 'Notification token created', text: 'Notification token for topic:\'t12345/relnotif/all\'created created' })
     expect(token).not.toHaveProperty('source')
   })

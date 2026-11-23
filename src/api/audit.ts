@@ -207,7 +207,8 @@ export function auditAlarmCreated(data: TenantData, alarm: StoredDocument, syste
 /**
  * Audit record of an alarm update: text and severity as before the update,
  * one change per attribute that changed, none if nothing changed (verified).
- * A severity change leaves the status change out and is followed by two
+ * A severity change names the status change first, the other changes
+ * follow, and is followed by two
  * `SYSTEM` "Availability monitoring record" records of the user: the status
  * before the update to CLEARED with the old severity and text, then one
  * without changes with the new ones (verified, also when the
@@ -220,9 +221,10 @@ export function auditAlarmCreated(data: TenantData, alarm: StoredDocument, syste
  */
 export function auditAlarmUpdated(data: TenantData, before: StoredDocument, after: StoredDocument, always = false, system = false): void {
   const severityChanged = !system && JSON.stringify(before.severity) !== JSON.stringify(after.severity)
-  const ignored = new Set(['id', 'self', 'lastUpdated', 'creationTime', 'count', 'firstOccurrenceTime', 'source', 'time', 'type', ...(severityChanged ? ['status'] : [])])
+  const ignored = new Set(['id', 'self', 'lastUpdated', 'creationTime', 'count', 'firstOccurrenceTime', 'source', 'time', 'type'])
   const changes: AuditChange[] = []
-  for (const attribute of new Set([...Object.keys(before), ...Object.keys(after)])) {
+  // a severity change names the status change first; the other changes follow the document
+  for (const attribute of new Set([...(severityChanged ? ['status'] : []), ...Object.keys(before), ...Object.keys(after)])) {
     const previous = Object.hasOwn(before, attribute) ? before[attribute] : undefined
     const next = Object.hasOwn(after, attribute) ? after[attribute] : undefined
     if (ignored.has(attribute) || JSON.stringify(previous) === JSON.stringify(next)) {
@@ -381,7 +383,7 @@ export function audit(call: C8yRequest, segments: string[], data: TenantData): R
     return record
       ? Response.json(renderAuditRecord(data, record))
       // verified, also for an id that is no number
-      : apiError(404, 'audit/Not Found', `Can't find audit record with given id ID [type=com_cumulocity_model_idtype_GId, value=${id}]`)
+      : apiError(404, 'audit/Not Found', `Can't find audit record with given id ${id}`)
   }
   checkQuery('GET /audit/auditRecords', call, LIST_PARAMS)
   const { query } = call
@@ -492,7 +494,7 @@ export function auditUser(data: TenantData, userName: string, action: 'created' 
 /**
  * Audit record of a global role (user group) whose permissions changed
  * (verified: `Global Role <name> updated: roles ['ROLE_X'] added`, source
- * the group id in the platform's id notation). Creating,
+ * the group id). Creating,
  * renaming, and deleting a group, and adding users to it, write no group
  * record (adding a user writes a user record with `global roles`).
  * @param data - Tenant data
@@ -510,7 +512,7 @@ export function auditGlobalRoleUpdated(data: TenantData, group: { id: string, na
     activity: 'Global Role updated',
     text: `Global Role ${group.name} updated: ${describeChanges(changes)}`,
     changes,
-    source: `ID [type=com_cumulocity_model_idtype_GId, value=${group.id}]`,
+    source: group.id,
   })
 }
 
@@ -567,8 +569,6 @@ export function auditBulkOperation(data: TenantData, bulk: StoredDocument, actio
   })
 }
 
-const GID = (id: string) => `ID [type=com_cumulocity_model_idtype_GId, value=${id}]`
-
 /**
  * Audit record of a new Notification 2.0 subscription (verified).
  * @param data - Tenant data
@@ -588,7 +588,8 @@ export function auditSubscriptionCreated(data: TenantData, subscription: { id: s
   // verified: a tenant subscription's source is the tenant
   const source = subscription.source?.id ?? data.tenant
   const filter = subscription.subscriptionFilter
-  const parts: string[] = [`context='${subscription.context}'`]
+  // verified: the platform's order of the parts is not stable; this order is one fixed choice
+  const parts: string[] = [`source='${source}'`, `context='${subscription.context}'`, `id='${subscription.id}'`, `subscription='${subscription.subscription}'`]
   const changes: AuditChange[] = [{ attribute: 'context', type: 'java.lang.String', previousValue: null, newValue: subscription.context }]
   if (filter) {
     parts.push(`subscriptionFilter='NotificationSubscriptionFilter(apis=[${(filter.apis ?? []).join(', ')}], typeFilter=${filter.typeFilter ?? 'null'})'`)
@@ -600,7 +601,6 @@ export function auditSubscriptionCreated(data: TenantData, subscription: { id: s
   if (subscription.fragmentsToCopy?.length) {
     parts.push(`fragmentsToCopy [${subscription.fragmentsToCopy.map((fragment) => `'${fragment}'`).join(', ')}] added`)
   }
-  parts.push(`source='${GID(source)}'`, `id='${GID(subscription.id)}'`, `subscription='${subscription.subscription}'`)
   changes.push(
     { attribute: 'source', type: 'com.cumulocity.model.idtype.GId', previousValue: null, newValue: source },
     { attribute: 'id', type: 'com.cumulocity.model.idtype.GId', previousValue: null, newValue: subscription.id },
@@ -613,7 +613,7 @@ export function auditSubscriptionCreated(data: TenantData, subscription: { id: s
   recordAudit(data, {
     type: 'Notification2',
     activity: 'Reliable notification subscription created',
-    text: `Reliable notification subscription ${GID(subscription.id)} created: ${parts.join(', ')}`,
+    text: `Reliable notification subscription ${subscription.id} created: ${parts.join(', ')}`,
     changes,
     source: subscription.id,
   })
@@ -628,7 +628,7 @@ export function auditSubscriptionDeleted(data: TenantData, id: string): void {
   recordAudit(data, {
     type: 'Notification2',
     activity: 'Reliable notification subscription deleted',
-    text: `Reliable notification subscription ${GID(id)} deleted`,
+    text: `Reliable notification subscription ${id} deleted`,
     source: id,
   })
 }
@@ -641,7 +641,7 @@ export function auditSubscriptionDeleted(data: TenantData, id: string): void {
  * @param count - Deleted subscriptions
  */
 export function auditSubscriptionsDeletedBySource(data: TenantData, source: string, count: number): void {
-  const activity = `reliable notification subscriptions with filter source=${GID(source)} deleted`
+  const activity = `reliable notification subscriptions with filter source=${source} deleted`
   recordAudit(data, { type: 'Notification2', activity, text: `${count} ${activity}` })
 }
 
