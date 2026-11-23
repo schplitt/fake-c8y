@@ -1,7 +1,7 @@
 import { scheduleAvailability } from './availability'
 import type { C8yAlarmSeverity, C8yAlarmStatus, C8yOperationStatus } from './capabilities.generated'
 import type { DocumentCollection, StoredDocument, TenantData } from './store'
-import { createDocument, RESOURCES, renderDocument, updateDocument } from './api/data'
+import { createDocument, openAlarm, RESOURCES, renderDocument, updateDocument } from './api/data'
 import { addExternalId } from './api/identity'
 import { createManagedObject, parentIndex, renderManagedObject } from './api/inventory'
 import { createBinary } from './api/binaries'
@@ -237,6 +237,10 @@ export interface C8yRetentionRuleInput {
    * Maximum age in days.
    */
   maximumAge: number
+  /**
+   * Id to store it under (digits); defaults to a new one.
+   */
+  id?: string
 }
 
 /**
@@ -390,6 +394,49 @@ export type C8ySeedResultFor<S extends C8ySeed> = C8ySeedResult & {
 
 const RESERVED = ['children', 'assets', 'additions', 'externalIds', 'tenant']
 
+const ID_KINDS = { managedObjects: 'managed object', measurements: 'measurement', events: 'event', alarms: 'alarm', operations: 'operation', retentionRules: 'retention rule', auditRecords: 'audit record' } as const
+
+/**
+ * Checks the ids seed inputs give (seeds keep them): a digit string, for a
+ * measurement also 24 lower-case hex characters; not used by a stored
+ * document of the same kind in the tenant (binaries are managed objects,
+ * generated measurements and the ids of their blocks are measurements), nor
+ * twice in the list. The caller then moves the id sequence past them
+ * (`jumpPast()`), before it writes.
+ * @param data - Tenant the inputs go to
+ * @param collection - Their kind
+ * @param inputs - The inputs, some with an `id`
+ * @param prefix - Start of the error message, e.g. `seed(): invalid event: `
+ * @returns The given ids
+ */
+export function givenIds(data: TenantData, collection: keyof typeof ID_KINDS, inputs: readonly object[], prefix: string): string[] {
+  const ids = new Set<string>()
+  let view: ReturnType<typeof generatedView> | null = null
+  for (const input of inputs) {
+    const id = (input as { id?: unknown }).id
+    if (id === undefined) {
+      continue
+    }
+    if (typeof id !== 'string') {
+      throw new TypeError(`${prefix}id must be a string`)
+    }
+    if (!/^[1-9]\d*$/.test(id) && !(collection === 'measurements' && /^[0-9a-f]{24}$/.test(id))) {
+      throw new TypeError(`${prefix}id '${id}' must be digits without a leading zero${collection === 'measurements' ? ' or 24 lower-case hex characters' : ''}`)
+    }
+    if (collection === 'measurements' && view === null) {
+      view = generatedView(data)
+    }
+    const stored = collection === 'measurements'
+      ? data.measurements.has(id) || view?.locate(data.world.measurementSequence(id)) !== undefined
+      : data[collection].has(id)
+    if (stored || ids.has(id)) {
+      throw new TypeError(`${prefix}${ID_KINDS[collection]} ${id} already exists`)
+    }
+    ids.add(id)
+  }
+  return [...ids]
+}
+
 /**
  * Creates a managed object from seed input.
  * @param data - Tenant to create it in
@@ -399,7 +446,8 @@ const RESERVED = ['children', 'assets', 'additions', 'externalIds', 'tenant']
  */
 export function createFromInput(data: TenantData, input: C8yManagedObjectInput, owner: string): string {
   const fragments = Object.fromEntries(Object.entries(input).filter(([key]) => !RESERVED.includes(key)))
-  const document = createManagedObject(data, fragments, input.owner ?? owner)
+  // a seed's id, checked by the caller (`givenIds()`)
+  const document = createManagedObject(data, fragments, input.owner ?? owner, input.id as string | undefined)
   for (const [kind, children] of [['childDevices', input.children], ['childAssets', input.assets], ['childAdditions', input.additions]] as const) {
     for (const child of children ?? []) {
       addChild(data, document.id, kind, resolveId(child))
@@ -448,13 +496,13 @@ export interface C8yBinaryInput {
  * @returns The new binary's id
  */
 export function createBinaryFromInput(data: TenantData, input: C8yBinaryInput, owner: string): string {
-  const { name, content, contentType, tenant: _tenant, ...fragments } = input
+  const { name, content, contentType, tenant: _tenant, id, ...fragments } = input
   const bytes = typeof content === 'string' ? new TextEncoder().encode(content) : content
   const document = createBinary(data, {
     bytes,
     contentType: contentType ?? (typeof content === 'string' ? 'text/plain' : 'application/octet-stream'),
     name,
-  }, { name, ...fragments }, owner)
+  }, { name, ...fragments }, owner, id as string | undefined)
   return document.id
 }
 
@@ -475,7 +523,7 @@ function toContent(content: { name: string, contentType: string, bytes: Uint8Arr
   return content && { ...content, text: () => new TextDecoder().decode(content.bytes) }
 }
 
-function seedInto(data: TenantData, collection: Exclude<DocumentCollection, 'managedObjects'>, input: Record<string, unknown>): string {
+function seedInto(data: TenantData, collection: Exclude<DocumentCollection, 'managedObjects'>, { id, ...input }: Record<string, unknown>): string {
   const resource = Object.values(RESOURCES).find((item) => item.collection === collection)!
   const now = data.world.now()
   const body: Record<string, unknown> = { time: now, ...input }
@@ -495,7 +543,8 @@ function seedInto(data: TenantData, collection: Exclude<DocumentCollection, 'man
     delete body.failureReason
     body.deviceId = resolveId(input.deviceId as C8yIdInput)
   }
-  const result = createDocument(data, resource, body)
+  // a seed's id, checked in applySeed() (requests keep answering 422 for one)
+  const result = createDocument(data, resource, body, undefined, false, id as string | undefined)
   if (result instanceof Response) {
     throw new TypeError(`seed(): invalid ${collection.slice(0, -1)}: ${(result as Response & { message?: string }).message ?? result.status}`)
   }
@@ -630,6 +679,30 @@ function seedUsers(data: TenantData, seed: C8ySeed, result: C8ySeedResult, tenan
  */
 export function applySeed(data: TenantData, seed: C8ySeed, user: string, tenants: SeedTenants): C8ySeedResult {
   const userTenantNames = userTenants(data, seed, tenants)
+  // every given id is checked before anything is written, and the sequence
+  // moves past them first, so the documents without one get other ids
+  const given = (['measurements', 'events', 'alarms', 'operations', 'retentionRules', 'auditRecords'] as const)
+    .flatMap((collection) => givenIds(data, collection, seed[collection] ?? [], `seed(): invalid ${ID_KINDS[collection]}: `))
+  // an alarm with a given id must not vanish into the platform's
+  // de-duplication (createDocument(): an open alarm of the same source and
+  // type, the new one not CLEARED), stored or earlier in the list
+  const open = new Map<string, string>()
+  for (const alarm of seed.alarms ?? []) {
+    if (alarm.source === undefined || alarm.type === undefined || alarm.status === 'CLEARED') {
+      continue
+    }
+    const source = resolveId(alarm.source)
+    const key = `${source}\u0000${String(alarm.type)}`
+    const stored = open.has(key) ? undefined : openAlarm(data, source, String(alarm.type))
+    const earlier = open.get(key) ?? (stored && `open alarm ${stored.id}`)
+    if (earlier !== undefined && alarm.id !== undefined) {
+      throw new TypeError(`seed(): invalid alarm: id ${alarm.id} would merge into ${earlier}`)
+    }
+    open.set(key, earlier ?? (alarm.id !== undefined ? `open alarm ${alarm.id}` : `the open alarm of source ${source} and type ${String(alarm.type)}`))
+  }
+  for (const id of given) {
+    data.world.jumpPast(id)
+  }
   const result: C8ySeedResult = {}
   seedUsers(data, seed, result, userTenantNames, tenants.data)
   if (seed.measurements) {
@@ -672,8 +745,8 @@ export function applySeed(data: TenantData, seed: C8ySeed, user: string, tenants
     })
   }
   if (seed.retentionRules) {
-    result.retentionRules = seed.retentionRules.map((rule) => {
-      const created = createRetentionRule(data, { ...rule })
+    result.retentionRules = seed.retentionRules.map(({ id, ...rule }) => {
+      const created = createRetentionRule(data, { ...rule }, id)
       if (created instanceof Response) {
         throw new TypeError(`seed(): invalid retention rule: ${(created as Response & { message?: string }).message ?? created.status}`)
       }
@@ -681,7 +754,8 @@ export function applySeed(data: TenantData, seed: C8ySeed, user: string, tenants
     })
   }
   if (seed.auditRecords) {
-    result.auditRecords = seed.auditRecords.map(({ type, activity, text, source, time, user: recordUser, application, severity, changes, ...fragments }) => recordAudit(data, {
+    result.auditRecords = seed.auditRecords.map(({ id, type, activity, text, source, time, user: recordUser, application, severity, changes, ...fragments }) => recordAudit(data, {
+      ...(id !== undefined ? { id: id as string } : {}),
       type,
       activity,
       text,

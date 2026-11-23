@@ -902,7 +902,8 @@ export class GeneratedView {
    */
   list(q: MeasurementQuery, stored: readonly StoredDocument[], newestFirst: boolean): { total: () => number, page: (offset: number, size: number) => StoredDocument[] } {
     const plans = this.plans(q)
-    const items: Sorted[] = stored.map((document) => ({ time: parseIsoTime(document.time), id: this.#ids.measurementSequence(document.id), document }))
+    // a stored id the format does not make (a seed's) sorts after generated ones
+    const items: Sorted[] = stored.map((document) => ({ time: parseIsoTime(document.time), id: this.#ids.measurementSequence(document.id) || Infinity, document }))
     let cached: number | undefined
     const total = () => (cached ??= plans.reduce((sum, plan) => sum + GeneratedView.count(plan, 0, Infinity), 0) + items.length)
     return {
@@ -1134,15 +1135,17 @@ export class GeneratedView {
         }
       }
     }
+    // counted across documents: stored ids the format does not make (a
+    // seed's, Infinity) keep the documents' order among themselves
+    let position = 0
     for (const document of stored) {
-      let position = 0
       for (const [fragment, value] of Object.entries(document)) {
         if (!value || typeof value !== 'object' || Array.isArray(value)) {
           continue
         }
         for (const [series, entry] of Object.entries(value as Record<string, unknown>)) {
           if (entry && typeof entry === 'object' && typeof (entry as { value?: unknown }).value === 'number') {
-            found.push({ id: this.#ids.measurementSequence(document.id), position: position++, key: [fragment, series] })
+            found.push({ id: this.#ids.measurementSequence(document.id) || Infinity, position: position++, key: [fragment, series] })
           }
         }
       }
@@ -1185,7 +1188,8 @@ export class GeneratedView {
   #inIdOrder(q: MeasurementQuery, stored: Iterable<StoredDocument>): Array<{ plan: Plan, id: number } | { document: StoredDocument, id: number }> {
     const items: Array<{ plan: Plan, id: number } | { document: StoredDocument, id: number }> = this.plans(q).map((plan) => ({ plan, id: this.streams[plan.s]!.idStart }))
     for (const document of stored) {
-      items.push({ document, id: this.#ids.measurementSequence(document.id) })
+      // a stored id the format does not make (a seed's) sorts after the streams
+      items.push({ document, id: this.#ids.measurementSequence(document.id) || Infinity })
     }
     return items.sort((a, b) => a.id - b.id)
   }

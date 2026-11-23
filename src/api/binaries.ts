@@ -193,8 +193,9 @@ const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
  * @param content - File content
  * @param object - Managed object fragments from the upload
  * @param owner - Owner user name
+ * @param id - Its id (a seed's), else a new one
  */
-export function createBinary(data: TenantData, content: BinaryContent, object: Record<string, unknown>, owner: string): StoredDocument {
+export function createBinary(data: TenantData, content: BinaryContent, object: Record<string, unknown>, owner: string, id?: string): StoredDocument {
   const document = createManagedObject(data, {
     ...object,
     name: object.name ?? content.name,
@@ -202,7 +203,7 @@ export function createBinary(data: TenantData, content: BinaryContent, object: R
     contentType: content.contentType,
     length: content.bytes.length,
     c8y_IsBinary: '',
-  }, owner)
+  }, owner, id)
   data.binaries.set(document.id, content)
   return document
 }

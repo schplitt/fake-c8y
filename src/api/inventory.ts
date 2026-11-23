@@ -284,13 +284,14 @@ export function renderManagedObject(data: TenantData, document: StoredDocument, 
  * @param data - Tenant data
  * @param body - Managed object fragments
  * @param owner - Owner user name
+ * @param id - Its id (a seed's), else a new one
  */
-export function createManagedObject(data: TenantData, body: Record<string, unknown>, owner: string): StoredDocument {
+export function createManagedObject(data: TenantData, body: Record<string, unknown>, owner: string, id: string = data.world.newId('managedObject')): StoredDocument {
   const now = data.world.now()
   // verified: a create may set the creation time (an update cannot)
   const given = body.creationTime
   const creationTime = typeof given === 'number' ? new Date(given).toISOString() : typeof given === 'string' ? normalizeIsoTime(given) : now
-  const document: StoredDocument = { id: data.world.newId('managedObject'), owner, ...omit(body, SERVER_FIELDS), creationTime, lastUpdated: now }
+  const document: StoredDocument = { id, owner, ...omit(body, SERVER_FIELDS), creationTime, lastUpdated: now }
   if (typeof body.owner === 'string') {
     document.owner = body.owner
   }

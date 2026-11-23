@@ -41,6 +41,10 @@ export interface AuditChange {
  */
 export interface AuditInput {
   /**
+   * Its id (a seed's), else a new one.
+   */
+  id?: string
+  /**
    * Platform component, e.g. `Alarm`, `Operation`, `Inventory`, `Option`, `User`.
    */
   type: string
@@ -90,7 +94,7 @@ export function recordAudit(data: TenantData, input: AuditInput): StoredDocument
   }
   const now = data.world.now()
   const record: StoredDocument = {
-    id: data.world.newId(),
+    id: input.id ?? data.world.newId(),
     type: input.type,
     text: input.text,
     ...(input.system ? {} : { user }),

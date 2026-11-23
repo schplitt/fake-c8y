@@ -105,6 +105,26 @@ A generator reserves a block of the world's id sequence, one id per grid point i
 
 Seeding writes like any other write: on a fork it goes to the fork, and on a frozen base it throws. Forks of the same base that get the same seed get the same ids.
 
+### Given ids
+
+A seed input may bring its own `id`, and the world stores it under that id: `managedObject()`, `device()`, `binary()`, managed objects in a service's seed, and in `seed()` measurements, events, alarms, operations, retention rules, and audit records. Use it to load data whose references (dashboards, `childDevices`, links) name ids.
+
+```ts
+const world = createWorld({ ids: 'sequential' })
+world.managedObject({ id: '50', name: 'Pump' })
+world.seed({ events: [{ id: '4713', source: '50', type: 'door_open' }] })
+world.managedObject({ name: 'Valve' }) // '4714': the counter jumped past both
+```
+
+- An id is a string of digits without a leading zero (`'4711'`, `'49132520'`). A measurement id may also be 24 lower-case hex characters. Anything else (a number, `'007'`) throws a `TypeError`.
+- An id the tenant already has for that kind throws: binaries count as managed objects, and generated measurements, with every id of their block, count as measurements. An event `'7'` and an alarm `'7'` may both exist.
+- `seed()` checks every given id of all its lists before it writes anything.
+- An alarm with a given id that would merge into an open alarm of the same source and type (stored, or earlier in the same list) throws instead of merging. Alarms without an id merge as before.
+- The world's id counter jumps past every number that could make the given id, for any kind, so the world never hands it out later: also in forks, after `reset()`, `reset({ to })`, and `restore()`. With scattered ids every id of six or more digits is a counter number (`'47100001'` makes the next ids start after 47000001). A number above 2^31 does not move the counter.
+- API requests still reject an `id` in the body (422).
+
+Changed: `managedObject()`, `device()`, and `binary()` used to drop a given `id`, and `seed()` threw an `is not allowed here` error for one (audit records kept it, without these checks). Code that passed an `id` and relied on a new one now gets the given one, or a `TypeError` if it is not a valid id.
+
 The helpers store what you give them. Only API requests write audit records or derive fragments such as `c8y_Availability`, so a seeded world starts without audit history unless you seed `auditRecords`.
 
 ```ts
@@ -340,6 +360,7 @@ Assigning new arrays to `calls` and `unhandled` still works, but it is only a pa
 - `ids: 'scattered'` (the default) gives ids in the platform's format. Managed objects get 8 digits with a scattered two-digit prefix in front of one shared counter (`47100001`). Events, alarms, operations, audit records, and retention rules get the bare counter (`100002`), and measurements 24 hex digits. Inventory lists keep creation order, so ascending managed object ids are not creation order, like on the platform.
 - `ids: 'sequential'` gives `'1'`, `'2'`, and so on for every collection, which reads better in some tests.
 - Both are deterministic: forks of the same base hand out the same ids.
+- An id a seed gives moves the counter past it (see [Given ids](#given-ids)).
 - Groups, inventory roles, their permissions, inventory assignments, and bulk operations count on their own per tenant, like on the platform.
 
 ## Notification 2.0
