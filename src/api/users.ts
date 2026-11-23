@@ -663,7 +663,7 @@ function checkPermissions(permissions: unknown): Array<Record<string, unknown>> 
     return fail(400, 'Failed to parse JSON string', `Cannot deserialize value of type \`java.util.ArrayList<com.cumulocity.rest.representation.role.inventory.InventoryPermissionRepresentation>\` from ${jsonTokenName(permissions)}${JACKSON_SOURCE} (through reference chain: ${INVENTORY_ROLE_TYPE}["permissions"])`)
   }
   return permissions.map((permission: Record<string, unknown>) => {
-    // verified: checked in this order, one at a time, before the values
+    // verified: one at a time, before the values; which of several missing fields the platform names is not stable, this order is one fixed choice
     for (const field of ['type', 'permission', 'scope']) {
       if (permission?.[field] === undefined || permission[field] === null) {
         fail(422, 'undefined/validationError', `${field} is required`)
@@ -784,7 +784,7 @@ function assignmentRoles(data: TenantData, userName: string, roles: unknown): st
   for (const id of ids) {
     if (id === undefined || !data.inventoryRoles.has(id)) {
       // verified: a role without an id (also one with only a `self` link) reads 'null'
-      fail(404, 'users/Not Found', `Error adding user inventory assignments ${userName}! : Inventory role 'null' with id '${id === undefined ? 'null' : `ID [type=com_cumulocity_model_idtype_GId, value=${id}]`}' does not exist!`)
+      fail(404, 'users/Not Found', `Error adding user inventory assignments ${userName}! : Inventory role 'null' with id '${id ?? 'null'}' does not exist!`)
     }
   }
   return [...new Set(ids as string[])]
@@ -1225,7 +1225,7 @@ function getAssignment(data: TenantData, userName: string, id: string): StoredDo
   }
   const assignment = data.inventoryAssignments.get(id)
   if (!assignment || assignment.user !== userName) {
-    fail(404, 'users/Not Found', `Inventory Assignment with id 'ID [type=com_cumulocity_model_idtype_GId, value=${id}]' not found in user '${userName}' : Inventory assignment not found!`)
+    fail(404, 'users/Not Found', `Inventory Assignment with id '${id}' not found in user '${userName}' : Inventory assignment not found!`)
   }
   return assignment!
 }

@@ -419,7 +419,7 @@ export const inventoryParityScenarios: ContractScenario[] = [
 
       // a collection: all or nothing, duplicates once
       const many = await api(client, 'POST', path, { references: [{ managedObject: { id: kids[2]!.id } }, { managedObject: { id: '99999999999' } }] }, COLLECTION)
-      expect(many).toMatchObject({ status: 404, body: { error: 'inventory/Not Found', message: 'Finding device data from database failed : Some managedObjects don\'t exist in database: \'[ID [type=com_cumulocity_model_idtype_GId, value=99999999999]]\'' } })
+      expect(many).toMatchObject({ status: 404, body: { error: 'inventory/Not Found', message: 'Finding device data from database failed : Some managedObjects don\'t exist in database: \'[99999999999]\'' } })
       expect(await ids()).toEqual([kids[0]!.id, kids[1]!.id].sort())
       const added = await api(client, 'POST', path, { references: [{ managedObject: { id: kids[2]!.id } }, { managedObject: { id: kids[2]!.id } }, { managedObject: { id: kids[3]!.id } }] }, COLLECTION)
       expect(added.status).toBe(201)
@@ -440,7 +440,7 @@ export const inventoryParityScenarios: ContractScenario[] = [
         [{ managedObject: {} }, {}, 422, 'no child id provided for ManagedObjectRepresentation'],
         [{ managedObject: { id: null } }, {}, 422, 'no child id provided for ManagedObjectRepresentation'],
         [{ managedObject: { self: 'garbage' } }, {}, 422, 'invalid self url provided for ManagedObjectRepresentation: garbage'],
-        [{ managedObject: { id: 'abc' } }, {}, 404, 'Finding device data from database failed : Some managedObjects don\'t exist in database: \'[ID [type=com_cumulocity_model_idtype_GId, value=abc]]\''],
+        [{ managedObject: { id: 'abc' } }, {}, 404, 'Finding device data from database failed : Some managedObjects don\'t exist in database: \'[abc]\''],
         [{ references: [{}] }, COLLECTION, 422, 'no child reference provided for ManagedObjectRepresentation'],
         [{ references: [{ managedObject: {} }] }, COLLECTION, 422, 'no child id provided for ManagedObjectRepresentation'],
       ]
@@ -600,7 +600,7 @@ export const inventoryParityScenarios: ContractScenario[] = [
       for (const id of [device.id, '99999999999']) {
         for (const [method, body] of [['GET', undefined], ['PUT', 'x']] as const) {
           const missing = await api(client, method, `/inventory/binaries/${id}`, body, { 'content-type': 'text/plain' })
-          expect(missing, `${method} ${id}`).toMatchObject({ status: 404, body: { error: 'inventory/Not Found', message: `Resource ID [type=com_cumulocity_model_idtype_GId, value=${id}] for this request not found.` } })
+          expect(missing, `${method} ${id}`).toMatchObject({ status: 404, body: { error: 'inventory/Not Found', message: `Resource ${id} for this request not found.` } })
         }
       }
       expect((await api(client, 'DELETE', '/inventory/binaries/99999999999'))).toMatchObject({ status: 404, body: { message: 'Delete attachment query failed. : Attachment not found' } })

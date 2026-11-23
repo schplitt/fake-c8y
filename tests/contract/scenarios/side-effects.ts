@@ -290,6 +290,12 @@ export const sideEffectsScenarios: ContractScenario[] = [
         expect(user.status).toBe(201)
         const group = await api(client, 'POST', `/user/${tenant}/groups`, { name: groupName })
         groupId = group.body.id
+        // a role added to the group: the record's source is the plain group id
+        expect((await api(client, 'POST', `/user/${tenant}/groups/${groupId}/roles`, { role: { self: 'https://x/user/roles/ROLE_EVENT_READ' } })).status).toBe(201)
+        await eventually(async () => {
+          const { body } = await api(client, 'GET', `/audit/auditRecords?type=Group&source=${groupId}&pageSize=20`)
+          expect(body.auditRecords.map((record: any) => record.text)).toEqual([`Global Role ${groupName} updated: roles ['ROLE_EVENT_READ'] added`])
+        })
         await api(client, 'POST', `/user/${tenant}/groups/${groupId}/users`, { user: { self: user.body.self } })
         expect((await api(client, 'DELETE', `/user/${tenant}/groups/${groupId}`)).status).toBe(204)
         groupId = undefined

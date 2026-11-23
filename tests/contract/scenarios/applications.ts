@@ -185,10 +185,11 @@ export const applicationScenarios: ContractScenario[] = [
         expect(stored.body.requiredRoles).toEqual(['ROLE_INVENTORY_READ'])
         expect(stored.body.roles).toEqual([])
 
-        // validation, one field at a time
-        const failures: Array<[Record<string, unknown>, number, string, string?]> = [
-          [{}, 422, 'undefined/validationError', 'key is required'],
-          [{ key: `${u}-v` }, 422, 'undefined/validationError', 'type is required'],
+        // validation, one field at a time; several missing fields name any one of them (which one the platform names is not stable)
+        const failures: Array<[Record<string, unknown>, number, string, (string | string[])?]> = [
+          [{}, 422, 'undefined/validationError', ['key is required', 'type is required', 'name is required']],
+          [{ key: `${u}-v` }, 422, 'undefined/validationError', ['type is required', 'name is required']],
+          [{ name: `${u}-v`, type: 'HOSTED' }, 422, 'undefined/validationError', 'key is required'],
           [{ key: `${u}-v`, name: `${u}-v` }, 422, 'undefined/validationError', 'type is required'],
           [{ key: `${u}-v`, type: 'HOSTED' }, 422, 'undefined/validationError', 'name is required'],
           [{ key: `${u}-v`, type: 'FOO' }, 422, 'undefined/validationError', 'name is required'],
@@ -200,7 +201,8 @@ export const applicationScenarios: ContractScenario[] = [
         ]
         for (const [body, status, error, message] of failures) {
           const answer = await create(body)
-          expect([JSON.stringify(body), answer.status, answer.body.error, answer.body.message]).toEqual([JSON.stringify(body), status, error, message])
+          expect([JSON.stringify(body), answer.status, answer.body.error]).toEqual([JSON.stringify(body), status, error])
+          expect([message].flat(), JSON.stringify(body)).toContain(answer.body.message)
         }
 
         // update: every field but the type; an id in the body is ignored
@@ -215,7 +217,7 @@ export const applicationScenarios: ContractScenario[] = [
         // not found: reads and updates answer one message, deletes another
         for (const method of ['GET', 'PUT']) {
           const missing = await api(client, method, '/application/applications/999999999', method === 'PUT' ? { description: 'x' } : undefined)
-          expect([method, missing.status, missing.body.error, missing.body.message]).toEqual([method, 404, 'applications/Not Found', 'Error occurred when trying to find an Application for id ID [type=com_cumulocity_model_idtype_GId, value=999999999] : Could not find application by ID 999999999'])
+          expect([method, missing.status, missing.body.error, missing.body.message]).toEqual([method, 404, 'applications/Not Found', 'Error occurred when trying to find an Application for id 999999999 : Could not find application by ID 999999999'])
         }
         expect((await api(client, 'DELETE', `/application/applications/${external.body.id}`)).status).toBe(204)
         const gone = await api(client, 'DELETE', `/application/applications/${external.body.id}`)
@@ -246,7 +248,7 @@ export const applicationScenarios: ContractScenario[] = [
         expect((await api(client, 'GET', `/application/applications/${hosted.id}`)).body.availability).toBe('MARKET')
 
         const again = await api(client, 'POST', path, { application: { id: hosted.id } })
-        expect([again.status, again.body.error, again.body.message]).toEqual([409, 'tenants/Duplicate', `Application with id ID [type=com_cumulocity_model_idtype_GId, value=${hosted.id}] is already assigned to the tenant ${tenant}`])
+        expect([again.status, again.body.error, again.body.message]).toEqual([409, 'tenants/Duplicate', `Application with id ${hosted.id} is already assigned to the tenant ${tenant}`])
         const missing = await api(client, 'POST', path, { application: { id: '999999999' } })
         expect([missing.status, missing.body.error, missing.body.message]).toEqual([404, 'application/Not Found', 'Could not find application by ID 999999999'])
         const empty = await api(client, 'POST', path, {})

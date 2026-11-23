@@ -208,7 +208,7 @@ export const deviceControlScenarios: ContractScenario[] = [
       expect((await post({ ...valid, groupId: '99999999999' })).body).toMatchObject({ error: 'bulkOperationResource/Invalid Data', message: 'Cannot find group for id=\'99999999999\'' })
       const emptyGroup = await post({ ...valid, groupId: empty })
       expect(emptyGroup.status).toBe(422)
-      expect(emptyGroup.body.message).toBe(`Cannot execute bulk operation on empty group. Group with id='ID [type=com_cumulocity_model_idtype_GId, value=${empty}]' doesn't have child assets.`)
+      expect(emptyGroup.body.message).toBe(`Cannot execute bulk operation on empty group. Group with id='${empty}' doesn't have child assets.`)
       expect((await api(client, 'GET', '/devicecontrol/bulkoperations/abc')).status).toBe(422)
       const missing = await api(client, 'GET', '/devicecontrol/bulkoperations/99999999')
       expect(missing.status).toBe(404)
@@ -234,7 +234,7 @@ export const deviceControlScenarios: ContractScenario[] = [
       expect(list.body.bulkOperations.map((item: { id: number }) => item.id)).not.toContain(updated.body.id)
       const again = await api(client, 'DELETE', `/devicecontrol/bulkoperations/${updated.body.id}`)
       expect(again.status).toBe(404)
-      expect(again.body.message).toBe(`Finding bulk operation from database failed : Could not find ACTIVE or IN_PROGRESS entity BulkOperation by ID ID [type=com_cumulocity_model_idtype_GId, value=${updated.body.id}]!`)
+      expect(again.body.message).toBe(`Finding bulk operation from database failed : Could not find ACTIVE or IN_PROGRESS entity BulkOperation by ID ${updated.body.id}!`)
 
       // updating a canceled one that never started schedules it again under a new id
       const revived = await api(client, 'PUT', `/devicecontrol/bulkoperations/${updated.body.id}`, { note: `again ${unique}` })

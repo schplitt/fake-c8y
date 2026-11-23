@@ -1295,7 +1295,7 @@ function inventoryRequest(call: C8yRequest, segments: string[], data: TenantData
     const unknown = requested.filter((child) => !data.managedObjects.has(child))
     if (unknown.length > 0) {
       // verified: nothing is added
-      return apiError(404, 'inventory/Not Found', `Finding device data from database failed : Some managedObjects don't exist in database: '[${unknown.map((child) => `ID [type=com_cumulocity_model_idtype_GId, value=${child}]`).join(', ')}]'`)
+      return apiError(404, 'inventory/Not Found', `Finding device data from database failed : Some managedObjects don't exist in database: '[${unknown.join(', ')}]'`)
     }
     const references = requested.map((child) => {
       // verified: the child as it was before the link, its children without names

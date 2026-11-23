@@ -55,7 +55,7 @@ function readUpload(call: C8yRequest): Upload | Response {
 
 function resourceNotFound(id: string): Response {
   // verified: unknown ids and objects that are no binaries
-  return apiError(404, 'inventory/Not Found', `Resource ID [type=com_cumulocity_model_idtype_GId, value=${id}] for this request not found.`)
+  return apiError(404, 'inventory/Not Found', `Resource ${id} for this request not found.`)
 }
 
 // RFC 5987 attr-char: what `filename*=` keeps unencoded (verified for

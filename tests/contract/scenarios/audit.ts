@@ -78,7 +78,7 @@ export const auditScenarios: ContractScenario[] = [
       const user = (await api(client, 'GET', '/user/currentUser')).body.userName
       const { data: device } = await client.inventory.create({ name: `aus-${unique}`, c8y_IsDevice: {} })
       const alarm = (await api(client, 'POST', '/alarm/alarms', { source: { id: device.id }, type: `aus${unique}`, text: 'x', severity: 'MINOR', time: time(1) })).body
-      // the status change is left out of the update record when the severity changes
+      // the update record names the status change first when the severity changes
       await api(client, 'PUT', `/alarm/alarms/${alarm.id}`, { severity: 'MAJOR', status: 'ACKNOWLEDGED', text: 'y' })
       await api(client, 'PUT', `/alarm/alarms/${alarm.id}`, { severity: 'critical' })
       await api(client, 'PUT', `/alarm/alarms/${alarm.id}`, { status: 'bogus' })
@@ -89,7 +89,7 @@ export const auditScenarios: ContractScenario[] = [
       await eventually(async () => {
         const found = await records(client, { source: alarm.id })
         expect(found.map((record) => record.activity)).toEqual(['Alarm created', 'Alarm updated', monitoring.activity, monitoring.activity, 'Alarm updated', monitoring.activity, monitoring.activity, 'Alarm updated'])
-        expect(found[1]).toMatchObject({ type: 'Alarm', text: text('x'), severity: 'MINOR', changes: [{ attribute: 'text', type: 'java.lang.String', previousValue: 'x', newValue: 'y' }, severity('MINOR', 'MAJOR')] })
+        expect(found[1]).toMatchObject({ type: 'Alarm', text: text('x'), severity: 'MINOR', changes: [status('ACTIVE', 'ACKNOWLEDGED'), { attribute: 'text', type: 'java.lang.String', previousValue: 'x', newValue: 'y' }, severity('MINOR', 'MAJOR')] })
         expect(found[2]).toMatchObject({ ...monitoring, text: text('x'), severity: 'MINOR', changes: [status('ACTIVE', 'CLEARED')] })
         expect(found[3]).toMatchObject({ ...monitoring, text: text('y'), severity: 'MAJOR' })
         expect(found[3]).not.toHaveProperty('changes')
@@ -120,6 +120,12 @@ export const auditScenarios: ContractScenario[] = [
       await api(client, 'DELETE', `/tenant/options/${category}/alpha`)
       const { data: other } = await client.inventory.create({ name: `aud2-${unique}` })
       await client.inventory.delete(other.id)
+      // Notification 2.0 subscriptions: the records name plain ids
+      const since = new Date(Date.now() - 5 * 60_000).toISOString()
+      const subscription = (await api(client, 'POST', '/notification2/subscriptions', { context: 'mo', subscription: `aud${unique}`, source: { id: device.id }, subscriptionFilter: { apis: ['alarms'] } })).body
+      await api(client, 'DELETE', `/notification2/subscriptions/${subscription.id}`)
+      await api(client, 'POST', '/notification2/subscriptions', { context: 'mo', subscription: `aud${unique}b`, source: { id: device.id }, subscriptionFilter: { apis: ['alarms'] } })
+      await api(client, 'DELETE', `/notification2/subscriptions?source=${device.id}`)
 
       await eventually(async () => {
         const operations = await records(client, { source: operation.id })
@@ -136,12 +142,27 @@ export const auditScenarios: ContractScenario[] = [
         expect(option.map((record) => [record.type, record.activity, record.text])).toEqual([['Option', 'Option deleted', `Option "${category}.alpha" deleted`]])
         const deleted = await records(client, { source: other.id })
         expect(deleted.map((record) => [record.type, record.activity, record.text])).toEqual([['Inventory', 'Managed object deleted', `Managed object "aud2-${unique}" deleted`]])
+        const subscriptionTexts = (await records(client, { source: subscription.id })).map((record) => record.text as string)
+        expect(subscriptionTexts).toHaveLength(2)
+        const [createdText, deletedText] = subscriptionTexts
+        // the parts of the created text come in no stable order; a part is `key='value'`, and a value may contain ", "
+        const start = `Reliable notification subscription ${subscription.id} created: `
+        expect(createdText?.startsWith(start), createdText).toBe(true)
+        expect(createdText!.slice(start.length).split(/, (?=\w+=')/).sort()).toEqual([
+          `source='${device.id}'`,
+          `context='mo'`,
+          `id='${subscription.id}'`,
+          `subscription='aud${unique}'`,
+          `subscriptionFilter='NotificationSubscriptionFilter(apis=[alarms], typeFilter=null)'`,
+        ].sort())
+        expect(deletedText).toBe(`Reliable notification subscription ${subscription.id} deleted`)
+        expect((await records(client, { type: 'Notification2', dateFrom: since, pageSize: '2000' })).map((record) => record.text)).toContain(`1 reliable notification subscriptions with filter source=${device.id} deleted`)
       })
 
       const unknown = await api(client, 'GET', '/audit/auditRecords/abc')
       expect(unknown.status).toBe(404)
       expect(unknown.body.error).toBe('audit/Not Found')
-      expect(unknown.body.message).toBe('Can\'t find audit record with given id ID [type=com_cumulocity_model_idtype_GId, value=abc]')
+      expect(unknown.body.message).toBe('Can\'t find audit record with given id abc')
       const invalid = await api(client, 'GET', '/audit/auditRecords?dateFrom=yesterday')
       expect(invalid.status).toBe(422)
       expect(invalid.body.error).toBe('yesterday is not a valid date./Invalid Data')

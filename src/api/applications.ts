@@ -551,7 +551,7 @@ export function renderApplicationUser(data: TenantData, user: string, roles: rea
   }
 }
 
-const notFound = (id: string) => apiError(404, 'applications/Not Found', `Error occurred when trying to find an Application for id ID [type=com_cumulocity_model_idtype_GId, value=${id}] : Could not find application by ID ${id}`)
+const notFound = (id: string) => apiError(404, 'applications/Not Found', `Error occurred when trying to find an Application for id ${id} : Could not find application by ID ${id}`)
 const noSuchApplication = (id: string) => apiError(404, 'application/Not Found', `Could not find application by ID ${id}`)
 
 const PAGING = ['currentPage', 'pageSize', 'withTotalElements', 'withTotalPages']
@@ -683,7 +683,7 @@ export function applicationApi(call: C8yRequest, segments: string[], data: Tenan
 }
 
 function createApplication(data: TenantData, body: Record<string, unknown>): Response {
-  // verified: checked in this order, one at a time
+  // verified: one at a time; which of several missing fields the platform names is not stable, this order is one fixed choice
   for (const field of ['key', 'type', 'name']) {
     if (body[field] === undefined || body[field] === null || body[field] === '') {
       return apiError(422, 'undefined/validationError', `${field} is required`)
@@ -772,7 +772,7 @@ export function tenantApplications(call: C8yRequest, segments: string[], data: T
       return noSuchApplication(String(id))
     }
     if (!subscribe(data, application)) {
-      return apiError(409, 'tenants/Duplicate', `Application with id ID [type=com_cumulocity_model_idtype_GId, value=${application.id}] is already assigned to the tenant ${data.tenant}`)
+      return apiError(409, 'tenants/Duplicate', `Application with id ${application.id} is already assigned to the tenant ${data.tenant}`)
     }
     // verified: the platform builds a broken self link here
     const host = new URL(data.world.baseUrl).host
