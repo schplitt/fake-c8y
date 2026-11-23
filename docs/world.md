@@ -381,7 +381,7 @@ A token is stateless and JWT-shaped: `<header>.<claims>.<checksum>` in base64url
 
 A persistent subscription keeps frames for later only once a consumer of it has connected, like on the platform. Frames published before the first connect are dropped. `reset()` and `restore()` forget that a consumer connected, and a fork starts without it. Sockets that stay open across a reset or restore still count as connected.
 
-A token expires `expiresInMinutes` after it was created (default 1440, one day; 0 also means the default), by the world's clock. A negative `expiresInMinutes` or a subscriber or subscription name that is not alphanumeric answers 422. A socket that is already open stays open and keeps receiving. A reconnect needs a new token: a connect with an expired token fails like one with a token that does not parse or fails its checksum (`error`, then close `1008`). The platform's exact answer there is not verified. To move time in a test, create the world with a `clock` and call `world.advance()`, or pass a `now` function you control.
+A token expires `expiresInMinutes` after it was created (default 1440, one day; 0 also means the default), by the world's clock. A negative `expiresInMinutes` or a subscriber or subscription name that is not alphanumeric answers 422. A socket that is already open stays open and keeps receiving. A reconnect needs a new token: a connect with an expired token is refused with 401, like one with a token that does not parse or fails its checksum (see [Refused connects](#refused-connects)). To move time in a test, create the world with a `clock` and call `world.advance()`, or pass a `now` function you control.
 
 ```ts
 import { createClock, createWorld } from 'fake-c8y'
@@ -390,19 +390,39 @@ const world = createWorld({ clock: createClock({ start: '2026-01-01T00:00:00Z', 
 await world.fetch(new Request(`${world.baseUrl}/notification2/subscriptions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ context: 'tenant', subscription: 'alarms' }) }))
 const response = await world.fetch(new Request(`${world.baseUrl}/notification2/token`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ subscription: 'alarms', subscriber: 'alarmService', expiresInMinutes: 5 }) }))
 const { token } = await response.json()
-world.advance(6 * 60_000) // a new socket with this token now gets error and close 1008
+world.advance(6 * 60_000) // a new socket with this token is now refused with 401
 ```
 
 ### Close codes
 
-`reset()` and `restore()` close a socket (open or still connecting) whose subscription (tenant and name) the new state does not have, as a dropped connection: code `1006`, empty reason. A socket whose subscription stays is kept. `reset({ consumers: 'keep' })` closes nothing. The token stays valid, so a client may reconnect with it. The platform's behavior here is inferred, not verified.
+`reset()` and `restore()` close a socket (open or still connecting) whose subscription (tenant and name) the new state does not have, as a dropped connection: code `1006`, empty reason. A socket whose subscription stays is kept. `reset({ consumers: 'keep' })` closes nothing. The token stays valid, so a client may reconnect with it. The platform's behavior here is inferred, not verified. A refused socket held by an `unexpected-response` listener (see [Refused connects](#refused-connects)) is not tracked: reset, restore, and `world.realtime.clear()` leave it to the caller, and it stays `CONNECTING` until `close()` or `terminate()`.
 
 - A socket still connecting when a reset or restore removes its subscription closes right away with `1006`, once. It never opens and gets no `error`.
-- A connect with a token that does not parse, fails its checksum, or has expired emits `error` and closes with `1008` (`invalid token`).
-- A socket the client closes itself (`close()` or `terminate()`) closes with `1000`, also while it is still connecting (then without `open` or `error`). Every socket on `world.realtime.clear()` closes with `1000` too.
+- A refused connect (see [Refused connects](#refused-connects)) never opens: `error`, then close `1006` with an empty reason, unless a `ws`-flavor socket has an `unexpected-response` listener.
+- A socket the client closes itself (`close()` or `terminate()`) closes with `1000`, also while it is still connecting (then without `open` or `error`). A close before the connect ran keeps `1000` here, where `ws` emits `error` and close `1006`. The exception is a refused socket held by an `unexpected-response` listener: its close emits `error` and close `1006`. Every socket on `world.realtime.clear()` closes with `1000` too, except such a held refused socket, which it leaves alone.
 - A client close (`close()` or `terminate()`) keeps the frames the socket had not acknowledged, like `closeConsumers()` (see [below](#closing-consumers-from-the-server-side)). This holds only for a persistent subscription, and only when no other consumer of the subscription is still open. Then the next consumer of the subscription gets them first, with the same ack ids. Otherwise they are lost.
 - `POST /notification2/unsubscribe` finds the consumer by the token's claims (tenant, subscription, subscriber), not by the token text, closes its sockets with `1000`, and keeps none of their unacknowledged frames. The token stays valid. It answers 500 for a token that does not parse, fails its checksum, has expired, belongs to another tenant, or has no open socket of its subscriber; then no socket closes. That an expired token answers 500 is inferred: the platform checks the token (signature and expiry) before it unsubscribes. It also drops the subscription's backlog, and nothing is kept until a consumer of the subscription connects again.
 - Removing a subscription through the API (`DELETE /notification2/subscriptions/{id}`, `DELETE /notification2/subscriptions?source=…`, or deleting the managed object a subscription is for) closes no socket: the consumer stays open and receives nothing more. The backlog stays. What the platform does there is not verified.
+
+### Refused connects
+
+A connect with a bad token is refused before any socket opens, with an HTTP status instead of the WebSocket upgrade:
+
+- 401: the token does not parse, fails its checksum, or has expired. This is inferred: no verified row yet.
+- 400: no `token` parameter, an empty one (`?token=`), or more than one. The empty and the repeated case are inferred.
+
+The socket's events follow the `ws` package. Without an `unexpected-response` listener, it never emits `open`: it emits `error` (`Unexpected server response: 401`), then `close` with `1006` and an empty reason, and `readyState` is `CLOSED`. The `text` flavor always behaves like this, as a browser WebSocket has no `unexpected-response` event.
+
+In the `ws` flavor, an `unexpected-response` listener added with `on()` gets the refusal instead (`addEventListener()` ignores this event, like `ws`), as `(request, response)` with `response.statusCode` and `response.statusMessage` (no headers), and nothing else happens: the socket stays `CONNECTING` (it does not count in `status().connecting`) until the caller closes it. `terminate()` or `close()` then emits `error` (`WebSocket was closed before the connection was established`) and `close` `1006` with an empty reason, like `ws`:
+
+```ts
+const WebSocket = createFakeWebSocket(world.realtime, { flavor: 'ws' })
+const socket = new WebSocket(`${world.baseUrl.replace(/^http/, 'ws')}/notification2/consumer/?token=garbage`)
+socket.on('unexpected-response', (_request, response) => {
+  console.log(response.statusCode, response.statusMessage) // 401 Unauthorized
+  socket.terminate() // then error and close 1006
+})
+```
 
 ### Closing consumers from the server side
 
@@ -534,6 +554,10 @@ Tokens used to be stored (`fake-token-<n>-<subscription>-<subscriber>`), and a r
 - `reset({ consumers: 'keep' })` now closes nothing, also not a socket whose subscription the state reset to does not have. The default closes by subscription only, so a socket with a token minted after a checkpoint stays open when the checkpoint has its subscription.
 - Two requests with the same claims at the same time get the same token. Mint with another subscriber or expiry to get another one.
 - The public type `NotificationToken` changed: `expires` (epoch milliseconds) is always set, and it has a new optional `shared`.
+
+#### Changed: refused connects answer with an HTTP status
+
+A connect with a bad token used to emit `error` (`Invalid notification token`) and close with `1008` (`invalid token`). Now it is refused with 401 or 400 before any socket opens (see [Refused connects](#refused-connects)): `error` (`Unexpected server response: <status>`), then close `1006` with an empty reason, or only `unexpected-response` in the `ws` flavor with a listener for it. Replace checks for `1008` with checks for `1006`, or read the status in an `unexpected-response` listener. A connect without exactly one non-empty `token` parameter used to count as a bad token too; it now answers 400. A socket class of your own (one that is not from `createFakeWebSocket()`) now gets `error` and close `1006` one scheduled tick later, through the world's `schedule`, instead of `error` and `1008` synchronously in the connect.
 
 #### Changed: nothing is kept before a consumer connects
 

@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { createClock, createWorld } from '../../src'
-import type { World } from '../../src'
+import type { NotificationSocket, World } from '../../src'
 import { createFakeWebSocket } from '../../src/realtime-entry'
 import { parseToken } from '../../src/token'
 
@@ -256,7 +256,7 @@ async function connectingSocket(world: World, subscription: string, subscriber: 
   const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
   const events: unknown[][] = []
   socket.on('close', (...args: unknown[]) => events.push(['close', ...args]))
-  socket.on('error', () => events.push(['error']))
+  socket.on('error', (error: Error) => events.push(['error', error.message]))
   socket.on('open', () => events.push(['open']))
   return { socket, events }
 }
@@ -547,7 +547,7 @@ describe('client close()', () => {
     const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
     const events: unknown[][] = []
     socket.on('close', (...args: unknown[]) => events.push(['close', ...args]))
-    socket.on('error', () => events.push(['error']))
+    socket.on('error', (error: Error) => events.push(['error', error.message]))
     socket.on('open', () => events.push(['open']))
     socket.close()
     expect(world.realtime.status().connecting).toBe(0)
@@ -566,7 +566,7 @@ describe('client close()', () => {
     const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
     const events: unknown[][] = []
     socket.on('close', (...args: unknown[]) => events.push(['close', ...args]))
-    socket.on('error', () => events.push(['error']))
+    socket.on('error', (error: Error) => events.push(['error', error.message]))
     socket.on('open', () => events.push(['open']))
     socket.close()
     await world.realtime.settled({ timeout: 1000 })
@@ -757,7 +757,7 @@ describe('token expiry', () => {
     const events: unknown[][] = []
     const received: string[] = []
     socket.on('open', () => events.push(['open']))
-    socket.on('error', () => events.push(['error']))
+    socket.on('error', (error: Error) => events.push(['error', error.message]))
     socket.on('close', (...args: unknown[]) => events.push(['close', ...args]))
     socket.on('message', (text: string) => received.push(text))
     run()
@@ -769,7 +769,7 @@ describe('token expiry', () => {
     const value = await token(world, { expiresInMinutes: 5 })
     expect(parseToken(value, START)!.expires).toBe(START + 5 * MINUTE)
     world.advance(6 * MINUTE)
-    expect(connect(world, run, value).events).toEqual([['error'], ['close', 1008, 'invalid token']])
+    expect(connect(world, run, value).events).toEqual([['error', 'Unexpected server response: 401'], ['close', 1006, '']])
   })
 
   it('keeps a socket open past expiry, and it still receives', async () => {
@@ -802,7 +802,7 @@ describe('token expiry', () => {
     run()
     await call(world, 'POST', '/inventory/managedObjects', { name: 'away' })
     world.advance(6 * MINUTE)
-    expect(connect(world, run, value).events).toEqual([['error'], ['close', 1008, 'invalid token']])
+    expect(connect(world, run, value).events).toEqual([['error', 'Unexpected server response: 401'], ['close', 1006, '']])
     const again = connect(world, run, await token(world))
     expect(again.events).toEqual([['open']])
     expect(again.received.map(name)).toEqual(['away'])
@@ -817,7 +817,7 @@ describe('token expiry', () => {
     before.socket.close()
     run()
     world.advance(MINUTE)
-    expect(connect(world, run, value).events).toEqual([['error'], ['close', 1008, 'invalid token']])
+    expect(connect(world, run, value).events).toEqual([['error', 'Unexpected server response: 401'], ['close', 1006, '']])
   })
 
   it('expires after 1440 minutes with expiresInMinutes 0', async () => {
@@ -830,7 +830,7 @@ describe('token expiry', () => {
     before.socket.close()
     run()
     world.advance(MINUTE)
-    expect(connect(world, run, value).events).toEqual([['error'], ['close', 1008, 'invalid token']])
+    expect(connect(world, run, value).events).toEqual([['error', 'Unexpected server response: 401'], ['close', 1006, '']])
   })
 
   it('answers 422 for a negative expiresInMinutes and a subscription name that is not alphanumeric', async () => {
@@ -847,19 +847,24 @@ describe('token expiry', () => {
     let now = START
     const queue: Array<() => void> = []
     const world = createWorld({ now: () => now, schedule: (callback) => queue.push(callback) })
-    const run = () => queue.splice(0).forEach((callback) => callback())
+    // runs callbacks scheduled meanwhile too (a refusal emits through the schedule)
+    const run = () => {
+      while (queue.length > 0) {
+        queue.shift()!()
+      }
+    }
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
     const value = await token(world, { expiresInMinutes: 5 })
     expect(parseToken(value, START)!.expires).toBe(START + 5 * MINUTE)
     now += 5 * MINUTE
-    expect(connect(world, run, value).events).toEqual([['error'], ['close', 1008, 'invalid token']])
+    expect(connect(world, run, value).events).toEqual([['error', 'Unexpected server response: 401'], ['close', 1006, '']])
   })
 
   it('uses the clock of a fork', async () => {
     const { world, run } = await clockWorld()
     const value = await token(world, { expiresInMinutes: 5 })
     const late = world.fork({ clock: createClock({ start: START + 10 * MINUTE, realtime: false }) })
-    expect(connect(late, run, value).events).toEqual([['error'], ['close', 1008, 'invalid token']])
+    expect(connect(late, run, value).events).toEqual([['error', 'Unexpected server response: 401'], ['close', 1006, '']])
     const early = world.fork({ clock: createClock({ start: START, realtime: false }) })
     expect(connect(early, run, value).events).toEqual([['open']])
   })
@@ -875,7 +880,7 @@ describe('token expiry', () => {
     before.socket.close()
     run()
     world.advance(MINUTE)
-    expect(connect(world, run, value).events).toEqual([['error'], ['close', 1008, 'invalid token']])
+    expect(connect(world, run, value).events).toEqual([['error', 'Unexpected server response: 401'], ['close', 1006, '']])
   })
 
   it('ignores the stored tokens and token sequence of an older snapshot', async () => {
@@ -888,7 +893,7 @@ describe('token expiry', () => {
     const again = world.snapshot().tenants.find((item) => item.tenant === world.tenant)!
     expect(again).not.toHaveProperty('notificationTokens')
     expect(again.sequences).not.toHaveProperty('notificationToken')
-    expect(connect(world, run, 'fake-token-7-sub-a').events).toEqual([['error'], ['close', 1008, 'invalid token']])
+    expect(connect(world, run, 'fake-token-7-sub-a').events).toEqual([['error', 'Unexpected server response: 401'], ['close', 1006, '']])
     expect(connect(world, run, await token(world)).events).toEqual([['open']])
   })
 
@@ -938,7 +943,7 @@ describe('stateless tokens', () => {
     const events: unknown[][] = []
     const received: string[] = []
     socket.on('open', () => events.push(['open']))
-    socket.on('error', () => events.push(['error']))
+    socket.on('error', (error: Error) => events.push(['error', error.message]))
     socket.on('close', (...args: unknown[]) => events.push(['close', ...args]))
     socket.on('message', (text: string) => received.push(text))
     run()
@@ -970,8 +975,8 @@ describe('stateless tokens', () => {
     const token = await mint(world)
     const [header, claims, sum] = token.split('.') as [string, string, string]
     const other = (await mint(world, { subscriber: 'b' })).split('.')[1]!
-    const refused = [['error'], ['close', 1008, 'invalid token']]
-    for (const bad of [`${header}.${other}.${sum}`, `${header}.${claims}.${sum.slice(1)}x`, `${header}.${claims}`, `${token}.x`, '', 'garbage', `${header}.!!!.${sum}`]) {
+    const refused = [['error', 'Unexpected server response: 401'], ['close', 1006, '']]
+    for (const bad of [`${header}.${other}.${sum}`, `${header}.${claims}.${sum.slice(1)}x`, `${header}.${claims}`, `${token}.x`, 'garbage', `${header}.!!!.${sum}`]) {
       expect(connect(world, run, bad).events).toEqual(refused)
     }
     expect(parseToken(token, START)).toBeDefined()
@@ -1069,5 +1074,129 @@ describe('stateless tokens', () => {
     run()
     expect(consumer.events).toEqual([['open']])
     expect(await audits('t2')).toBe(before)
+  })
+})
+
+describe('refused connects', () => {
+  const START = Date.parse('2026-01-01T00:00:00.000Z')
+
+  async function setup() {
+    const queue: Array<() => void> = []
+    const world = createWorld({ clock: createClock({ start: START, realtime: false }), schedule: (callback) => queue.push(callback) })
+    const run = () => {
+      while (queue.length > 0) {
+        queue.shift()!()
+      }
+    }
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const token = (await call(world, 'POST', '/notification2/token', { subscription: 'sub', subscriber: 'a', expiresInMinutes: 5 })).body.token as string
+    return { world, run, token }
+  }
+
+  function open(world: World, query: string, options: { flavor?: 'text' | 'ws', unexpected?: boolean } = {}) {
+    const WebSocket = createFakeWebSocket(world.realtime, { flavor: options.flavor ?? 'text', encodeMessage: (text) => text })
+    const socket = new WebSocket(`wss://example.test/notification2/consumer/${query}`)
+    const events: unknown[][] = []
+    const decode = (reason: unknown) => typeof reason === 'string' ? reason : new TextDecoder().decode(reason as Uint8Array)
+    socket.on('open', () => events.push(['open']))
+    socket.on('error', (error: Error) => events.push(['error', error.message]))
+    socket.on('close', (code: number, reason: unknown) => events.push(['close', code, decode(reason)]))
+    if (options.unexpected) {
+      socket.on('unexpected-response', (request: unknown, response: unknown) => events.push(['unexpected-response', request, response]))
+    }
+    return { socket, events }
+  }
+
+  const refused = (status: number) => [['error', `Unexpected server response: ${status}`], ['close', 1006, '']]
+
+  it('answers 400 without exactly one non-empty token parameter', async () => {
+    const { world, run, token } = await setup()
+    for (const query of ['', '?other=1', '?token=', `?token=${token}&token=${token}`]) {
+      const consumer = open(world, query)
+      run()
+      expect(consumer.events).toEqual(refused(400))
+      expect(consumer.socket.readyState).toBe(3)
+    }
+  })
+
+  it('answers 401 for a garbage, tampered, or expired token', async () => {
+    const { world, run, token } = await setup()
+    const [header, claims, sum] = token.split('.') as [string, string, string]
+    for (const bad of ['garbage', `${header}.${claims}.${sum.slice(1)}x`]) {
+      const consumer = open(world, `?token=${bad}`)
+      run()
+      expect(consumer.events).toEqual(refused(401))
+    }
+    world.advance(6 * 60_000)
+    const expired = open(world, `?token=${token}`)
+    run()
+    expect(expired.events).toEqual(refused(401))
+  })
+
+  it('emits the same events in the ws flavor without an unexpected-response listener', async () => {
+    const { world, run } = await setup()
+    const consumer = open(world, '?token=garbage', { flavor: 'ws' })
+    run()
+    expect(consumer.events).toEqual(refused(401))
+  })
+
+  it('hands a refusal to an unexpected-response listener in the ws flavor, and nothing else until the caller closes it', async () => {
+    const { world, run } = await setup()
+    for (const end of ['terminate', 'close'] as const) {
+      const consumer = open(world, '?token=garbage', { flavor: 'ws', unexpected: true })
+      run()
+      expect(consumer.events).toEqual([['unexpected-response', {}, { statusCode: 401, statusMessage: 'Unauthorized' }]])
+      expect(consumer.socket.readyState).toBe(0)
+      expect(world.realtime.status().connecting).toBe(0)
+      consumer.socket[end]()
+      run()
+      expect(consumer.events.slice(1)).toEqual([['error', 'WebSocket was closed before the connection was established'], ['close', 1006, '']])
+      expect(consumer.socket.readyState).toBe(3)
+    }
+    const empty = open(world, '?token=', { flavor: 'ws', unexpected: true })
+    run()
+    expect(empty.events).toEqual([['unexpected-response', {}, { statusCode: 400, statusMessage: 'Bad Request' }]])
+  })
+
+  it('does not hold a refusal for an unexpected-response listener added with addEventListener, like ws', async () => {
+    const { world, run } = await setup()
+    const consumer = open(world, '?token=garbage', { flavor: 'ws' })
+    consumer.socket.addEventListener('unexpected-response', () => consumer.events.push(['unexpected-response']))
+    run()
+    expect(consumer.events).toEqual(refused(401))
+    expect(consumer.socket.readyState).toBe(3)
+  })
+
+  it('ends a refused connect of a socket class of its own with error and close 1006 through the schedule', async () => {
+    const { world, run } = await setup()
+    const events: unknown[][] = []
+    const socket: NotificationSocket = {
+      url: 'wss://example.test/notification2/consumer/?token=garbage',
+      readyState: 0,
+      token: undefined,
+      emit: (event, ...args) => events.push([event, ...args.map((arg) => arg instanceof Error ? arg.message : arg)]),
+      receive: () => {},
+      close: () => {},
+    }
+    world.realtime.connect(socket)
+    expect(socket.readyState).toBe(3)
+    expect(events).toEqual([])
+    run()
+    expect(events).toEqual(refused(401))
+  })
+
+  it('never emits unexpected-response in the text flavor', async () => {
+    const { world, run } = await setup()
+    const consumer = open(world, '?token=garbage', { unexpected: true })
+    run()
+    expect(consumer.events).toEqual(refused(401))
+  })
+
+  it('settles after a refusal held by an unexpected-response listener', async () => {
+    const world = createWorld()
+    const consumer = open(world, '?token=garbage', { flavor: 'ws', unexpected: true })
+    await world.realtime.settled({ timeout: 1000 })
+    expect(consumer.events).toEqual([['unexpected-response', {}, { statusCode: 401, statusMessage: 'Unauthorized' }]])
+    expect(world.realtime.pending()).toBe(0)
   })
 })

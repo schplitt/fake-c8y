@@ -3,7 +3,8 @@
  * `ws` WebSocket a consumer (e.g. c8y-realtime) opens. Entry: `fake-c8y/realtime`.
  */
 import type { NotificationSocket, NotificationToken, Realtime } from './realtime'
-import { SOCKET_STATE } from './realtime'
+import { abortConnect, REFUSE, SOCKET_STATE } from './realtime'
+import { reasonPhrase } from './reason-phrases'
 
 type Listener = (...args: any[]) => void
 
@@ -90,6 +91,9 @@ export function createFakeWebSocket(realtime: Realtime, options: FakeWebSocketOp
     readonly url: string
     token: NotificationToken | undefined
     private listeners = new Map<string, Set<Listener>>()
+    // refused and handed to an `unexpected-response` listener: still
+    // CONNECTING until the caller closes it
+    private refused = false
 
     constructor(url: string | URL) {
       this.url = String(url)
@@ -108,6 +112,12 @@ export function createFakeWebSocket(realtime: Realtime, options: FakeWebSocketOp
     }
 
     addEventListener(event: string, listener: Listener): void {
+      // `ws` ignores addEventListener for events other than open, close,
+      // error, and message: an `unexpected-response` listener added here is
+      // never called and must not hold a refusal
+      if (event === 'unexpected-response') {
+        return
+      }
       this.on(event, listener)
     }
 
@@ -142,10 +152,37 @@ export function createFakeWebSocket(realtime: Realtime, options: FakeWebSocketOp
       realtime.schedule(() => this.emit('pong'))
     }
 
+    /**
+     * Renders a refused connect (an HTTP status instead of the upgrade) like
+     * the `ws` package: without an `unexpected-response` listener (always in
+     * the `text` flavor) `error` and close 1006; with one, only that event,
+     * and the socket stays CONNECTING until the caller closes it.
+     * @param status - The HTTP status of the refusal
+     */
+    [REFUSE](status: number): void {
+      if (ws && (this.listeners.get('unexpected-response')?.size ?? 0) > 0) {
+        this.refused = true
+        this.emit('unexpected-response', {}, { statusCode: status, statusMessage: reasonPhrase(status) })
+        return
+      }
+      this.abort(`Unexpected server response: ${status}`)
+    }
+
+    private abort(message: string): void {
+      abortConnect(realtime, this, message)
+    }
+
     close(): void {
       if (this.readyState === SOCKET_STATE.CLOSED) {
         return
       }
+      if (this.refused) {
+        this.refused = false
+        this.abort('WebSocket was closed before the connection was established')
+        return
+      }
+      // a socket still connecting (connect() has not run) closes with 1000
+      // and no error here; `ws` would emit an error and close 1006
       this.readyState = SOCKET_STATE.CLOSED
       realtime.disconnect(this)
       realtime.schedule(() => this.emit('close', 1000, ''))

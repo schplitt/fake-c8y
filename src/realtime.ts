@@ -119,9 +119,37 @@ export interface NotificationSocket {
 }
 
 /**
+ * The method of a socket that renders a refused connect itself (the fake
+ * WebSocket). A symbol, not part of `NotificationSocket` and not exported from
+ * any entry, so a socket class of the user's own neither needs it nor is
+ * mistaken for the fake's.
+ */
+export const REFUSE: unique symbol = Symbol('refuse')
+
+interface RefusableSocket extends NotificationSocket {
+  [REFUSE]: (status: number) => void
+}
+
+/**
  * WebSocket ready states.
  */
 export const SOCKET_STATE = { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 } as const
+
+/**
+ * Ends a connect that never opens: `readyState` CLOSED now, then `error` with
+ * the message and close 1006 through the realtime's schedule. Used by
+ * `Realtime.connect()` and the fake WebSocket; not exported from any entry.
+ * @param realtime - The realtime of the socket's world
+ * @param socket - The socket
+ * @param message - The error message
+ */
+export function abortConnect(realtime: Pick<Realtime, 'schedule'>, socket: NotificationSocket, message: string): void {
+  socket.readyState = SOCKET_STATE.CLOSED
+  realtime.schedule(() => {
+    socket.emit('error', new Error(message))
+    socket.emit('close', 1006, '')
+  })
+}
 
 /**
  * Which consumer sockets `Realtime.closeConsumers()` closes, and how.
@@ -340,13 +368,21 @@ export class Realtime {
       // the client closed it while connecting: its close event is on its way
       return
     }
-    // a token that does not parse, fails its checksum, or has expired is
-    // refused; an open socket stays open when its token expires
-    const token = parseToken(tokenOf(socket), this.now())
+    // refused before the socket opens: 400 without exactly one non-empty
+    // `token` parameter, 401 for a token that does not parse, fails its
+    // checksum, or has expired; an open socket stays open when its token expires
+    const values = new URL(socket.url).searchParams.getAll('token')
+    const given = values.length === 1 && values[0] !== '' ? values[0] : undefined
+    const token = given === undefined ? undefined : parseToken(given, this.now())
     if (!token) {
-      socket.readyState = SOCKET_STATE.CLOSED
-      socket.emit('error', new Error('Invalid notification token'))
-      socket.emit('close', 1008, 'invalid token')
+      const status = given === undefined ? 400 : 401
+      if (REFUSE in socket) {
+        (socket as RefusableSocket)[REFUSE](status)
+        return
+      }
+      // a socket of another class gets the `ws` package's events without an
+      // `unexpected-response` listener
+      abortConnect(this, socket, `Unexpected server response: ${status}`)
       return
     }
     socket.token = token
