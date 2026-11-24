@@ -71,9 +71,10 @@ export const EMPTY_BODY_DEVIATIONS: Partial<Record<C8yEndpoint, Record<number, s
 }
 
 /**
- * Schema problems the platform itself has (the spec is wrong there).
+ * Schema problems the platform itself has (the spec is wrong there). An
+ * entry with `endpoint` excuses the problem only in answers of that endpoint.
  */
-export const SCHEMA_DEVIATIONS: Array<{ id: string, problem: RegExp }> = [
+export const SCHEMA_DEVIATIONS: Array<{ id: string, problem: RegExp, endpoint?: string }> = [
   { id: 'binary-fragment-empty-string', problem: /c8y_IsBinary: expected an object, got ""/ },
   { id: 'user-optional-fields', problem: /\.(owner|twoFactorAuthenticationEnabled): required$/ },
   { id: 'group-role-links', problem: /^\$\.references: expected an object, got \[/ },
@@ -84,5 +85,6 @@ export const SCHEMA_DEVIATIONS: Array<{ id: string, problem: RegExp }> = [
   { id: 'audit-optional-fields', problem: /\.(application|c8y_Metadata|changes|severity): required$/ },
   { id: 'date-error-no-message', problem: /^\$\.message: required$/ },
   { id: 'application-optional-fields', problem: /\.(activeVersionId|resourcesUrl): required$|\.references\[\d+\]\.id: required$|\.dynamicOptionsUrl: expected a string, got true$/ },
+  { id: 'current-user-put-user-type', problem: /^\$\.effectiveRoles: required$/, endpoint: 'PUT /user/currentUser' },
   { id: 'login-option-views', problem: /^\$(\.loginOptions\[\d+\])?\.(greenMinLength: null is not a integer|providerName: required)$/ },
 ]

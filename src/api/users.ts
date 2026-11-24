@@ -4,6 +4,7 @@ import { nextSequence } from '../store'
 import type { AuditChange } from './audit'
 import { apiError, checkQuery, flag, paged, raw, repeatedParams } from './http'
 import { auditGlobalRoleUpdated, auditInventoryRole, auditUser, listChange, valueChange } from './audit'
+import { negotiate, vendorName } from './media'
 import { clone } from '../utils'
 
 /**
@@ -143,7 +144,7 @@ export function renderGroup(data: TenantData, group: StoredDocument, query = '')
  */
 export function renderUser(data: TenantData, user: StoredDocument, options: { subusersCount?: boolean, query?: string } = {}): Record<string, unknown> {
   const base = userBase(data, user.userName as string)
-  const { id: _id, userName, roles, groups, customProperties, devicePermissions, passwordStrength, shouldResetPassword, enabled, lastPasswordChange, [PASSWORD]: _password, ...fields } = user
+  const { id: _id, userName, roles, groups, customProperties, devicePermissions, passwordStrength, shouldResetPassword, enabled, lastPasswordChange, requiredAuthType: _authType, [PASSWORD]: _password, ...fields } = user
   const rendered: Record<string, unknown> = {
     // verified: `self` encodes the user name, the nested links do not
     self: `${data.world.baseUrl}/user/${data.tenant}/users/${encodeURIComponent(userName as string)}`,
@@ -191,15 +192,15 @@ export function effectiveRoles(data: TenantData, user: StoredDocument): string[]
  * @param user - Stored user
  */
 export function renderCurrentUser(data: TenantData, user: StoredDocument): Record<string, unknown> {
-  const { id: _id, userName, roles: _roles, groups: _groups, customProperties: _custom, devicePermissions: _permissions, passwordStrength: _strength, enabled: _enabled, owner: _owner, shouldResetPassword, lastPasswordChange, [PASSWORD]: _password, ...fields } = user
+  const { id: _id, userName, roles: _roles, groups: _groups, customProperties: _custom, devicePermissions: _permissions, passwordStrength: _strength, enabled: _enabled, owner: _owner, shouldResetPassword, lastPasswordChange, requiredAuthType = 'NONE', [PASSWORD]: _password, ...fields } = user
   return {
     self: `${data.world.baseUrl}/user/currentUser`,
     id: userName,
     userName,
     ...clone(fields),
     shouldResetPassword,
-    // verified for a user without two-factor authentication
-    requiredAuthType: 'NONE',
+    // verified: `NONE` for a user without two-factor authentication; the stored value once the user set one
+    requiredAuthType,
     effectiveRoles: effectiveRoles(data, user).map((role) => renderRole(data, role)),
     lastPasswordChange,
   }
@@ -278,6 +279,9 @@ function checkPassword(password: unknown): void {
   }
 }
 
+// fields of `PUT /user/currentUser` that answer 400 as an object or an array
+const CURRENT_USER_STRINGS = ['firstName', 'lastName']
+
 const JACKSON_SOURCE = '\n at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); line: 1, column: 1]'
 
 /**
@@ -285,9 +289,17 @@ const JACKSON_SOURCE = '\n at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOUR
  * 400 `Failed to parse JSON string`, the column in the message is not emulated).
  * @param body - Request body
  * @param type
+ * @param strings - Fields that must not be an object or an array (the current user's update)
  */
-function checkUserBodyTypes(body: Record<string, unknown>, type = 'com.cumulocity.rest.representation.user.UserRepresentation'): void {
+function checkUserBodyTypes(body: Record<string, unknown>, type = 'com.cumulocity.rest.representation.user.UserRepresentation', strings: readonly string[] = []): void {
   const reject = (field: string, message: string) => fail(400, 'Failed to parse JSON string', `${message}${JACKSON_SOURCE} (through reference chain: ${type}["${field}"])`)
+  for (const field of strings) {
+    const value = body[field]
+    // verified for the current user's update: an object or an array is no string, a number is stored as its string
+    if (value !== null && typeof value === 'object') {
+      reject(field, `Cannot deserialize value of type \`java.lang.String\` from ${Array.isArray(value) ? 'Array' : 'Object'} value`)
+    }
+  }
   for (const field of ['enabled', 'sendPasswordResetEmail', 'newsletter', 'twoFactorAuthenticationEnabled', 'shouldResetPassword']) {
     const value = body[field]
     // verified: numbers and the strings "true" and "false" are accepted
@@ -448,9 +460,10 @@ export function createUser(data: TenantData, body: Record<string, unknown>, role
  * @param user - A copy of the stored user, changed in place (the caller stores it)
  * @param body - Request body
  * @param caller
+ * @param current - `PUT /user/currentUser` with the user type: `devicePermissions` are replaced (cleared without them), `delegatedBy` is ignored, string fields are type checked, the caller audits
  */
-function updateUser(data: TenantData, user: StoredDocument, body: Record<string, unknown>, caller?: string): void {
-  checkUserBodyTypes(body)
+function updateUser(data: TenantData, user: StoredDocument, body: Record<string, unknown>, caller?: string, current = false): void {
+  checkUserBodyTypes(body, undefined, current ? CURRENT_USER_STRINGS : [])
   if (body.userName !== undefined) {
     fail(422, 'undefined/validationError', 'userName is not allowed here')
   }
@@ -480,18 +493,22 @@ function updateUser(data: TenantData, user: StoredDocument, body: Record<string,
     user.shouldResetPassword = toBoolean(body.shouldResetPassword)
   }
   // verified: these fields are audited, with lower-case names, in this order
-  const audited: Array<[string, string]> = [['enabled', 'enabled'], ['lastName', 'lastname'], ['firstName', 'firstname']]
+  // (the current user's update audits on its own)
+  const audited: Array<[string, string]> = current ? [] : [['enabled', 'enabled'], ['lastName', 'lastname'], ['firstName', 'firstname']]
   const changes: AuditChange[] = audited
     .filter(([field]) => given(field) && body[field] !== user[field])
     .map(([field, attribute]) => valueChange(attribute, user[field], body[field]))
   for (const field of PROFILE_FIELDS) {
     // verified: an update keeps the owner
-    if (given(field) && field !== 'owner') {
+    if (given(field) && field !== 'owner' && !(current && field === 'delegatedBy')) {
       user[field] = field === 'enabled' || field === 'newsletter' ? toBoolean(body[field]) : typeof body[field] === 'number' ? String(body[field]) : clone(body[field])
     }
   }
   auditUser(data, user.userName as string, 'updated', changes)
-  if (given('devicePermissions')) {
+  if (current) {
+    // verified: the current user's update replaces them, without them it clears them
+    user.devicePermissions = given('devicePermissions') ? clone(body.devicePermissions) : {}
+  } else if (given('devicePermissions')) {
     user.devicePermissions = clone(body.devicePermissions)
   }
   if (given('customProperties')) {
@@ -504,6 +521,39 @@ function updateUser(data: TenantData, user: StoredDocument, body: Record<string,
     }
     merged.userOrigin = (user.customProperties as Record<string, unknown>).userOrigin ?? 'BASIC'
     user.customProperties = merged
+  }
+}
+
+// what `PUT /user/currentUser` audits, in this order (unverified order; the
+// user API's own update audits only the first three, verified)
+const CURRENT_USER_AUDITED: Array<[string, string]> = [['enabled', 'enabled'], ['lastName', 'lastname'], ['firstName', 'firstname'], ['email', 'email'], ['phone', 'phone'], ['displayName', 'displayName'], ['shouldResetPassword', 'shouldResetPassword'], ['requiredAuthType', 'requiredAuthType']]
+
+/**
+ * `PUT /user/currentUser` with any other answer type than the user type
+ * (verified): writes only the name fields, `phone`, `email` (not validated),
+ * `shouldResetPassword`, and `requiredAuthType` (`NONE` or `CERTIFICATES`,
+ * other values are ignored); everything else and `null` values are ignored.
+ * @param user - A copy of the stored user, changed in place (the caller stores it)
+ * @param body - Request body
+ */
+function updateOwnProfile(user: StoredDocument, body: Record<string, unknown>): void {
+  // verified: `customProperties` are ignored here, also one of the wrong type
+  const { customProperties: _ignored, ...checked } = body
+  checkUserBodyTypes(checked, undefined, CURRENT_USER_STRINGS)
+  if (body.userName !== undefined) {
+    fail(422, 'undefined/validationError', 'userName is not allowed here')
+  }
+  checkPhone(body.phone)
+  for (const field of ['firstName', 'lastName', 'phone', 'email']) {
+    if (body[field] !== undefined && body[field] !== null) {
+      user[field] = typeof body[field] === 'number' ? String(body[field]) : clone(body[field])
+    }
+  }
+  if (body.shouldResetPassword !== undefined && body.shouldResetPassword !== null) {
+    user.shouldResetPassword = toBoolean(body.shouldResetPassword)
+  }
+  if ((body.requiredAuthType === 'NONE' || body.requiredAuthType === 'CERTIFICATES') && body.requiredAuthType !== (user.requiredAuthType ?? 'NONE')) {
+    user.requiredAuthType = body.requiredAuthType
   }
 }
 
@@ -889,6 +939,65 @@ const body = (call: C8yRequest) => ((call.body && typeof call.body === 'object')
 const created = (value: unknown) => Response.json(value, { status: 201 })
 const noContent = () => new Response(null, { status: 204 })
 
+/**
+ * `PUT /user/currentUser` (verified): the negotiated answer type picks what
+ * is written and answered. The user type writes like the user API (it
+ * replaces `devicePermissions`, clearing them when the body has none, and
+ * ignores `delegatedBy`) and answers the full user; every other type writes
+ * a few profile fields and answers the short shape without `effectiveRoles`.
+ * One `User updated` audit record lists every changed profile field.
+ * @param call - The request
+ * @param data - Tenant data of the caller
+ */
+function updateCurrentUser(call: C8yRequest, data: TenantData): Response {
+  const found = data.world.currentUser(call)
+  const contentType = call.headers['content-type'] ?? ''
+  const userType = vendorName(negotiate('PUT', ['user', 'currentUser'], call.headers.accept ?? null, contentType) ?? '') === 'user'
+  if (contentType && !/json/i.test(contentType)) {
+    return new Response(null, { status: 415 })
+  }
+  // verified: a vendor content type that contradicts the answer type
+  const sent = vendorName(contentType)
+  if (sent === (userType ? 'currentuser' : 'user')) {
+    return new Response(null, { status: 406 })
+  }
+  // unverified: the order of the three answers below relative to the 415 and 406
+  if (found.kind === 'former' || found.kind === 'none') {
+    return apiError(401, 'security/Unauthorized', 'Invalid credentials!')
+  }
+  if (found.kind === 'application') {
+    // unverified: an application's own users are not users of the tenant
+    return apiError(403, 'security/Forbidden', 'Access Denied')
+  }
+  if (found.kind === 'deleted') {
+    // unverified: the world's user deleted through the API
+    throw userNotFound(found.user.userName)
+  }
+  const input = body(call)
+  if (input.password !== undefined && input.password !== null) {
+    fail(422, 'undefined/validationError', 'Password cannot be changed with this request. Use PUT /user/currentUser/password.')
+  }
+  const before = found.user
+  const user = clone(before)
+  if (userType) {
+    updateUser(found.data, user, input, call.user, true)
+  } else {
+    updateOwnProfile(user, input)
+  }
+  const value = (document: Readonly<StoredDocument>, field: string) => field === 'requiredAuthType' ? document[field] ?? 'NONE' : document[field]
+  const changes = CURRENT_USER_AUDITED
+    .filter(([field]) => value(user, field) !== value(before, field))
+    .map(([field, attribute]) => valueChange(attribute, value(before, field), value(user, field)))
+  found.data.users.set(user.id, user)
+  auditUser(found.data, user.userName as string, 'updated', changes)
+  if (userType) {
+    return Response.json(renderUser(found.data, user))
+  }
+  // verified: the short answer of an update has no effectiveRoles
+  const { effectiveRoles: _roles, ...answer } = renderCurrentUser(found.data, user)
+  return Response.json(answer)
+}
+
 const USER_LIST_PARAMS = ['currentPage', 'groups', 'onlyDevices', 'owner', 'pageSize', 'username', 'usernameContains', 'withApps', 'withGroups', 'withSubusersCount', 'withTotalElements', 'withTotalPages']
 
 /**
@@ -914,6 +1023,10 @@ function userRequest(call: C8yRequest, segments: string[], data: TenantData): Re
   const [, first, resource, id, sub, subId, subSubId] = segments
   const { method } = call
   const length = segments.length
+
+  if (first === 'currentUser' && length === 2 && method === 'PUT') {
+    return updateCurrentUser(call, data)
+  }
 
   if (first === 'roles') {
     if (method === 'GET' && length === 2) {

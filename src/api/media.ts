@@ -77,6 +77,7 @@ const MEDIA_TYPES: Record<string, string> = {
   'POST /notification2/token': 'application/json',
   'POST /notification2/unsubscribe': 'application/json',
   'GET /user/currentUser': 'currentuser',
+  'PUT /user/currentUser': 'currentuser',
   'GET /user/roles': 'rolecollection',
   'GET /user/roles/{name}': 'role',
   'GET /user/inventoryroles': 'inventoryrolecollection',
@@ -169,6 +170,16 @@ for (const [endpoint, name] of Object.entries(MEDIA_TYPES)) {
 const CHILDREN = new Set(['childDevices', 'childAssets', 'childAdditions'])
 
 /**
+ * The vendor name of a media type in lower case (`user` for
+ * `application/vnd.com.nsn.cumulocity.user+json;ver=0.9`), `undefined` for
+ * any other type.
+ * @param type - A content type or a negotiated answer type
+ */
+export function vendorName(type: string): string | undefined {
+  return /^application\/vnd\.com\.nsn\.cumulocity\.([a-z]+)\+json/i.exec(type.trim())?.[1]?.toLowerCase()
+}
+
+/**
  * The vendor name an endpoint answers for the request's content type
  * (verified): a collection sent as one (`measurementcollection`,
  * `managedObjectReferenceCollection`) is answered as one, in the case of the
@@ -178,7 +189,7 @@ const CHILDREN = new Set(['childDevices', 'childAssets', 'childAdditions'])
  * @param requestType - The request's content type
  */
 function variant(name: string, requestType: string): string {
-  const sent = /^application\/vnd\.com\.nsn\.cumulocity\.([a-z]+)\+json/i.exec(requestType.trim())?.[1]?.toLowerCase()
+  const sent = vendorName(requestType)
   if (sent === `${name.toLowerCase()}collection`) {
     return /[A-Z]/.test(name) ? `${name}Collection` : `${name}collection`
   }
@@ -296,6 +307,20 @@ export function negotiate(method: string, segments: readonly string[], accept: s
   const ranges = mediaRanges(accept)
   if (!ranges) {
     return select({ type: '*/*', params: [] })
+  }
+  if (vendor === 'currentuser') {
+    // verified: the highest q wins; at equal q JSON comes first, then the
+    // currentuser type, then the user type, whatever the order in the header
+    const q = (range: MediaRange) => {
+      const value = Number(range.params.find(([name]) => name === 'q')?.[1] ?? 1)
+      return Number.isNaN(value) ? 1 : value
+    }
+    const rank = (range: MediaRange) => range.type === 'application/json' ? 0 : select(range) === vendorType('user') ? 2 : 1
+    const best = ranges.filter((range) => select(range) !== undefined).sort((a, b) => q(b) - q(a) || rank(a) - rank(b))[0]
+    if (!best) {
+      return null
+    }
+    return best.type === 'application/json' && accept!.trim() !== 'application/json' ? json(best) : select(best)!
   }
   if (FIRST_RANGE_ONLY.has(segments[0]!)) {
     const first = ranges[0]!

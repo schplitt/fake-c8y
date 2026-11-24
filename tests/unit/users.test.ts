@@ -433,3 +433,164 @@ describe('switching the current user', () => {
     expect(fork.db.users.get('operator')).toEqual(seeded)
   })
 })
+
+describe('PUT /user/currentUser', () => {
+  const USER_TYPE = 'application/vnd.com.nsn.cumulocity.user+json'
+  const put = async (world: World, body: unknown, headers: Record<string, string> = { 'accept': USER_TYPE, 'content-type': USER_TYPE }) => {
+    const response = await world.fetch(new Request(`${world.baseUrl}/user/currentUser`, { method: 'PUT', headers, body: JSON.stringify(body) }))
+    const text = await response.text()
+    return { status: response.status, body: text ? JSON.parse(text) : undefined }
+  }
+  const short = { 'accept': 'application/json', 'content-type': 'application/json' }
+  const texts = (world: World) => world.db.auditRecords.find().map((record) => record.text)
+
+  it('writes one audit record by the user with every changed profile field, none for custom properties alone', async () => {
+    const world = createWorld({ user: { userName: 'eva', email: 'eva@example.com' } })
+    expect((await put(world, { customProperties: { language: 'de' } })).status).toBe(200)
+    expect(texts(world)).toEqual([])
+    expect((await put(world, { firstName: 'Eva', lastName: 'Ten', displayName: 'E', phone: '+48123456789', email: 'eva2@example.com', shouldResetPassword: true })).status).toBe(200)
+    expect((await put(world, { requiredAuthType: 'CERTIFICATES', firstName: 'Eve' }, short)).status).toBe(200)
+    expect(texts(world)).toEqual([
+      'User eva updated: lastname=\'Ten\', firstname=\'Eva\', email=\'eva2@example.com\', phone=\'+48123456789\', displayName=\'E\', shouldResetPassword=\'true\'',
+      'User eva updated: firstname=\'Eve\', requiredAuthType=\'CERTIFICATES\'',
+    ])
+    expect(world.db.auditRecords.find()[0]).toMatchObject({ type: 'User', activity: 'User updated', user: 'eva', source: { id: 'eva' } })
+  })
+
+  it('keeps requiredAuthType as a plain field of the stored user, written only in short mode', async () => {
+    const world = createWorld({ user: { userName: 'eva', email: 'eva@example.com' } })
+    expect((await put(world, { requiredAuthType: 'CERTIFICATES' })).body).not.toHaveProperty('requiredAuthType')
+    expect((await put(world, { requiredAuthType: 'TFA' }, short)).body.requiredAuthType).toBe('NONE')
+    const answer = await put(world, { requiredAuthType: 'CERTIFICATES' }, short)
+    expect(answer).toMatchObject({ status: 200, body: { requiredAuthType: 'CERTIFICATES' } })
+    // the short answer of an update has no effectiveRoles, the GET's has
+    expect(answer.body).not.toHaveProperty('effectiveRoles')
+    expect((await get(world, '/user/currentUser')).body.effectiveRoles).toEqual(expect.any(Array))
+    expect(world.snapshot().tenants.find((tenant) => tenant.tenant === world.tenant)!.users!.find((user: any) => user.id === 'eva')).toMatchObject({ requiredAuthType: 'CERTIFICATES' })
+    // the user API and the full shape leave it out
+    expect((await get(world, `/user/${world.tenant}/users/eva`)).body).not.toHaveProperty('requiredAuthType')
+    expect((await get(world, '/user/currentUser')).body.requiredAuthType).toBe('CERTIFICATES')
+  })
+
+  it('writes only the short mode fields with another answer type, and stores the email as given', async () => {
+    const world = createWorld({ user: { userName: 'eva', email: 'eva@example.com' } })
+    const answer = await put(world, { email: 'not an email', displayName: 'D', newsletter: true, enabled: false, customProperties: { a: 1 }, id: 'x', other: 1 }, short)
+    expect(answer.status).toBe(200)
+    expect(answer.body).toMatchObject({ email: 'not an email' })
+    const stored = world.db.users.get('eva')!
+    expect(stored).toMatchObject({ email: 'not an email', enabled: true })
+    expect(stored).not.toHaveProperty('displayName')
+    expect(stored).not.toHaveProperty('newsletter')
+    expect(stored.customProperties).not.toHaveProperty('a')
+    // a wildcard or no Accept header answers without a body
+    expect(await put(world, { firstName: 'E' }, { 'content-type': 'application/json' })).toEqual({ status: 200, body: undefined })
+    // mixed headers: JSON before the currentuser type before the user type, the highest q first
+    const CURRENT_USER_TYPE = 'application/vnd.com.nsn.cumulocity.currentuser+json'
+    for (const accept of [`${USER_TYPE}, application/json`, `${USER_TYPE}, ${CURRENT_USER_TYPE}`, `${USER_TYPE};q=0.1, ${CURRENT_USER_TYPE};q=0.5`]) {
+      const mixed = await put(world, { displayName: 'D', customProperties: { b: 1 } }, { accept, 'content-type': 'application/json' })
+      expect(mixed.body, accept).toHaveProperty('requiredAuthType')
+      expect(mixed.body, accept).not.toHaveProperty('customProperties')
+    }
+    expect(world.db.users.get('eva')).not.toHaveProperty('displayName')
+    expect(world.db.users.get('eva')?.customProperties).not.toHaveProperty('b')
+    const weighted = await put(world, { displayName: 'D' }, { 'accept': `${CURRENT_USER_TYPE};q=0.1, ${USER_TYPE}`, 'content-type': 'application/json' })
+    expect(weighted.body).toMatchObject({ displayName: 'D', customProperties: expect.any(Object) })
+  })
+
+  it('validates the email, replaces devicePermissions, and ignores delegatedBy in user mode', async () => {
+    const world = createWorld({ user: { userName: 'eva', email: 'eva@example.com' } })
+    world.seed({ users: [{ userName: 'otto' }] })
+    expect(await put(world, { email: 'not an email' })).toMatchObject({ status: 422, body: { message: 'email field must contain a valid email address' } })
+    const permissions = { 12345: ['MANAGED_OBJECT:*:ADMIN'] }
+    const answer = await put(world, { devicePermissions: permissions, delegatedBy: 'otto', newsletter: true })
+    expect(answer.status).toBe(200)
+    expect(answer.body).toMatchObject({ devicePermissions: permissions, newsletter: true })
+    expect(answer.body).not.toHaveProperty('delegatedBy')
+    // short mode leaves them, user mode without them clears them
+    expect((await put(world, { lastName: 'L' }, short)).status).toBe(200)
+    expect(world.db.users.get('eva')?.devicePermissions).toEqual(permissions)
+    expect((await put(world, { lastName: 'L' })).body.devicePermissions).toEqual({})
+    expect(world.db.users.get('eva')?.devicePermissions).toEqual({})
+  })
+
+  it('checks the body types in both modes and refuses a password first', async () => {
+    const world = createWorld({ user: { userName: 'eva', email: 'eva@example.com' } })
+    for (const headers of [short, { 'accept': USER_TYPE, 'content-type': USER_TYPE }]) {
+      for (const body of [{ firstName: { a: 1 } }, { lastName: [] }, { shouldResetPassword: 'no' }]) {
+        expect((await put(world, body, headers)).body, JSON.stringify(body)).toMatchObject({ error: 'Failed to parse JSON string' })
+      }
+      // the short mode ignores customProperties, also of the wrong type
+      expect((await put(world, { customProperties: 'x' }, headers)).status).toBe(headers === short ? 200 : 400)
+      expect((await put(world, { phone: 7 }, headers)).body.message).toBe('phone is required in the international phone number format +48 123 456 789')
+      expect((await put(world, { userName: 'eva', phone: 7, password: '' }, headers)).body.message).toBe('Password cannot be changed with this request. Use PUT /user/currentUser/password.')
+      expect((await put(world, { firstName: 7, shouldResetPassword: 'false', password: null }, headers)).status).toBe(200)
+      expect(world.db.users.get('eva')).toMatchObject({ firstName: '7', shouldResetPassword: false })
+      expect((await put(world, [], headers)).status).toBe(400)
+    }
+    // no content type at all is accepted (bytes: a string body would get text/plain)
+    const response = await world.fetch(new Request(`${world.baseUrl}/user/currentUser`, { method: 'PUT', headers: { accept: USER_TYPE }, body: new TextEncoder().encode('{"lastName":"N"}') }))
+    expect(response.status).toBe(200)
+    expect(world.db.users.get('eva')).toMatchObject({ lastName: 'N' })
+  })
+
+  it('answers 415 for a content type that is not JSON, writing nothing', async () => {
+    const world = createWorld({ user: { userName: 'eva', email: 'eva@example.com' } })
+    const response = await world.fetch(new Request(`${world.baseUrl}/user/currentUser`, { method: 'PUT', headers: { 'accept': USER_TYPE, 'content-type': 'text/plain' }, body: '{"firstName":"E"}' }))
+    expect(response.status).toBe(415)
+    expect(world.db.users.get('eva')).not.toHaveProperty('firstName')
+  })
+
+  it('needs ROLE_USER_MANAGEMENT_OWN_ADMIN: without it 403 and nothing written', async () => {
+    const world = createWorld()
+    world.seed({ users: [{ userName: 'otto', roles: [] }] })
+    const asOtto = () => world.fetch(new Request(`${world.baseUrl}/user/currentUser`, { method: 'PUT', headers: { 'authorization': `Basic ${btoa(`${world.tenant}/otto:x`)}`, 'accept': USER_TYPE, 'content-type': USER_TYPE }, body: JSON.stringify({ lastName: 'x' }) }))
+    expect((await asOtto()).status).toBe(200)
+    expect(world.db.users.get('otto')).toMatchObject({ lastName: 'x' })
+    expect((await send(world, 'PUT', `/user/${world.tenant}/users/otto`, { lastName: 'y' })).status).toBe(200)
+    expect((await send(world, 'DELETE', `/user/${world.tenant}/users/otto/roles/ROLE_USER_MANAGEMENT_OWN_ADMIN`)).status).toBe(204)
+    const records = texts(world).length
+    const denied = await asOtto()
+    expect(denied.status).toBe(403)
+    expect(await denied.json()).toMatchObject({ error: 'security/Forbidden' })
+    expect(world.db.users.get('otto')).toMatchObject({ lastName: 'y' })
+    expect(texts(world)).toHaveLength(records)
+  })
+
+  it('lets a user disable itself: the next request answers 401', async () => {
+    const world = createWorld({ user: { userName: 'eva', email: 'eva@example.com' } })
+    expect((await put(world, { enabled: false })).body).toMatchObject({ enabled: false })
+    expect((await get(world, '/user/currentUser')).status).toBe(401)
+  })
+
+  it('answers 403 for an application user and 404 for the world user deleted through the API (unverified)', async () => {
+    const world = createWorld({ user: { userName: 'eva', email: 'eva@example.com' }, roles: 'off' })
+    world.service('svc', async () => new Response(null), { manifest: { name: 'svc', requiredRoles: ['ROLE_USER_MANAGEMENT_OWN_ADMIN'] } })
+    const service = world.db.applications.find({ name: 'svc' })[0]!
+    const bootstrap = await world.fetch(new Request(`${world.baseUrl}/application/applications/${service.id}/bootstrapUser`))
+    const { name } = await bootstrap.json() as { name: string }
+    const asBootstrap = await world.fetch(new Request(`${world.baseUrl}/user/currentUser`, { method: 'PUT', headers: { 'authorization': `Basic ${btoa(`${world.tenant}/${name}:x`)}`, 'content-type': 'application/json', 'accept': 'application/json' }, body: '{"firstName":"E"}' }))
+    expect(asBootstrap.status).toBe(403)
+    expect((await send(world, 'DELETE', `/user/${world.tenant}/users/eva`)).status).toBe(204)
+    expect(await put(world, { firstName: 'E' })).toMatchObject({ status: 404, body: { error: 'users/Not Found' } })
+  })
+
+  it('writes the user setUser() switched to, on a fork only, and keeps the change in snapshots', async () => {
+    const base = createWorld({ user: { userName: 'eva', email: 'eva@example.com' } })
+    base.seed({ users: [{ userName: 'otto' }] })
+    const fork = base.fork()
+    fork.setUser({ userName: 'otto', roles: [] })
+    expect((await put(fork, { customProperties: { language: 'de' } })).body.userName).toBe('otto')
+    expect(fork.db.users.get('otto')?.customProperties).toMatchObject({ language: 'de' })
+    expect(base.db.users.get('otto')?.customProperties).not.toHaveProperty('language')
+    expect(fork.diff().tenants[fork.tenant]!.users.updated).toMatchObject([{ after: { id: 'otto', customProperties: { language: 'de' } } }])
+    const snapshot = fork.snapshot()
+    fork.reset()
+    expect(fork.db.users.get('otto')?.customProperties).not.toHaveProperty('language')
+    fork.restore(snapshot)
+    expect(fork.db.users.get('otto')?.customProperties).toMatchObject({ language: 'de' })
+    // the full shape answers what was written
+    fork.setUser({ userName: 'otto', roles: [] })
+    const full = await fork.fetch(new Request(`${fork.baseUrl}/user/currentUser`, { headers: { accept: USER_TYPE } }))
+    expect(await full.json()).toMatchObject({ userName: 'otto', customProperties: { language: 'de' }, supportUserEnabled: false })
+  })
+})

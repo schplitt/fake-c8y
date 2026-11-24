@@ -149,6 +149,7 @@ const ENDPOINTS = [
   'PUT /user/{tenantId}/users/{userId}/roles/inventory/{id}',
   'DELETE /user/{tenantId}/users/{userId}/roles/inventory/{id}',
   'GET /user/devicePermissions/{id}',
+  'PUT /user/currentUser',
   'POST /identity/search',
   'GET /tenant/currentTenant',
   'GET /tenant/options',

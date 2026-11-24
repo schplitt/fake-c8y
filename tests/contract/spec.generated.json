@@ -1122,6 +1122,7 @@
     "PUT /user/{tenantId}/users/{userId}/roles/inventory/{id}": {},
     "DELETE /user/{tenantId}/users/{userId}/roles/inventory/{id}": {},
     "GET /user/devicePermissions/{id}": {},
+    "PUT /user/currentUser": {},
     "POST /identity/search": {},
     "GET /tenant/currentTenant": {
       "withParent": {
@@ -27537,6 +27538,114 @@
         }
       },
       "403": {}
+    },
+    "PUT /user/currentUser": {
+      "200": {
+        "application/vnd.com.nsn.cumulocity.currentuser+json": {
+          "type": "object",
+          "properties": {
+            "effectiveRoles": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "self": {
+                    "type": "string",
+                    "format": "uri"
+                  }
+                }
+              }
+            },
+            "email": {
+              "type": "string",
+              "format": "email"
+            },
+            "firstName": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "lastName": {
+              "type": "string"
+            },
+            "lastPasswordChange": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "password": {
+              "type": "string",
+              "format": "password",
+              "minLength": 6,
+              "maxLength": 32
+            },
+            "phone": {
+              "type": "string",
+              "format": "phone"
+            },
+            "requiredAuthType": {
+              "type": "string",
+              "enum": [
+                "NONE",
+                "CERTIFICATES"
+              ]
+            },
+            "self": {
+              "type": "string",
+              "format": "uri"
+            },
+            "shouldResetPassword": {
+              "type": "boolean"
+            },
+            "twoFactorAuthenticationEnabled": {
+              "type": "boolean"
+            },
+            "userName": {
+              "type": "string"
+            },
+            "devicePermissions": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "required": [
+            "effectiveRoles",
+            "id",
+            "lastPasswordChange",
+            "shouldResetPassword",
+            "twoFactorAuthenticationEnabled"
+          ]
+        }
+      },
+      "401": {
+        "application/vnd.com.nsn.cumulocity.error+json": {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "info": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "403": {},
+      "422": {}
     },
     "POST /identity/search": {
       "200": {

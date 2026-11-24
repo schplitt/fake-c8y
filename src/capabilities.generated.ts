@@ -689,6 +689,9 @@ export const C8Y_ENDPOINTS = {
   'GET /user/devicePermissions/{id}': {
     query: [],
   },
+  'PUT /user/currentUser': {
+    query: [],
+  },
   'POST /identity/search': {
     query: [],
     required: [

@@ -42,6 +42,8 @@ const world = createWorld({
 | `passwords`        | `'off'`                                  | `'check'` answers 401 for a known user's wrong password. See [Roles](#roles).                                                               |
 | `freezeDocuments`  | `false`                                  | Deep-freezes every stored document, so code that changes one in place throws. For tests of fake-c8y itself; it makes writes slower.         |
 
+Changed: `GET /user/currentUser` answered the short shape (with `effectiveRoles`) for every Accept header. With the `user` type (`application/vnd.com.nsn.cumulocity.user+json`) it now answers the full user, like the platform, so `client.user.current()` gets `customProperties`, `groups`, `roles`, `devicePermissions`, `applications`, and `enabled`, and no longer `effectiveRoles` or `requiredAuthType`. Read roles with `client.user.currentWithEffectiveRoles()`. `PUT /user/currentUser` is now emulated, see [Emulated API](emulated-api.md#users-groups-and-roles).
+
 `DEFAULTS` (exported) holds the default values, plus passwords for credentials a harness builds: `subscriptionPassword` (`'service-password'`, the default subscription's service user), `bootstrapPassword` (`'bootstrap-password'`), and `userPassword` (`'test-password'`). By default the fake checks no passwords; these only spare wrappers their own copies. With `passwords: 'check'`, `subscriptionPassword` is the default subscription's password, and the other two pass only for users without a password (see [Roles](roles.md#wrong-credentials)). The light entry `fake-c8y/defaults` exports `DEFAULTS` and nothing else, so a Vite or Vitest config (or any code that must not load the engine) can import it:
 
 ```ts
