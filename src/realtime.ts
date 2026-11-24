@@ -329,7 +329,8 @@ export class Realtime {
   backlog: Map<string, NotificationFrame[]> = new Map()
   /**
    * per subscription (by `key()`): the subscribers that connected since the
-   * last reset or restore (open sockets always are); only they keep a
+   * last reset or restore (open sockets always are; `resync(false)` keeps the
+   * ones of subscriptions still stored); only they keep a
    * backlog, like on the platform
    */
   private connected: Map<string, Set<string>> = new Map()
@@ -885,11 +886,20 @@ export class Realtime {
    * name) is no longer stored, as a dropped connection (1006, empty reason),
    * also the ones still connecting. The subscriber of every open socket that
    * stays counts as connected; a connecting one counts once it opens.
+   * Without `close`, a subscriber that had connected also keeps counting as
+   * connected while its subscription is stored, so writes are kept for it
+   * while it reconnects.
    * @param close - `false` closes nothing (`reset({ consumers: 'keep' })`)
    */
   resync(close = true): void {
+    const connected = close ? undefined : new Map(this.connected)
     this.dropPending()
     const subscriptions = new Set([...this.storedSubscriptions()].map((subscription) => this.key(subscription.tenant, subscription.subscription)))
+    for (const [key, subscribers] of connected ?? []) {
+      if (subscriptions.has(key)) {
+        this.connected.set(key, new Set([...subscribers, ...(this.connected.get(key) ?? [])]))
+      }
+    }
     for (const socket of [...this.sockets, ...this.connecting]) {
       // a connecting socket has no claims yet: read them from its URL (an
       // invalid token is refused when it connects)

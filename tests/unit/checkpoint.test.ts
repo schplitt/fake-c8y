@@ -52,6 +52,23 @@ async function consumer(world: World, run: () => void, subscription: string, exp
   return { token, socket, received, state }
 }
 
+/**
+ * Connects a new socket with `token` and returns the frames it received.
+ * @param world
+ * @param run
+ * @param token
+ */
+async function reconnect(world: World, run: () => void, token: string) {
+  const WebSocket = createFakeWebSocket(world.realtime)
+  const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
+  const received: string[] = []
+  socket.on('message', (text: string) => received.push(text))
+  run()
+  expect(socket.readyState).toBe(1)
+  run()
+  return received
+}
+
 const names = async (world: World) => (await call(world, 'GET', '/inventory/managedObjects?pageSize=100')).body.managedObjects.map((item: { name: string }) => item.name)
 
 describe('checkpoint', () => {
@@ -397,6 +414,51 @@ describe('reset({ to, consumers })', () => {
     const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${first}`)
     run()
     expect(socket.token?.subscriber).toBe('a')
+  })
+
+  it('keeps writes for a reconnecting subscriber with keep while its subscription exists', async () => {
+    const { world, run } = manualWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
+    const first = await consumer(world, run, 'startup')
+    const startup = world.checkpoint()
+    world.realtime.closeConsumers()
+    world.reset({ to: startup, consumers: 'keep' })
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'after' })
+    run()
+    const again = await reconnect(world, run, first.token)
+    expect(again.some((frame) => frame.includes('after'))).toBe(true)
+  })
+
+  it('forgets a reconnecting subscriber with keep when the checkpoint lacks its subscription', async () => {
+    const { world, run } = manualWorld()
+    const startup = world.checkpoint()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'late' })
+    const first = await consumer(world, run, 'late')
+    world.realtime.closeConsumers()
+    world.reset({ to: startup, consumers: 'keep' })
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'late' })
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'after' })
+    run()
+    expect(await reconnect(world, run, first.token)).toEqual([])
+  })
+
+  it('forgets a reconnecting subscriber on a default reset and on restore()', async () => {
+    for (const back of ['reset', 'restore'] as const) {
+      const { world, run } = manualWorld()
+      await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
+      const first = await consumer(world, run, 'startup')
+      const startup = world.checkpoint()
+      const snapshot = world.snapshot()
+      world.realtime.closeConsumers()
+      if (back === 'reset') {
+        world.reset({ to: startup })
+      } else {
+        world.restore(snapshot)
+      }
+      await call(world, 'POST', '/inventory/managedObjects', { name: 'after' })
+      run()
+      expect(await reconnect(world, run, first.token)).toEqual([])
+    }
   })
 
   it('replays subscription ids the same after keeping a reconnected consumer', async () => {
