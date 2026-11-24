@@ -119,7 +119,7 @@ export interface NotificationSocket {
    */
   receive: (text: string) => void
   /**
-   * Closes the socket (e.g. when its consumer is unsubscribed).
+   * Closes the socket (e.g. on a reset that removes its subscription).
    */
   close: () => void
 }
@@ -519,23 +519,24 @@ export class Realtime {
   }
 
   /**
-   * After an unsubscribe closed a subscriber's sockets: drops the
-   * subscriber's backlog and forgets that it connected, like the platform.
-   * Does nothing while a socket of the subscriber is still open.
+   * After an unsubscribe: drops the subscriber's backlog, like the platform.
+   * Its open sockets stay open and keep receiving (the subscriber stays
+   * known); their outstanding frames are forgotten, so a later close does
+   * not put back frames the platform dropped. Frames already on their way
+   * still arrive while the socket stays open; one still on its way when the
+   * socket closes is lost. An ack of a frame from before the unsubscribe
+   * still clears it from the unacknowledged count (`pending()`,
+   * `status().unacknowledged`), so `settled()` waits for such frames until
+   * they are acknowledged; the ack only no longer matters for a later close.
    * @param tenant - The subscription's tenant
    * @param subscription - The subscription name
    * @param subscriber - The subscriber
    */
   unsubscribed(tenant: string, subscription: string, subscriber: string): void {
     const key = this.key(tenant, subscription, subscriber)
-    if (this.open.has(key)) {
-      return
-    }
     this.backlog.delete(key)
-    const subscribers = this.connected.get(this.key(tenant, subscription))
-    subscribers?.delete(subscriber)
-    if (subscribers?.size === 0) {
-      this.connected.delete(this.key(tenant, subscription))
+    for (const socket of this.open.get(key) ?? []) {
+      this.outstanding.get(socket)?.clear()
     }
   }
 

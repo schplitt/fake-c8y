@@ -498,14 +498,22 @@ describe('client close()', () => {
     expect(again.received.map(name)).toEqual(['delivered'])
   })
 
-  it('keeps nothing after an unsubscribe', async () => {
+  it('keeps nothing after an unsubscribe, also when the socket closes later', async () => {
     const { world, run } = await persistent()
     const a = await open(world, run, 'sub', 'a')
     await call(world, 'POST', '/inventory/managedObjects', { name: 'A' })
     run()
+    // B is scheduled, not yet delivered, when the unsubscribe comes in
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'B' })
     expect((await call(world, 'POST', `/notification2/unsubscribe?token=${a.token}`)).status).toBe(200)
     run()
-    expect(a.closes).toEqual([[1000, '']])
+    expect(a.closes).toEqual([])
+    expect(a.received.map(name)).toEqual(['A', 'B'])
+    // an ack of a frame from before the unsubscribe still clears it from the
+    // unacknowledged count; it no longer brings anything back on the close
+    a.socket.send(ackId(a.received[0]!))
+    a.socket.close()
+    run()
     expect(world.realtime.status().backlog).toBe(0)
     const again = await open(world, run, 'sub', 'a')
     expect(again.received).toEqual([])
@@ -631,22 +639,23 @@ describe('backlog before a first connect', () => {
     expect(again.received.map(name)).toEqual(['kept'])
   })
 
-  it('keeps nothing after an unsubscribe until a consumer connects again', async () => {
+  it('keeps the socket after an unsubscribe, and a backlog once it closes', async () => {
     const { world, run } = await persistent()
     const a = await open(world, run, 'sub', 'a')
     expect((await call(world, 'POST', `/notification2/unsubscribe?token=${a.token}`)).status).toBe(200)
     run()
-    await call(world, 'POST', '/inventory/managedObjects', { name: 'dropped' })
-    expect(world.realtime.status().backlog).toBe(0)
-    const b = await open(world, run, 'sub', 'a')
-    expect(b.received).toEqual([])
+    expect(a.closes).toEqual([])
     await call(world, 'POST', '/inventory/managedObjects', { name: 'live' })
     run()
-    expect(b.received.map(name)).toEqual(['live'])
-    b.socket.send(ackId(b.received[0]!))
-    b.socket.close()
+    expect(a.received.map(name)).toEqual(['live'])
+    a.socket.send(ackId(a.received[0]!))
+    // the socket is still open: a repeat unsubscribe answers 200
+    expect((await call(world, 'POST', `/notification2/unsubscribe?token=${a.token}`)).status).toBe(200)
+    a.socket.close()
     run()
+    expect((await call(world, 'POST', `/notification2/unsubscribe?token=${a.token}`)).status).toBe(500)
     await call(world, 'POST', '/inventory/managedObjects', { name: 'kept' })
+    expect(world.realtime.status().backlog).toBe(1)
     const c = await open(world, run, 'sub', 'a')
     expect(c.received.map(name)).toEqual(['kept'])
   })
@@ -1097,7 +1106,7 @@ describe('stateless tokens', () => {
     expect(stays.events).toEqual([['open']])
   })
 
-  it('unsubscribes the consumer of the token\'s claims, and the token stays valid', async () => {
+  it('unsubscribes the consumer of the token\'s claims, and the socket and the token stay', async () => {
     const { world, run } = clockWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
     const token = await mint(world)
@@ -1110,8 +1119,11 @@ describe('stateless tokens', () => {
     expect((await call(world, 'POST', '/notification2/unsubscribe?token=garbage')).status).toBe(500)
     expect((await call(world, 'POST', `/notification2/unsubscribe?token=${later}`)).body).toEqual({ result: 'DONE' })
     run()
-    expect(consumer.events).toEqual([['open'], ['close', 1000, '']])
+    expect(consumer.events).toEqual([['open']])
     expect(other.events).toEqual([['open']])
+    expect((await call(world, 'POST', `/notification2/unsubscribe?token=${token}`)).body).toEqual({ result: 'DONE' })
+    consumer.socket.close()
+    run()
     // no open socket of that subscriber any more
     expect((await call(world, 'POST', `/notification2/unsubscribe?token=${token}`)).status).toBe(500)
     expect(connect(world, run, token).events).toEqual([['open']])
@@ -1422,6 +1434,9 @@ describe('one backlog per subscriber', () => {
     run()
     expect(a.received.map(name)).toEqual(['kept for b'])
     expect((await call(world, 'POST', `/notification2/unsubscribe?token=${a.token}`)).status).toBe(200)
+    run()
+    expect(a.closes).toEqual([])
+    a.socket.close()
     run()
     expect(world.realtime.status().backlog).toBe(1)
     expect((await open(world, run, 'sub', 'b')).received.map(name)).toEqual(['kept for b'])
