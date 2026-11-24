@@ -55,6 +55,15 @@ function realTimers(): TimerSource {
 }
 
 /**
+ * The real time (epoch milliseconds): the `Date.now` captured at load, or,
+ * when that was already fake, the current global one. Fake timers installed
+ * later and the world's clock do not move it (idle consumer sockets).
+ */
+export function realNow(): number {
+  return (captured.fake ? timerSource(globalThis) : captured).now()
+}
+
+/**
  * Runs a callback later on the real `setTimeout` (0 ms), or after the
  * current microtasks where there is none.
  * @param callback - The callback

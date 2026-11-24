@@ -1142,6 +1142,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       advanceBulkOperations(data)
       advanceAvailability(data)
     }
+    realtime.closeIdle()
   }
 
   function setUser(next: C8yUser | null): void {

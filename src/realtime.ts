@@ -22,12 +22,15 @@
  * each frame once; the sockets of a shared token split them by source.
  * Delivery to a socket pauses at 1000 frames not acknowledged and goes on as
  * acks arrive.
+ * An open socket with no frame either way (message, ack, ping) for 5 minutes
+ * of real time closes with 1001, checked on `world.tick()` (every request and
+ * `db` access).
  * `closeConsumers()` closes sockets from the server side to test a client's
  * reconnect path.
  * The consumer WebSocket is in `./websocket` (the `fake-c8y/realtime` entry).
  */
 import type { StoredDocument } from './store'
-import { scheduleReal, SettleTimeoutError, waitForQuiet } from './timers'
+import { realNow, scheduleReal, SettleTimeoutError, waitForQuiet } from './timers'
 import { parseToken } from './token'
 
 /**
@@ -35,6 +38,12 @@ import { parseToken } from './token'
  * it wait for acks (inferred from the platform's documented limit).
  */
 const MAX_UNACKNOWLEDGED = 1000
+
+/**
+ * Real milliseconds without a frame either way after which an open socket
+ * closes with 1001 (inferred).
+ */
+const IDLE_CLOSE_MS = 300_000
 
 export type RealtimeApi = 'managedobjects' | 'measurements' | 'events' | 'alarms' | 'operations'
 
@@ -376,6 +385,11 @@ export class Realtime {
    * Bumped by `dropPending()`: frames scheduled before are not delivered.
    */
   private generation = 0
+  /**
+   * real time (`realNow()`) of each open socket's last activity, oldest
+   * first (a touch deletes and sets again), for the idle close
+   */
+  private readonly activity: Map<NotificationSocket, number> = new Map()
 
   constructor(options: RealtimeOptions = {}) {
     const schedule = options.schedule ?? scheduleReal
@@ -439,6 +453,7 @@ export class Realtime {
     this.outstanding.set(socket, new Map())
     this.held.set(socket, [])
     this.dropped.set(socket, new Set())
+    this.touch(socket)
     // connected before 'open': a frame an 'open' listener publishes queues
     // behind the subscriber's backlog (flushed below, after the listeners),
     // and a socket an 'open' listener closes counts as having connected
@@ -536,6 +551,7 @@ export class Realtime {
     this.held.delete(socket)
     this.dropped.delete(socket)
     this.sources.delete(socket)
+    this.activity.delete(socket)
     if (socket.token) {
       const subscriber = this.key(socket.token.tenant, socket.token.subscription, socket.token.subscriber)
       const open = (this.open.get(subscriber) ?? []).filter((other) => other !== socket)
@@ -583,6 +599,7 @@ export class Realtime {
    * @param ackId - The acknowledged frame's ack id
    */
   acknowledge(socket: NotificationSocket, ackId: string): void {
+    this.touch(socket)
     this.unacked.get(socket)?.delete(ackId)
     const freed = this.outstanding.get(socket)?.delete(ackId) || this.dropped.get(socket)?.delete(ackId)
     const held = this.held.get(socket)
@@ -601,6 +618,44 @@ export class Realtime {
       }
     } finally {
       this.releasing.delete(socket)
+    }
+  }
+
+  /**
+   * Activity on an open socket (open, a frame delivered, an ack, a ping, a
+   * reset or restore it stays across): restarts its idle time. Only stamps
+   * the time; `closeIdle()` checks it, from `world.tick()`.
+   * @internal
+   * @param socket - The socket
+   */
+  touch(socket: NotificationSocket): void {
+    if (!this.sockets.has(socket)) {
+      return
+    }
+    this.activity.delete(socket)
+    this.activity.set(socket, realNow())
+  }
+
+  /**
+   * Closes, through `schedule`, the open sockets with no activity for 5
+   * minutes of real time (1001, empty reason), unless they are touched
+   * before the close runs. Checks the oldest first: O(1) when none is due.
+   * Called by `world.tick()` only, so a frozen base never closes one.
+   * @internal
+   */
+  closeIdle(): void {
+    const now = realNow()
+    for (const [socket, last] of this.activity) {
+      if (now - last < IDLE_CLOSE_MS) {
+        return
+      }
+      this.activity.delete(socket)
+      this.schedule(() => {
+        // skips a socket touched since: the delete above took it out of `activity`
+        if (socket.readyState === SOCKET_STATE.OPEN && this.sockets.has(socket) && !this.activity.has(socket)) {
+          this.closeFromServer(socket, 1001, '')
+        }
+      })
     }
   }
 
@@ -645,6 +700,7 @@ export class Realtime {
         return
       }
       this.unacked.get(socket)?.add(frame.ackId)
+      this.touch(socket)
       socket.receive(frame.text)
     })
   }
@@ -818,6 +874,8 @@ export class Realtime {
       if (socket.token) {
         this.markConnected(socket.token)
       }
+      // the sockets that stay start their idle time again
+      this.touch(socket)
     }
   }
 
@@ -925,6 +983,7 @@ export class Realtime {
     this.outstanding.clear()
     this.held.clear()
     this.dropped.clear()
+    this.activity.clear()
     this.dropPending()
   }
 }

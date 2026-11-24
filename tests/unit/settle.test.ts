@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createWorld, SettleTimeoutError } from '../../src'
 import type { World } from '../../src'
 import { createFakeWebSocket } from '../../src/realtime-entry'
-import { scheduleWith, timerSource, waitForQuiet } from '../../src/timers'
+import { realNow, scheduleWith, timerSource, waitForQuiet } from '../../src/timers'
 
 async function call(world: World, method: string, path: string, body?: unknown) {
   const response = await world.fetch(new Request(`${world.baseUrl}${path}`, {
@@ -434,6 +434,14 @@ describe('timers', () => {
     await Promise.resolve()
     expect(ran).toBe(true)
     await expect(waitForQuiet(() => true, { timeout: 10, quietMs: 1, timers })).rejects.toThrow('fake-c8y: waiting needs setTimeout, which this runtime does not have')
+  })
+
+  it('keeps realNow() on the real time under fake timers (idle sockets)', () => {
+    const before = realNow()
+    vi.useFakeTimers()
+    vi.advanceTimersByTime(10 * 60_000)
+    expect(Date.now() - before).toBeGreaterThanOrEqual(10 * 60_000)
+    expect(realNow() - before).toBeLessThan(60_000)
   })
 
   it('recognizes fake timers', () => {
