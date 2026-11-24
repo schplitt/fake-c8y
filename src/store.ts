@@ -10,7 +10,7 @@ import type { NotificationSubscription, NotificationToken, Realtime, RealtimeApi
 import type { MeasurementStream, MeasurementTombstone } from './generators'
 import type { C8yJson } from './services'
 import type { Access } from './api/access'
-import type { C8yRequest } from './types'
+import type { C8yRequest, C8yUser } from './types'
 import type { StoredUsageDay, UsageLog } from './api/statistics'
 import type { StoredTrustedCertificate } from './api/tenant-admin'
 import { Collection } from './collection'
@@ -42,6 +42,19 @@ export interface ExternalId {
   externalId: string
   managedObjectId: string
 }
+
+/**
+ * Whom `/user/currentUser` answers for a request: an application's own user
+ * (not a user of the tenant), the user of an application that is gone (401),
+ * nobody (no world user, 401), a stored user, or the world's user after it
+ * was deleted through the API.
+ */
+export type CurrentUser
+  = | { kind: 'application', data: TenantData, application: Readonly<StoredDocument>, bootstrap: boolean }
+    | { kind: 'former' }
+    | { kind: 'none' }
+    | { kind: 'stored', data: TenantData, user: Readonly<StoredDocument> }
+    | { kind: 'deleted', user: C8yUser }
 
 /**
  * What the API handlers need from the world a tenant lives in.
@@ -126,6 +139,10 @@ export interface WorldContext {
    * All tenants of the world (an application delete ends every subscription).
    */
   tenants?: () => Iterable<TenantData>
+  /**
+   * Whom `/user/currentUser` answers for a request (`GET` and `PUT` agree).
+   */
+  currentUser: (call: C8yRequest) => CurrentUser
   /**
    * What the requests since the last reset added to the usage statistics.
    */

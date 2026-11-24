@@ -18,8 +18,8 @@ interface Login {
   password: string
 }
 
-async function api(client: Client, method: string, path: string, body?: unknown, auth?: Login): Promise<Answer> {
-  const headers: Record<string, string> = { 'content-type': 'application/json', 'accept': 'application/json' }
+async function api(client: Client, method: string, path: string, body?: unknown, auth?: Login, extra: Record<string, string> = {}): Promise<Answer> {
+  const headers: Record<string, string> = { 'content-type': 'application/json', 'accept': 'application/json', ...extra }
   if (auth) {
     headers.authorization = `Basic ${Buffer.from(`${auth.login}:${auth.password}`).toString('base64')}`
   }
@@ -44,8 +44,8 @@ const time = '2026-01-01T00:00:00.000Z'
  * @param unique
  * @param run
  */
-async function withRestrictedUser(client: Client, tenant: string, unique: string, run: (context: {
-  as: (method: string, path: string, body?: unknown) => Promise<Answer>
+export async function withRestrictedUser(client: Client, tenant: string, unique: string, run: (context: {
+  as: (method: string, path: string, body?: unknown, headers?: Record<string, string>) => Promise<Answer>
   userName: string
   grant: (role: string) => Promise<void>
   revoke: (role: string) => Promise<void>
@@ -61,7 +61,7 @@ async function withRestrictedUser(client: Client, tenant: string, unique: string
   expect(created.status, JSON.stringify(created.body)).toBe(201)
   try {
     await run({
-      as: (method, path, body) => api(client, method, path, body, login),
+      as: (method, path, body, headers) => api(client, method, path, body, login, headers),
       userName,
       grant: async (role) => {
         expect((await api(client, 'POST', `${userPath}/roles`, { role: { self: `/user/roles/${role}` } })).status).toBe(201)

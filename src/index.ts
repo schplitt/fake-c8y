@@ -1,6 +1,6 @@
 import type { C8yCoverage, C8yOverrideContext, C8yOverrideHandler, C8yRequest, C8ySubscription, C8yUnhandledRequest, C8yUser, C8yWorldState, C8yWrite } from './types'
 import type { CompiledRoute } from './router'
-import type { StoredDocument, TenantCollection, TenantData, WorldContext } from './store'
+import type { CurrentUser, StoredDocument, TenantCollection, TenantData, WorldContext } from './store'
 import type { Collection } from './collection'
 import type { NotificationToken, RealtimeApi } from './realtime'
 import type { C8yBinaryInput, C8yDb, C8yManagedObjectInput, C8ySeed, C8ySeedResultFor } from './data'
@@ -19,13 +19,13 @@ import { platformApi, UnsupportedRequestError } from './api'
 import { UsageLog } from './api/statistics'
 import { applicationAccess, authorize, userAccess } from './api/access'
 import { apiError, rawRequests } from './api/http'
-import { mediaType, negotiate, notAcceptable, withLocation, withMediaType } from './api/media'
+import { mediaType, negotiate, notAcceptable, vendorName, withLocation, withMediaType } from './api/media'
 import { applySeed, createBinaryFromInput, createDb, createFromInput, givenIds } from './data'
 import { diffSnapshots, diffWorld, restoreTenants, snapshotOptions, snapshotTenants, touchedSnapshots } from './snapshot'
 import { advanceBulkOperations } from './api/bulkoperations'
 import { advanceAvailability } from './availability'
 import { clone, decodeBase64, parseIsoTime } from './utils'
-import { PASSWORD, renderCurrentUser, upsertWorldUser } from './api/users'
+import { PASSWORD, renderCurrentUser, renderUser, upsertWorldUser } from './api/users'
 import { C8Y_SPEC_PATHS } from './capabilities.generated'
 import { checkServiceSeed, defineService, serviceStateKey, serviceStore, toJson } from './services'
 import type { C8yMicroserviceManifest } from './api/applications'
@@ -1107,6 +1107,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     freezeDocuments: options.freezeDocuments ?? false,
     tenantData: (name) => (tenants.has(name) || base?.tenants.has(name) ? tenantData(name) : undefined),
     tenants: () => tenants.values(),
+    currentUser: (call) => currentUserOf(call),
     usage: () => usage,
   }
 
@@ -1430,6 +1431,39 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
   }
 
   /**
+   * Whom `/user/currentUser` answers for a request (`GET` and `PUT`).
+   * @param call - The recorded request
+   */
+  function currentUserOf(call: C8yRequest): CurrentUser {
+    const own = call.user === undefined ? undefined : applicationOfCredentials(tenants.values(), call.tenant, call.user)
+    if (own) {
+      return { kind: 'application', data: own.data, application: own.application, bootstrap: own.bootstrap }
+    }
+    if (formerApplicationUser(call)) {
+      return { kind: 'former' }
+    }
+    if (call.user !== undefined && (call.user !== user?.userName || call.tenant !== (user.tenant ?? tenant))) {
+      // Basic auth of another user (by name or tenant): that user of the
+      // caller's tenant, with its roles. A user the tenant does not store
+      // gets the world's user, as before stored users answered here (by
+      // default the fake checks no credentials, so a forwarded header naming
+      // another user keeps working; `unknownUsers: 'unauthorized'` answers
+      // such a request 401 before it gets here)
+      const data = context.tenantData?.(call.tenant)
+      const stored = data?.users.get(call.user)
+      if (data && stored) {
+        return { kind: 'stored', data, user: stored }
+      }
+    }
+    if (!user) {
+      return { kind: 'none' }
+    }
+    const data = tenants.get(user.tenant ?? tenant)
+    const stored = data?.users.get(user.userName)
+    return data && stored ? { kind: 'stored', data, user: stored } : { kind: 'deleted', user }
+  }
+
+  /**
    * Platform endpoints a microservice relies on: the current user and the
    * microservice's subscriptions.
    * @param call - The recorded request
@@ -1440,43 +1474,31 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     const [a, b] = segments
 
     if (method === 'GET' && a === 'user' && b === 'currentUser' && segments.length === 2) {
-      const own = call.user === undefined ? undefined : applicationOfCredentials(tenants.values(), call.tenant, call.user)
-      if (own) {
+      const found = currentUserOf(call)
+      if (found.kind === 'application') {
         // verified: an application's own users are not users of the tenant
-        return Response.json(renderApplicationUser(own.data, call.user!, own.bootstrap ? [] : own.application.requiredRoles as string[] ?? []))
+        return Response.json(renderApplicationUser(found.data, call.user!, found.bootstrap ? [] : found.application.requiredRoles as string[] ?? []))
       }
-      if (formerApplicationUser(call)) {
+      if (found.kind === 'former') {
         return apiError(401, 'security/Unauthorized', 'Invalid credentials!')
       }
       const restricted = callerAccess(call)
       if (restricted && !restricted.roles.has('ROLE_USER_MANAGEMENT_OWN_READ')) {
         return apiError(403, 'security/Forbidden', 'Access Denied')
       }
-      if (call.user !== undefined && (call.user !== user?.userName || call.tenant !== (user.tenant ?? tenant))) {
-        // Basic auth of another user (by name or tenant): that user of the
-        // caller's tenant, with its roles. A user the tenant does not store
-        // gets the world's user, as before stored users answered here (by
-        // default the fake checks no credentials, so a forwarded header naming
-        // another user keeps working; `unknownUsers: 'unauthorized'` answers
-        // such a request 401 before it gets here)
-        const data = context.tenantData?.(call.tenant)
-        const stored = data?.users.get(call.user)
-        if (data && stored) {
-          return Response.json(renderCurrentUser(data, stored))
-        }
-      }
-      if (!user) {
+      if (found.kind === 'none') {
         return Response.json({ error: 'security/Unauthorized', message: 'Invalid credentials!' }, { status: 401 })
       }
-      const data = tenants.get(user.tenant ?? tenant)
-      const stored = data?.users.get(user.userName)
-      if (data && stored) {
-        return Response.json(renderCurrentUser(data, stored))
+      if (found.kind === 'stored') {
+        // verified: the user type answers the full user, like the user API,
+        // plus `supportUserEnabled`; any other type the short shape with roles
+        const full = vendorName(negotiate(method, segments, call.headers.accept ?? null) ?? '') === 'user'
+        return Response.json(full ? { ...renderUser(found.data, found.user), supportUserEnabled: false } : renderCurrentUser(found.data, found.user))
       }
       // the user was deleted through the API: answer with the world's user
-      const { roles = [], tenant: _tenant, groups: _groups, password: _password, ...rest } = user
+      const { roles = [], tenant: _tenant, groups: _groups, password: _password, ...rest } = found.user
       return Response.json({
-        id: user.userName,
+        id: found.user.userName,
         ...rest,
         effectiveRoles: roles.map((name) => ({ id: name, name })),
       })

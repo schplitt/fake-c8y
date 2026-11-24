@@ -106,7 +106,7 @@ async function request(method: string, path: string, body?: unknown, headers: Re
       return { status: res.status, json }
     }
     const results = schemas.map((schema) => checkSchema(json, schema).filter((problem) => {
-      const matched = SCHEMA_DEVIATIONS.find((item) => item.problem.test(problem))
+      const matched = SCHEMA_DEVIATIONS.find((item) => item.problem.test(problem) && (item.endpoint === undefined || item.endpoint === endpoint))
       if (matched) {
         usedDeviations.add(matched.id)
       }
@@ -460,6 +460,9 @@ describe('the fake tenant against the OpenAPI spec', { concurrent: false }, () =
     await request('PUT', `/user/${T}/users/spec.a`, { lastName: 'Lee' })
     await request('PUT', `/user/${T}/users/spec.a`, { userName: 'x' })
     await request('PUT', `/user/${T}/users/spec.nope`, { lastName: 'Lee' })
+    await request('PUT', '/user/currentUser', { firstName: 'Spec' })
+    await request('PUT', '/user/currentUser', { customProperties: { language: 'de' } }, { 'accept': 'application/vnd.com.nsn.cumulocity.user+json', 'content-type': 'application/vnd.com.nsn.cumulocity.user+json' })
+    await request('PUT', '/user/currentUser', { password })
     await request('POST', `/user/${T}/users/spec.a/roles`, { role: { self: `${base}/user/roles/ROLE_ALARM_READ` } })
     await request('POST', `/user/${T}/users/spec.a/roles`, { role: { self: `${base}/user/roles/ROLE_NOPE` } })
     await request('POST', `/user/${T}/users/spec.nope/roles`, { role: { self: `${base}/user/roles/ROLE_ALARM_READ` } })

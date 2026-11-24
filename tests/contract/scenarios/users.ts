@@ -1,6 +1,7 @@
 import { expect } from 'vitest'
 import type { Client } from '@c8y/client'
 import type { ContractScenario } from '../helpers'
+import { withRestrictedUser } from './roles'
 
 // Users, groups, and inventory roles created here carry the run id and are
 // deleted in `finally`: the real-tenant cleanup only knows inventory data.
@@ -20,6 +21,12 @@ async function api(client: Client, method: string, path: string, body?: unknown)
 }
 
 const PASSWORD = 'Contract-Pass-2026!x'
+
+// the two answer types of `/user/currentUser`
+const USER_TYPE = 'application/vnd.com.nsn.cumulocity.user+json'
+const CURRENT_USER_TYPE = 'application/vnd.com.nsn.cumulocity.currentuser+json'
+const asUser = { 'accept': USER_TYPE, 'content-type': USER_TYPE }
+const asCurrentUser = { 'accept': CURRENT_USER_TYPE, 'content-type': CURRENT_USER_TYPE }
 
 /**
  * Path and query of a link: the platform links to its own host name, which
@@ -485,6 +492,116 @@ export const usersScenarios: ContractScenario[] = [
       for (const role of expected) {
         expect(effective.has(role), role).toBe(true)
       }
+    },
+  },
+  {
+    name: 'current user: the answer type picks the shape',
+    verifies: ['current-user-shape'],
+    async run({ client, tenant, unique }) {
+      await withRestrictedUser(client, tenant, unique, async ({ as, userName }) => {
+        const full = await as('GET', '/user/currentUser', undefined, { accept: USER_TYPE })
+        expect(full.status).toBe(200)
+        expect(full.body).toMatchObject({ id: userName, userName, enabled: true, customProperties: expect.any(Object), groups: expect.any(Object), roles: expect.any(Object), devicePermissions: expect.any(Object), applications: expect.any(Array), supportUserEnabled: expect.any(Boolean) })
+        expect(full.body).not.toHaveProperty('effectiveRoles')
+        expect(full.body).not.toHaveProperty('requiredAuthType')
+        expect(url(full.body.self)).toBe(`/user/${tenant}/users/${encodeURIComponent(userName)}`)
+        for (const accept of [CURRENT_USER_TYPE, 'application/json']) {
+          const short = await as('GET', '/user/currentUser', undefined, { accept })
+          expect(short.status).toBe(200)
+          expect(short.body).toMatchObject({ id: userName, userName, requiredAuthType: 'NONE', effectiveRoles: expect.any(Array) })
+          expect(short.body).not.toHaveProperty('customProperties')
+          expect(url(short.body.self)).toBe('/user/currentUser')
+        }
+      })
+    },
+  },
+  {
+    name: 'current user: PUT with the user type writes the profile and custom properties',
+    verifies: ['current-user-put-user-type'],
+    async run({ client, tenant, unique }) {
+      await withRestrictedUser(client, tenant, unique, async ({ as, userName }) => {
+        const first = await as('PUT', '/user/currentUser', { firstName: 'Ann', displayName: 'Ann D', customProperties: { language: 'de', layout: 'wide' } }, asUser)
+        expect(first.status).toBe(200)
+        expect(first.body).toMatchObject({ userName, firstName: 'Ann', displayName: 'Ann D', customProperties: { language: 'de', layout: 'wide' } })
+        expect(first.body).not.toHaveProperty('effectiveRoles')
+        // merged key by key, `null` removes a key, `null` fields are ignored
+        const second = await as('PUT', '/user/currentUser', { firstName: null, customProperties: { layout: null, theme: 'dark' } }, asUser)
+        expect(second.status).toBe(200)
+        expect(second.body).toMatchObject({ firstName: 'Ann', customProperties: { language: 'de', theme: 'dark' } })
+        expect(second.body.customProperties).not.toHaveProperty('layout')
+        const read = await as('GET', '/user/currentUser', undefined, { accept: USER_TYPE })
+        expect(read.body).toMatchObject({ firstName: 'Ann', displayName: 'Ann D', customProperties: { language: 'de', theme: 'dark' } })
+        // devicePermissions are written; the short mode leaves them, the user type without them clears them
+        const permissions = { 12345: ['MANAGED_OBJECT:*:ADMIN'] }
+        expect(await as('PUT', '/user/currentUser', { devicePermissions: permissions }, asUser)).toMatchObject({ status: 200, body: { devicePermissions: permissions } })
+        expect((await as('PUT', '/user/currentUser', { lastName: 'L' }, asCurrentUser)).status).toBe(200)
+        expect((await as('GET', '/user/currentUser', undefined, { accept: USER_TYPE })).body.devicePermissions).toEqual(permissions)
+        expect(await as('PUT', '/user/currentUser', { lastName: 'L' }, asUser)).toMatchObject({ status: 200, body: { devicePermissions: {} } })
+        expect((await as('GET', '/user/currentUser', undefined, { accept: USER_TYPE })).body.devicePermissions).toEqual({})
+      })
+    },
+  },
+  {
+    name: 'current user: PUT with another answer type writes a few fields and answers the short shape',
+    verifies: ['current-user-put-short'],
+    async run({ client, tenant, unique }) {
+      await withRestrictedUser(client, tenant, unique, async ({ as, userName }) => {
+        const short = await as('PUT', '/user/currentUser', { firstName: 'Bo', lastName: 'Lind', displayName: 'ignored', customProperties: { language: 'fr' } }, asCurrentUser)
+        expect(short.status).toBe(200)
+        expect(short.body).toMatchObject({ userName, firstName: 'Bo', lastName: 'Lind', requiredAuthType: 'NONE' })
+        expect(url(short.body.self)).toBe('/user/currentUser')
+        expect(short.body).not.toHaveProperty('customProperties')
+        expect(short.body).not.toHaveProperty('effectiveRoles')
+        const plain = await as('PUT', '/user/currentUser', { lastName: 'Lund' }, { 'accept': 'application/json', 'content-type': 'application/json' })
+        expect(plain).toMatchObject({ status: 200, body: { lastName: 'Lund', requiredAuthType: 'NONE' } })
+        expect(plain.body).not.toHaveProperty('effectiveRoles')
+        // mixed headers: JSON before the currentuser type before the user type, the highest q first
+        for (const accept of [`${USER_TYPE}, application/json`, `${USER_TYPE}, ${CURRENT_USER_TYPE}`, `${USER_TYPE};q=0.1, ${CURRENT_USER_TYPE};q=0.5`]) {
+          const mixed = await as('PUT', '/user/currentUser', { customProperties: { mixed: 1 } }, { accept, 'content-type': 'application/json' })
+          expect([accept, mixed.status, mixed.body.requiredAuthType]).toEqual([accept, 200, 'NONE'])
+          expect(mixed.body).not.toHaveProperty('customProperties')
+        }
+        const weighted = await as('PUT', '/user/currentUser', { lastName: 'Lund' }, { 'accept': `${CURRENT_USER_TYPE};q=0.1, ${USER_TYPE}`, 'content-type': 'application/json' })
+        expect(weighted).toMatchObject({ status: 200, body: { lastName: 'Lund', customProperties: expect.any(Object) } })
+        expect(weighted.body.customProperties).not.toHaveProperty('mixed')
+        // a wildcard Accept header answers without a body
+        const empty = await as('PUT', '/user/currentUser', { firstName: 'Cy' }, { 'accept': '*/*', 'content-type': 'application/json' })
+        expect(empty).toEqual({ status: 200, body: undefined })
+        const read = await as('GET', '/user/currentUser', undefined, { accept: USER_TYPE })
+        expect(read.body).toMatchObject({ firstName: 'Cy', lastName: 'Lund' })
+        expect(read.body).not.toHaveProperty('displayName')
+        expect(read.body.customProperties).not.toHaveProperty('language')
+      })
+    },
+  },
+  {
+    name: 'current user: PUT refuses a password, a user name, a bad phone, and contradicting types',
+    verifies: ['current-user-put-refused'],
+    async run({ client, tenant, unique }) {
+      await withRestrictedUser(client, tenant, unique, async ({ as, userName }) => {
+        for (const headers of [asUser, asCurrentUser]) {
+          const password = await as('PUT', '/user/currentUser', { firstName: 'Changed', password: 'Other-Pass-2026!x' }, headers)
+          expect(password).toMatchObject({ status: 422, body: { error: 'undefined/validationError', message: 'Password cannot be changed with this request. Use PUT /user/currentUser/password.' } })
+          const empty = await as('PUT', '/user/currentUser', { firstName: 'Changed', userName, phone: '123', password: '' }, headers)
+          expect(empty).toMatchObject({ status: 422, body: { message: 'Password cannot be changed with this request. Use PUT /user/currentUser/password.' } })
+          for (const body of [{ firstName: { a: 1 } }, { lastName: ['x'] }, { shouldResetPassword: 'no' }]) {
+            const parsed = await as('PUT', '/user/currentUser', body, headers)
+            expect([JSON.stringify(body), parsed.status, parsed.body.error]).toEqual([JSON.stringify(body), 400, 'Failed to parse JSON string'])
+          }
+          // the short mode ignores customProperties, also of the wrong type
+          const custom = await as('PUT', '/user/currentUser', { customProperties: 'x' }, headers)
+          expect(custom.status).toBe(headers === asUser ? 400 : 200)
+          const name = await as('PUT', '/user/currentUser', { firstName: 'Changed', userName }, headers)
+          expect(name).toMatchObject({ status: 422, body: { error: 'undefined/validationError', message: 'userName is not allowed here' } })
+          const phone = await as('PUT', '/user/currentUser', { firstName: 'Changed', phone: '123' }, headers)
+          expect(phone).toMatchObject({ status: 422, body: { error: 'undefined/validationError', message: 'phone is required in the international phone number format +48 123 456 789' } })
+        }
+        expect((await as('PUT', '/user/currentUser', { firstName: 'Changed' }, { 'accept': USER_TYPE, 'content-type': CURRENT_USER_TYPE })).status).toBe(406)
+        expect((await as('PUT', '/user/currentUser', { firstName: 'Changed' }, { 'accept': CURRENT_USER_TYPE, 'content-type': USER_TYPE })).status).toBe(406)
+        expect((await as('PUT', '/user/currentUser', { firstName: 'Changed' }, { 'accept': 'text/plain', 'content-type': 'application/json' })).status).toBe(406)
+        const read = await as('GET', '/user/currentUser', undefined, { accept: USER_TYPE })
+        expect(read.body).not.toHaveProperty('firstName')
+      })
     },
   },
   {
