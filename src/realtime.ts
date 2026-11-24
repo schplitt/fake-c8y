@@ -20,6 +20,8 @@
  * subscription is gone, as a dropped connection (1006, empty reason).
  * Every subscriber (tenant, subscription, and subscriber of the token) gets
  * each frame once; the sockets of a shared token split them by source.
+ * Delivery to a socket pauses at 1000 frames not acknowledged and goes on as
+ * acks arrive.
  * `closeConsumers()` closes sockets from the server side to test a client's
  * reconnect path.
  * The consumer WebSocket is in `./websocket` (the `fake-c8y/realtime` entry).
@@ -27,6 +29,12 @@
 import type { StoredDocument } from './store'
 import { scheduleReal, SettleTimeoutError, waitForQuiet } from './timers'
 import { parseToken } from './token'
+
+/**
+ * Frames a socket can have on its way and not acknowledged; later frames for
+ * it wait for acks (inferred from the platform's documented limit).
+ */
+const MAX_UNACKNOWLEDGED = 1000
 
 export type RealtimeApi = 'managedobjects' | 'measurements' | 'events' | 'alarms' | 'operations'
 
@@ -232,7 +240,9 @@ export interface RealtimeStatus {
    */
   connecting: number
   /**
-   * Frames delivered to a socket and not acknowledged yet.
+   * Frames delivered to a socket and not acknowledged yet. At 1000 on a
+   * socket, delivery to it pauses: later frames for it wait until acks
+   * arrive, and are counted neither here nor in `backlog`.
    */
   unacknowledged: number
   /**
@@ -347,6 +357,22 @@ export class Realtime {
    */
   private readonly outstanding: Map<NotificationSocket, Map<string, NotificationFrame>> = new Map()
   /**
+   * frames held for a socket at the cap (`MAX_UNACKNOWLEDGED` outstanding),
+   * in order; in neither `outstanding` nor `unacked`
+   */
+  private readonly held: Map<NotificationSocket, NotificationFrame[]> = new Map()
+  /**
+   * ack ids of frames sent to a socket before an unsubscribe and not yet
+   * acknowledged: no longer `outstanding` (a close puts nothing back), but
+   * still counted for the cap until acked
+   */
+  private readonly dropped: Map<NotificationSocket, Set<string>> = new Map()
+  /**
+   * sockets whose held frames an `acknowledge()` is sending right now: a
+   * nested ack (synchronous schedule) only frees room
+   */
+  private readonly releasing: Set<NotificationSocket> = new Set()
+  /**
    * Bumped by `dropPending()`: frames scheduled before are not delivered.
    */
   private generation = 0
@@ -411,6 +437,8 @@ export class Realtime {
     this.open.set(subscriber, [...open, socket])
     this.unacked.set(socket, new Set())
     this.outstanding.set(socket, new Map())
+    this.held.set(socket, [])
+    this.dropped.set(socket, new Set())
     // connected before 'open': a frame an 'open' listener publishes queues
     // behind the subscriber's backlog (flushed below, after the listeners),
     // and a socket an 'open' listener closes counts as having connected
@@ -495,16 +523,18 @@ export class Realtime {
   }
 
   /**
-   * Removes a closed consumer socket. Its unacknowledged frames go back into
-   * its subscriber's backlog (`requeue()`).
+   * Removes a closed consumer socket. Its unacknowledged and held frames go
+   * back into its subscriber's backlog (`requeue()`).
    * @param socket - The closed socket
    */
   disconnect(socket: NotificationSocket): void {
-    const frames = [...(this.outstanding.get(socket)?.values() ?? [])]
+    const frames = [...(this.outstanding.get(socket)?.values() ?? []), ...(this.held.get(socket) ?? [])]
     this.connecting.delete(socket)
     this.sockets.delete(socket)
     this.unacked.delete(socket)
     this.outstanding.delete(socket)
+    this.held.delete(socket)
+    this.dropped.delete(socket)
     this.sources.delete(socket)
     if (socket.token) {
       const subscriber = this.key(socket.token.tenant, socket.token.subscription, socket.token.subscriber)
@@ -521,13 +551,14 @@ export class Realtime {
   /**
    * After an unsubscribe: drops the subscriber's backlog, like the platform.
    * Its open sockets stay open and keep receiving (the subscriber stays
-   * known); their outstanding frames are forgotten, so a later close does
-   * not put back frames the platform dropped. Frames already on their way
+   * known); their outstanding and held frames are forgotten, so a later
+   * close does not put back frames the platform dropped. Frames already on their way
    * still arrive while the socket stays open; one still on its way when the
    * socket closes is lost. An ack of a frame from before the unsubscribe
    * still clears it from the unacknowledged count (`pending()`,
-   * `status().unacknowledged`), so `settled()` waits for such frames until
-   * they are acknowledged; the ack only no longer matters for a later close.
+   * `status().unacknowledged`) and frees room under the cap: such frames
+   * count against the cap and keep `settled()` waiting until they are
+   * acknowledged; the ack only no longer matters for a later close.
    * @param tenant - The subscription's tenant
    * @param subscription - The subscription name
    * @param subscriber - The subscriber
@@ -536,20 +567,73 @@ export class Realtime {
     const key = this.key(tenant, subscription, subscriber)
     this.backlog.delete(key)
     for (const socket of this.open.get(key) ?? []) {
-      this.outstanding.get(socket)?.clear()
+      const outstanding = this.outstanding.get(socket)
+      for (const ackId of outstanding?.keys() ?? []) {
+        this.dropped.get(socket)?.add(ackId)
+      }
+      outstanding?.clear()
+      this.held.get(socket)?.splice(0)
     }
   }
 
+  /**
+   * A consumer's ack: clears the frame and, below the cap, sends the frames
+   * held for the socket, in order.
+   * @param socket - The socket the ack came on
+   * @param ackId - The acknowledged frame's ack id
+   */
   acknowledge(socket: NotificationSocket, ackId: string): void {
     this.unacked.get(socket)?.delete(ackId)
-    this.outstanding.get(socket)?.delete(ackId)
+    const freed = this.outstanding.get(socket)?.delete(ackId) || this.dropped.get(socket)?.delete(ackId)
+    const held = this.held.get(socket)
+    if (!freed || !held || this.releasing.has(socket)) {
+      return
+    }
+    // a synchronous schedule can ack (a nested acknowledge() only frees
+    // room, this loop sends on in order) or close the socket (its held
+    // frames are requeued) inside send(): stop once the socket is gone
+    this.releasing.add(socket)
+    try {
+      while (held.length > 0 && this.unacknowledgedOn(socket) < MAX_UNACKNOWLEDGED && this.held.get(socket) === held) {
+        // shift and send in one step: send() makes the frame outstanding
+        // before anything else can run
+        this.send(socket, held.shift()!)
+      }
+    } finally {
+      this.releasing.delete(socket)
+    }
+  }
+
+  /**
+   * Frames sent to a socket and not acknowledged, as counted for the cap
+   * (also the ones an unsubscribe dropped).
+   * @param socket - The socket
+   * @returns The count
+   */
+  private unacknowledgedOn(socket: NotificationSocket): number {
+    return (this.outstanding.get(socket)?.size ?? 0) + (this.dropped.get(socket)?.size ?? 0)
   }
 
   key(tenant: string, subscription: string, subscriber?: string): string {
     return subscriber === undefined ? `${tenant}\u0000${subscription}` : `${tenant}\u0000${subscription}\u0000${subscriber}`
   }
 
+  /**
+   * Sends a frame to a socket, or holds it while the socket is at the cap or
+   * has frames held already (to keep the order).
+   * @param socket - The open socket
+   * @param frame - The frame
+   */
   deliver(socket: NotificationSocket, frame: NotificationFrame): void {
+    const held = this.held.get(socket)
+    if (held && (held.length > 0 || this.unacknowledgedOn(socket) >= MAX_UNACKNOWLEDGED)) {
+      held.push(frame)
+      return
+    }
+    this.send(socket, frame)
+  }
+
+  private send(socket: NotificationSocket, frame: NotificationFrame): void {
     const generation = this.generation
     this.outstanding.get(socket)?.set(frame.ackId, frame)
     this.schedule(() => {
@@ -724,6 +808,12 @@ export class Realtime {
     for (const frames of this.outstanding.values()) {
       frames.clear()
     }
+    for (const frames of this.held.values()) {
+      frames.splice(0)
+    }
+    for (const acks of this.dropped.values()) {
+      acks.clear()
+    }
     for (const socket of this.sockets) {
       if (socket.token) {
         this.markConnected(socket.token)
@@ -833,6 +923,8 @@ export class Realtime {
     this.connecting.clear()
     this.unacked.clear()
     this.outstanding.clear()
+    this.held.clear()
+    this.dropped.clear()
     this.dropPending()
   }
 }

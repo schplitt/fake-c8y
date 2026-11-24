@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { createClock, createWorld } from '../../src'
-import type { NotificationSocket, World } from '../../src'
+import type { NotificationSocket, World, SettleTimeoutError } from '../../src'
 import { createFakeWebSocket } from '../../src/realtime-entry'
 import { parseToken } from '../../src/token'
 
@@ -1480,5 +1480,202 @@ describe('one backlog per subscriber', () => {
     await call(world, 'POST', '/inventory/managedObjects', { name: 'after drop' })
     run()
     expect(a.received.map(name)).toEqual(['after drop'])
+  })
+})
+
+describe('1000 unacknowledged frames per socket', () => {
+  async function setup(nonPersistent?: boolean) {
+    const { world, run } = manualWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub', ...(nonPersistent ? { nonPersistent } : {}) })
+    return { world, run }
+  }
+
+  // ack ids count from 1 in a new world, so frame i has ack id i
+  function publish(world: World, count: number, source?: string) {
+    for (let i = 0; i < count; i++) {
+      world.realtime.publish(world.tenant, 'managedobjects', 'CREATE', { id: String(9_000_000 + i), name: 'x' }, source)
+    }
+  }
+
+  const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => String(from + i))
+
+  it('delivers 1000 frames without acks and holds the 1001st until one is acknowledged', async () => {
+    const { world, run } = await setup()
+    const consumer = await open(world, run, 'sub', 'a')
+    publish(world, 1000)
+    run()
+    expect(consumer.received.map(ackId)).toEqual(range(1, 1000))
+    publish(world, 1)
+    run()
+    expect(consumer.received).toHaveLength(1000)
+    expect(world.realtime.status()).toMatchObject({ unacknowledged: 1000, backlog: 0, scheduled: 0 })
+    consumer.socket.send('1')
+    run()
+    expect(consumer.received.map(ackId)).toEqual(range(1, 1001))
+    expect(world.realtime.status().unacknowledged).toBe(1000)
+  })
+
+  it('releases held frames in order, one per ack', async () => {
+    const { world, run } = await setup()
+    const consumer = await open(world, run, 'sub', 'a')
+    publish(world, 1003)
+    run()
+    consumer.socket.send('5')
+    consumer.socket.send('5')
+    consumer.socket.send('unknown')
+    run()
+    expect(consumer.received.map(ackId).slice(998)).toEqual(['999', '1000', '1001'])
+    consumer.socket.send('7')
+    consumer.socket.send('9')
+    run()
+    expect(consumer.received.map(ackId).slice(1000)).toEqual(['1001', '1002', '1003'])
+  })
+
+  it('gives a persistent reconnect the delivered and the held frames in ack order, each once', async () => {
+    const { world, run } = await setup()
+    const consumer = await open(world, run, 'sub', 'a')
+    publish(world, 1005)
+    run()
+    consumer.socket.close()
+    run()
+    expect(world.realtime.status().backlog).toBe(1005)
+    const again = await open(world, run, 'sub', 'a')
+    again.socket.on('message', (text: string) => again.socket.send(ackId(text)))
+    expect(again.received.map(ackId)).toEqual(range(1, 1000))
+    for (const frame of [...again.received]) {
+      again.socket.send(ackId(frame))
+    }
+    run()
+    expect(again.received.map(ackId)).toEqual(range(1, 1005))
+    expect(world.realtime.status()).toMatchObject({ unacknowledged: 0, backlog: 0 })
+  })
+
+  it('loses the held frames of a non-persistent subscription on close', async () => {
+    const { world, run } = await setup(true)
+    const consumer = await open(world, run, 'sub', 'a')
+    publish(world, 1001)
+    run()
+    consumer.socket.close()
+    run()
+    expect(world.realtime.status().backlog).toBe(0)
+    expect((await open(world, run, 'sub', 'a')).received).toEqual([])
+  })
+
+  it('holds the frames of a shared socket at the cap for it, and hands them to another socket when it closes', async () => {
+    const { world, run } = await setup()
+    const a = await open(world, run, 'sub', 'a', undefined, undefined, true)
+    const b = await open(world, run, 'sub', 'a', undefined, undefined, true)
+    publish(world, 1001, 'x')
+    run()
+    const [full, other] = a.received.length > 0 ? [a, b] : [b, a]
+    expect(full.received.map(ackId)).toEqual(range(1, 1000))
+    expect(other.received).toEqual([])
+    other.socket.on('message', (text: string) => other.socket.send(ackId(text)))
+    publish(world, 1, 'y')
+    run()
+    // the other socket acknowledges at once: its acks do not release the held frame
+    expect(other.received.map(ackId)).toEqual(['1002'])
+    expect(full.received).toHaveLength(1000)
+    full.socket.close()
+    run()
+    expect(other.received.map(ackId)).toEqual(['1002', ...range(1, 1001)])
+    expect(world.realtime.status()).toMatchObject({ unacknowledged: 0, backlog: 0 })
+  })
+
+  it('drops held frames on reset and restore', async () => {
+    const { world, run } = await setup()
+    const start = world.checkpoint()
+    const snapshot = world.snapshot()
+    for (const drop of [() => world.reset({ to: start }), () => world.restore(snapshot)]) {
+      const consumer = await open(world, run, 'sub', 'a')
+      const first = world.realtime.nextAck
+      publish(world, 1001)
+      run()
+      expect(consumer.received).toHaveLength(1000)
+      drop()
+      expect(consumer.socket.readyState).toBe(1)
+      consumer.socket.send(String(first))
+      run()
+      expect(consumer.received).toHaveLength(1000)
+      publish(world, 1)
+      run()
+      expect(consumer.received.map(ackId).slice(1000)).toEqual([String(first + 1001)])
+      consumer.socket.close()
+      run()
+      expect(world.realtime.status().backlog).toBe(1)
+      world.realtime.dropPending()
+    }
+  })
+
+  it('keeps settled() waiting at the cap until the frames are acknowledged', async () => {
+    const { world, run } = await setup()
+    const consumer = await open(world, run, 'sub', 'a')
+    publish(world, 1001)
+    run()
+    const error = await world.realtime.settled({ timeout: 50 }).catch((error: unknown) => error)
+    expect((error as SettleTimeoutError).status).toMatchObject({ unacknowledged: 1000 })
+    consumer.socket.on('message', (text: string) => consumer.socket.send(ackId(text)))
+    for (const frame of [...consumer.received]) {
+      consumer.socket.send(ackId(frame))
+    }
+    run()
+    const { status } = await world.realtime.settled({ timeout: 1000 })
+    expect(status).toMatchObject({ unacknowledged: 0, backlog: 0 })
+    expect(consumer.received).toHaveLength(1001)
+  })
+
+  it('empties the held frames on unsubscribe, so a later close brings nothing back', async () => {
+    const { world, run } = await setup()
+    const consumer = await open(world, run, 'sub', 'a')
+    publish(world, 1001)
+    run()
+    expect((await call(world, 'POST', `/notification2/unsubscribe?token=${consumer.token}`)).body).toEqual({ result: 'DONE' })
+    consumer.socket.send('1')
+    run()
+    expect(consumer.received).toHaveLength(1000)
+    consumer.socket.close()
+    run()
+    expect(world.realtime.status().backlog).toBe(0)
+    expect((await open(world, run, 'sub', 'a')).received).toEqual([])
+  })
+
+  it('keeps counting the frames an unsubscribe dropped against the cap until they are acknowledged', async () => {
+    const { world, run } = await setup()
+    const consumer = await open(world, run, 'sub', 'a')
+    publish(world, 1000)
+    run()
+    expect((await call(world, 'POST', `/notification2/unsubscribe?token=${consumer.token}`)).status).toBe(200)
+    publish(world, 1000)
+    run()
+    expect(consumer.received.map(ackId)).toEqual(range(1, 1000))
+    expect(world.realtime.status().unacknowledged).toBe(1000)
+    // an ack of a dropped frame frees room
+    consumer.socket.send('1')
+    consumer.socket.send('2')
+    run()
+    expect(consumer.received.map(ackId).slice(1000)).toEqual(['1001', '1002'])
+    expect(world.realtime.status().unacknowledged).toBe(1000)
+    // a later close puts back only the frames from after the unsubscribe
+    consumer.socket.close()
+    run()
+    expect(world.realtime.status().backlog).toBe(1000)
+    const again = await open(world, run, 'sub', 'a')
+    expect(again.received.map(ackId)).toEqual(range(1001, 2000))
+  })
+
+  it('releases held frames in order, each once, when a synchronous schedule acks inside the listener', async () => {
+    const world = createWorld({ schedule: (callback) => callback() })
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    const consumer = await open(world, () => {}, 'sub', 'a')
+    publish(world, 5000)
+    expect(consumer.received).toHaveLength(1000)
+    consumer.socket.on('message', (text: string) => consumer.socket.send(ackId(text)))
+    expect(() => {
+      for (const frame of consumer.received.slice(0, 1000)) {
+        consumer.socket.send(ackId(frame))
+      }
+    }).not.toThrow()
+    expect(consumer.received.map(ackId)).toEqual(range(1, 5000))
+    expect(world.realtime.status()).toMatchObject({ unacknowledged: 0, backlog: 0, scheduled: 0 })
   })
 })
