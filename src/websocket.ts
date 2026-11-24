@@ -149,6 +149,7 @@ export function createFakeWebSocket(realtime: Realtime, options: FakeWebSocketOp
     }
 
     ping(): void {
+      realtime.touch(this)
       realtime.schedule(() => this.emit('pong'))
     }
 
