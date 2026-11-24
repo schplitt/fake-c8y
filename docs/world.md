@@ -379,7 +379,14 @@ Sockets belong to one world, so use `createFakeWebSocket(fork.realtime)` for a f
 
 A token is stateless and JWT-shaped: `<header>.<claims>.<checksum>` in base64url. The claims hold the tenant, subscription, subscriber, expiry (`exp`, in seconds), and `shared` (only when minted with `shared: true`); an open socket shows them as `socket.token` (`NotificationToken`, with `expires` in epoch milliseconds). The checksum only catches a changed or broken token. It is not a security measure: a token works in any world, also in a fork and after a reset or restore, until it expires. Nothing is random, so the same request at the same time gives the same token. Minting does not check that the subscription exists: such a socket opens and gets frames once a subscription of that name exists.
 
-A persistent subscription keeps frames for later only once a consumer of it has connected, like on the platform. Frames published before the first connect are dropped. `reset()` and `restore()` forget that a consumer connected, and a fork starts without it. Sockets that stay open across a reset or restore still count as connected.
+Every subscriber of a subscription (tenant, subscription, and subscriber of its token) gets each frame once and has its own backlog (see [One backlog per subscriber](#one-backlog-per-subscriber)). A persistent subscription keeps frames for a subscriber only once that subscriber has connected, like on the platform. Frames published before its first connect are dropped for it. `reset()` and `restore()` forget which subscribers connected, and a fork starts without any. The subscriber of a socket that stays open across a reset or restore still counts as connected.
+
+### One backlog per subscriber
+
+- Each subscriber gets every frame of its subscription once: on its open socket, or, for a persistent subscription, in its own backlog while it has no open socket. The next socket of that subscriber that opens gets the backlog first, with the same ack ids. Two subscribers of one subscription each get every frame.
+- A subscriber has one open socket. A second connect of the same tenant, subscription, and subscriber is refused with 409 (see [Refused connects](#refused-connects)), unless the new token and the tokens of all its open sockets were minted with `shared: true`. Sockets still connecting do not count, and a closed socket frees the slot at once, so a reconnect after a close works. This is inferred: no verified row yet.
+- The open sockets of a shared subscriber split the frames by source: all frames of one source go to one socket, and each frame reaches only one of them. Which socket gets a source is not specified. Acknowledgements count per socket. When a shared socket closes, its unacknowledged frames go to another open socket of the subscriber (persistent subscriptions only). This split is inferred, not verified.
+- `world.realtime.backlog` holds one entry per subscriber; its keys are opaque. `status().backlog` sums the frames of all subscribers.
 
 A token expires `expiresInMinutes` after it was created (default 1440, one day; 0 also means the default), by the world's clock. A negative `expiresInMinutes` or a subscriber or subscription name that is not alphanumeric answers 422. A socket that is already open stays open and keeps receiving. A reconnect needs a new token: a connect with an expired token is refused with 401, like one with a token that does not parse or fails its checksum (see [Refused connects](#refused-connects)). To move time in a test, create the world with a `clock` and call `world.advance()`, or pass a `now` function you control.
 
@@ -400,8 +407,8 @@ world.advance(6 * 60_000) // a new socket with this token is now refused with 40
 - A socket still connecting when a reset or restore removes its subscription closes right away with `1006`, once. It never opens and gets no `error`.
 - A refused connect (see [Refused connects](#refused-connects)) never opens: `error`, then close `1006` with an empty reason, unless a `ws`-flavor socket has an `unexpected-response` listener.
 - A socket the client closes itself (`close()` or `terminate()`) closes with `1000`, also while it is still connecting (then without `open` or `error`). A close before the connect ran keeps `1000` here, where `ws` emits `error` and close `1006`. The exception is a refused socket held by an `unexpected-response` listener: its close emits `error` and close `1006`. Every socket on `world.realtime.clear()` closes with `1000` too, except such a held refused socket, which it leaves alone.
-- A client close (`close()` or `terminate()`) keeps the frames the socket had not acknowledged, like `closeConsumers()` (see [below](#closing-consumers-from-the-server-side)). This holds only for a persistent subscription, and only when no other consumer of the subscription is still open. Then the next consumer of the subscription gets them first, with the same ack ids. Otherwise they are lost.
-- `POST /notification2/unsubscribe` finds the consumer by the token's claims (tenant, subscription, subscriber), not by the token text, closes its sockets with `1000`, and keeps none of their unacknowledged frames. The token stays valid. It answers 500 for a token that does not parse, fails its checksum, has expired, belongs to another tenant, or has no open socket of its subscriber; then no socket closes. That an expired token answers 500 is inferred: the platform checks the token (signature and expiry) before it unsubscribes. It also drops the subscription's backlog, and nothing is kept until a consumer of the subscription connects again.
+- A client close (`close()` or `terminate()`) keeps the frames the socket had not acknowledged, like `closeConsumers()` (see [below](#closing-consumers-from-the-server-side)). This holds only for a persistent subscription. They go back into the subscriber's backlog: another open socket of the same subscriber (a shared token) gets them at once, else the subscriber's next socket gets them first, with the same ack ids. For a non-persistent subscription they are lost.
+- `POST /notification2/unsubscribe` finds the consumer by the token's claims (tenant, subscription, subscriber), not by the token text, closes its sockets with `1000`, and keeps none of their unacknowledged frames. The token stays valid. It answers 500 for a token that does not parse, fails its checksum, has expired, belongs to another tenant, or has no open socket of its subscriber; then no socket closes. That an expired token answers 500 is inferred: the platform checks the token (signature and expiry) before it unsubscribes. It also drops that subscriber's backlog, and nothing is kept for it until it connects again. Other subscribers of the subscription keep theirs.
 - Removing a subscription through the API (`DELETE /notification2/subscriptions/{id}`, `DELETE /notification2/subscriptions?source=…`, or deleting the managed object a subscription is for) closes no socket: the consumer stays open and receives nothing more. The backlog stays. What the platform does there is not verified.
 
 ### Refused connects
@@ -410,6 +417,7 @@ A connect with a bad token is refused before any socket opens, with an HTTP stat
 
 - 401: the token does not parse, fails its checksum, or has expired. This is inferred: no verified row yet.
 - 400: no `token` parameter, an empty one (`?token=`), or more than one. The empty and the repeated case are inferred.
+- 409: the subscriber (tenant, subscription, and subscriber of the token) already has an open socket, and the new token or that socket's token is not shared. This is inferred: no verified row yet. See [One backlog per subscriber](#one-backlog-per-subscriber).
 
 The socket's events follow the `ws` package. Without an `unexpected-response` listener, it never emits `open`: it emits `error` (`Unexpected server response: 401`), then `close` with `1006` and an empty reason, and `readyState` is `CLOSED`. The `text` flavor always behaves like this, as a browser WebSocket has no `unexpected-response` event.
 
@@ -436,7 +444,7 @@ world.realtime.closeConsumers({ subscription: 'alarms', code: 1011, reason: 'int
 - `tenant`, `subscription`, `subscriber`, and `token` select the sockets (all open ones by default). Sockets still connecting are not closed.
 - `code` (default `1006`, what a client sees when the connection drops) must be an integer from 1000 to 4999, and `reason` defaults to `''`. `1006` is allowed on purpose: a peer never sends it in a close frame, but a client sees it when the connection drops.
 - Subscriptions stay stored and the token stays valid, so the client can reconnect with the same token or mint a new one.
-- Frames are kept for the reconnect only when the subscription is persistent and no other consumer of it stays open (the backlog is per subscription, and filled only while no consumer of it is connected). Then the frames the closed socket had not acknowledged (delivered or still scheduled) go back into the backlog, frames published meanwhile wait there too, and the next consumer of the subscription that connects gets them. If another consumer of the subscription stays open, the frames published meanwhile go to it, and the closed consumer's unacknowledged frames are lost. The platform's redelivery is not verified.
+- Frames are kept for the reconnect only when the subscription is persistent. Then the frames the closed socket had not acknowledged (delivered or still scheduled) go back into its subscriber's backlog. Another open socket of the same subscriber (a shared token) gets them at once; otherwise they wait with the frames published meanwhile, and the subscriber's next socket gets them. Other subscribers of the subscription are not affected. The platform's redelivery is not verified.
 - The `close` event is emitted synchronously, like the closes of a reset.
 
 ### Waiting for background work
@@ -456,7 +464,7 @@ const { status } = await world.realtime.settled()
 expect(world.db.alarms.find({ source: pump })).toHaveLength(1)
 ```
 
-`settled()` does not wait for frames stored for a subscription that has no open consumer (`status().backlog`, see [below](#what-is-still-on-its-way)). They are kept for a subscription a consumer has connected to before, until a consumer connects again, which may never happen (a stopped service leaves its token behind). When a consumer connects, it gets those frames at once, and `settled()` waits for them from then on.
+`settled()` does not wait for frames stored for a subscriber that has no open socket (`status().backlog`, see [below](#what-is-still-on-its-way)). They are kept for a subscriber that has connected before, until it connects again, which may never happen (a stopped service leaves its token behind). When it connects, it gets those frames at once, and `settled()` waits for them from then on.
 
 `settled()` resolves with `{ waitedMs, status }`, the `realtime.status()` it settled with (`backlog` can be above 0). A timeout rejects with `SettleTimeoutError` (exported from `fake-c8y` and `fake-c8y/realtime`). Its message lists the counts that were still above 0 at the last check, for example `fake-c8y: realtime.settled() timed out after 5000 ms (unacknowledged 1)`, and its `status` has the same counts:
 
@@ -559,6 +567,14 @@ Tokens used to be stored (`fake-token-<n>-<subscription>-<subscriber>`), and a r
 
 A connect with a bad token used to emit `error` (`Invalid notification token`) and close with `1008` (`invalid token`). Now it is refused with 401 or 400 before any socket opens (see [Refused connects](#refused-connects)): `error` (`Unexpected server response: <status>`), then close `1006` with an empty reason, or only `unexpected-response` in the `ws` flavor with a listener for it. Replace checks for `1008` with checks for `1006`, or read the status in an `unexpected-response` listener. A connect without exactly one non-empty `token` parameter used to count as a bad token too; it now answers 400. A socket class of your own (one that is not from `createFakeWebSocket()`) now gets `error` and close `1006` one scheduled tick later, through the world's `schedule`, instead of `error` and `1008` synchronously in the connect.
 
+#### Changed: one backlog per subscriber
+
+The backlog used to be per subscription: the open sockets of a subscription all got every frame, and frames waited for the subscription while none was open. Now every subscriber has its own (see [One backlog per subscriber](#one-backlog-per-subscriber)). To migrate:
+
+- Two subscribers of one subscription each get every frame, also when one of them connects only later: frames wait for each subscriber that has connected before.
+- A second open socket with the same subscriber is refused with 409, unless all its sockets use shared tokens. Give each client its own subscriber, or mint with `shared: true` (the sockets then split the frames by source).
+- The keys of `realtime.backlog` are now per subscriber and opaque. `realtime.unsubscribed(tenant, subscription, subscriber)` takes the subscriber as a required third argument and drops only that subscriber's backlog.
+
 #### Changed: nothing is kept before a consumer connects
 
 A persistent subscription used to keep every frame from the moment it existed, and the first consumer to connect got them all. Now frames are kept only once a consumer of the subscription has connected, because the platform keeps nothing before a first connect. `status().unclaimed` is always 0 and deprecated. A test that writes data for a consumer must connect the consumer first, then write.
@@ -567,13 +583,13 @@ A persistent subscription used to keep every frame from the moment it existed, a
 
 `world.realtime.status()` splits up what Notification 2.0 still has on its way:
 
-| Field            | Counts                                                                                                                                                |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `inflight`       | Requests the world is answering (their writes may still publish).                                                                                     |
-| `scheduled`      | Callbacks given to `schedule` since the last reset that have not run: frame deliveries, socket connects, and socket events (`open`, `close`, `pong`). |
-| `connecting`     | Sockets whose connect has not run yet.                                                                                                                |
-| `unacknowledged` | Frames delivered to a socket and not acknowledged.                                                                                                    |
-| `backlog`        | Frames held for a persistent subscription without an open consumer, kept only once a consumer of it has connected.                                    |
-| `unclaimed`      | Always 0 (deprecated): nothing is kept before a consumer connects.                                                                                    |
+| Field            | Counts                                                                                                                                                         |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `inflight`       | Requests the world is answering (their writes may still publish).                                                                                              |
+| `scheduled`      | Callbacks given to `schedule` since the last reset that have not run: frame deliveries, socket connects, and socket events (`open`, `close`, `pong`).          |
+| `connecting`     | Sockets whose connect has not run yet.                                                                                                                         |
+| `unacknowledged` | Frames delivered to a socket and not acknowledged.                                                                                                             |
+| `backlog`        | Frames held for the subscribers of a persistent subscription that have no open socket, summed over all subscribers, kept only once a subscriber has connected. |
+| `unclaimed`      | Always 0 (deprecated): nothing is kept before a consumer connects.                                                                                             |
 
 `world.realtime.pending()` is the live work `settled()` waits for: `inflight` + `scheduled` + `connecting` + `unacknowledged`. `backlog` is informational: neither `settled()` nor `pending()` waits for or counts it. Read `pending()` as zero or not zero, not as a number of tasks: it is a sum of the four counts, and a connecting socket counts twice (its connect callback in `scheduled`, the socket in `connecting`).

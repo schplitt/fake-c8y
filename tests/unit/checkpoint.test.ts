@@ -35,8 +35,8 @@ function manualWorld() {
   return { world, run }
 }
 
-async function consumer(world: World, run: () => void, subscription: string, expiresInMinutes?: number) {
-  const token = (await call(world, 'POST', '/notification2/token', { subscription, subscriber: 's', ...(expiresInMinutes ? { expiresInMinutes } : {}) })).body.token as string
+async function consumer(world: World, run: () => void, subscription: string, expiresInMinutes?: number, subscriber = 's') {
+  const token = (await call(world, 'POST', '/notification2/token', { subscription, subscriber, ...(expiresInMinutes ? { expiresInMinutes } : {}) })).body.token as string
   const WebSocket = createFakeWebSocket(world.realtime)
   const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
   const received: string[] = []
@@ -276,7 +276,7 @@ describe('reset({ to, consumers })', () => {
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
     const early = await consumer(world, run, 'startup')
     const startup = world.checkpoint()
-    const late = await consumer(world, run, 'startup')
+    const late = await consumer(world, run, 'startup', undefined, 'late')
     world.reset({ to: startup })
     expect(early.state.closed).toBe(false)
     expect(late.state.closed).toBe(false)
@@ -312,7 +312,10 @@ describe('reset({ to, consumers })', () => {
     world.reset({ to: startup, consumers: 'keep' })
     expect(second.state.closed).toBe(false)
     expect(world.realtime.consumers().map((item) => item.token)).toEqual([second.token])
-    // tokens are stateless: the replaced one is still valid
+    // tokens are stateless: the replaced one is still valid (once the
+    // subscriber's open socket is closed, else 409)
+    second.socket.close()
+    run()
     const WebSocket = createFakeWebSocket(world.realtime)
     const again = new WebSocket(`wss://example.test/notification2/consumer/?token=${first.token}`)
     run()
@@ -341,7 +344,7 @@ describe('reset({ to, consumers })', () => {
     expect(socket.readyState).toBe(1)
   })
 
-  it('lets a newer token of the same consumer that is not connected yet connect after the reset', async () => {
+  it('lets a newer token of the same consumer that is not connected yet connect after the reset, once the open socket closed', async () => {
     const { world, run } = manualWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
     const connected = await consumer(world, run, 'startup')
@@ -352,6 +355,12 @@ describe('reset({ to, consumers })', () => {
     world.reset({ to: startup, consumers: 'keep' })
     expect(connected.state.closed).toBe(false)
     const WebSocket = createFakeWebSocket(world.realtime)
+    // a second open socket of the same subscriber is refused (409)
+    const refused = new WebSocket(`wss://example.test/notification2/consumer/?token=${pending}`)
+    run()
+    expect(refused.readyState).toBe(3)
+    connected.socket.close()
+    run()
     const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${pending}`)
     run()
     expect(socket.readyState).toBe(1)
