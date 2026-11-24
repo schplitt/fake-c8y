@@ -247,6 +247,17 @@ export const notificationsScenarios: ContractScenario[] = [
       const unsubscribed = await api(client, 'POST', `/notification2/unsubscribe?token=${consumer.token}`)
       expect(unsubscribed.status).toBe(200)
       expect(unsubscribed.body).toEqual({ result: 'DONE' })
+      // the unsubscribe closes no socket, and the socket keeps receiving
+      await settle(2000)
+      expect(consumer.closes).toEqual([])
+      const later = await api(client, 'POST', '/measurement/measurements', { source: { id: device.id }, type: 'c8y_Temperature', time: new Date().toISOString(), c8y_Temperature: { T: { value: 22, unit: 'C' } } })
+      expect(later.status).toBe(201)
+      await eventually(async () => {
+        expect(consumer.messages).toHaveLength(2)
+      }, 15_000)
+      expect(JSON.parse(consumer.messages[1]!.replace(/\r\n/g, '\n').split('\n\n').slice(1).join('\n\n'))).toMatchObject({ id: later.body.id })
+      // the socket is still open, so a repeat unsubscribe answers 200 too
+      expect((await api(client, 'POST', `/notification2/unsubscribe?token=${consumer.token}`)).status).toBe(200)
       expect((await api(client, 'DELETE', `/notification2/subscriptions/${created.body.id}`)).status).toBe(204)
     },
   },

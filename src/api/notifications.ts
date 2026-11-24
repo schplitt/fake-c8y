@@ -254,19 +254,14 @@ export function notifications(call: C8yRequest, segments: string[], data: Tenant
     // the consumer is matched by the token's claims, not by the token text
     const parsed = parseToken(token, parseIsoTime(data.world.now()))
     const claims = parsed?.tenant === tenant ? parsed : undefined
-    const consumers = [...data.world.realtime.sockets].filter((socket) => claims && socket.token?.tenant === claims.tenant && socket.token.subscription === claims.subscription && socket.token.subscriber === claims.subscriber)
-    if (!claims || consumers.length === 0) {
+    if (!claims || data.world.realtime.consumers({ tenant, subscription: claims.subscription, subscriber: claims.subscriber }).length === 0) {
       return apiError(500, 'reliable-notification/Internal Server Error', 'Unsubscribing the consumer failed')
     }
     const { subscriber, subscription } = claims
     auditUnsubscribed(data, subscriber, subscription)
-    // close() removes each socket (and requeues its frames) before the
-    // backlog is dropped below
-    for (const socket of consumers) {
-      socket.close()
-    }
-    // the platform destroys the consumer's backlog: nothing is kept until a
-    // consumer connects again. The token stays valid.
+    // the platform drops the subscriber's backlog and closes no socket: the
+    // socket keeps receiving (inferred: it re-creates the subscriber), and
+    // the token stays valid
     data.world.realtime.unsubscribed(claims.tenant, subscription, subscriber)
     return Response.json({ result: 'DONE' })
   }

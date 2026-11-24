@@ -65,7 +65,8 @@ describe.skipIf(!configured)('contract scenarios against a real tenant', () => {
     await Promise.all(realtimeClients.splice(0).map((client) => client.close()))
     for (const socket of rawSockets.splice(0)) {
       // a persistent subscription with a connected consumer survives its
-      // deletion, and unsubscribe works only while the consumer is connected
+      // deletion, and unsubscribe works only while the consumer is connected;
+      // it closes no socket, so the socket is closed after it
       if (socket.opened && socket.closes.length === 0) {
         await client!.core.fetch(`/notification2/unsubscribe?${new URLSearchParams({ token: socket.token })}`, { method: 'POST' }).catch(() => {})
       }
