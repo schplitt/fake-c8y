@@ -2,7 +2,7 @@ import type { C8yCoverage, C8yOverrideContext, C8yOverrideHandler, C8yRequest, C
 import type { CompiledRoute } from './router'
 import type { CurrentUser, StoredDocument, TenantCollection, TenantData, WorldContext } from './store'
 import type { Collection } from './collection'
-import type { NotificationToken, RealtimeApi } from './realtime'
+import type { RealtimeApi } from './realtime'
 import type { C8yBinaryInput, C8yDb, C8yManagedObjectInput, C8ySeed, C8ySeedResultFor } from './data'
 import type { WorldDiff, WorldSnapshot } from './snapshot'
 import type { Clock } from './clock'
@@ -13,7 +13,7 @@ import { basicAuth } from './auth'
 import { withReasonPhrase } from './reason-phrases'
 import { compileRoute, copyCall, matchesCall, matchRoute, splitPath, withSegments } from './router'
 import { emptyTenant, forkTenant, freezeTenant, optionKey, TENANT_COLLECTIONS } from './store'
-import { Realtime, SOCKET_STATE, tokenOf } from './realtime'
+import { Realtime } from './realtime'
 import { SettleTimeoutError, waitForQuiet } from './timers'
 import { platformApi, UnsupportedRequestError } from './api'
 import { UsageLog } from './api/statistics'
@@ -489,10 +489,10 @@ export interface World {
    */
   fetch: (request: Request) => Promise<Response>
   /**
-   * Restores the baseline: data (also Notification 2.0 subscriptions and
-   * tokens), tenant options, overrides, call log, and ids start over.
-   * Undelivered notifications are dropped, and sockets whose token is gone
-   * are closed. A request still in flight answers 503 and changes nothing
+   * Restores the baseline: data (also Notification 2.0 subscriptions),
+   * tenant options, overrides, call log, and ids start over. Undelivered
+   * notifications are dropped, and sockets whose subscription is gone are
+   * closed as a dropped connection (1006). A request still in flight answers 503 and changes nothing
    * (also with `restore()`).
    *
    * A fork goes back to the state it was forked in: its own writes, ids,
@@ -502,9 +502,9 @@ export interface World {
    *
    * With `to`, the world goes back to a checkpoint of its own
    * (`checkpoint()`) instead, and the state fields apply on top without
-   * changing the baseline. `consumers: 'keep'` keeps the open Notification
-   * 2.0 sockets whose subscription is in the state reset to, with their
-   * tokens (also tokens minted after the checkpoint, e.g. on a reconnect).
+   * changing the baseline. `consumers: 'keep'` closes no Notification 2.0
+   * socket. Tokens are stateless: a token minted before the reset still
+   * connects after it.
    * Options with only `to` or `consumers` keep the baseline; `reset({})`
    * sets an empty one.
    * @param options - A new baseline (default: the current one), `to`, `consumers`
@@ -661,11 +661,13 @@ export interface World {
   muted: <T>(operation: () => T) => T
   /**
    * The data and platform state as JSON, with Notification 2.0
-   * subscriptions and tokens (no overrides, no sockets).
+   * subscriptions (no overrides, no sockets).
    */
   snapshot: () => WorldSnapshot
   /**
-   * Replaces the data and platform state with a snapshot.
+   * Replaces the data and platform state with a snapshot. Undelivered
+   * notifications are dropped, and sockets whose subscription the snapshot
+   * does not have are closed as a dropped connection (1006), like `reset()`.
    */
   restore: (snapshot: WorldSnapshot) => void
   /**
@@ -905,10 +907,11 @@ export interface C8yResetOptions extends C8yWorldState {
    */
   to?: C8yCheckpoint
   /**
-   * What happens to open Notification 2.0 sockets: `'close'` (default)
-   * closes those whose token the state reset to does not have; `'keep'` also
-   * keeps the sockets (and their tokens) whose subscription it has.
-   * Undelivered notifications are dropped either way.
+   * What happens to Notification 2.0 sockets (open or still connecting):
+   * `'close'` (default) closes those whose subscription (tenant and name) the
+   * state reset to does not have, as a dropped connection (1006, empty
+   * reason); `'keep'` closes none. Undelivered notifications are dropped
+   * either way.
    * @default 'close'
    */
   consumers?: 'keep' | 'close'
@@ -1046,7 +1049,6 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
     ...(options.schedule ? { schedule: options.schedule } : {}),
     inflight: () => inflight,
     subscriptions: () => [...tenants.values()].flatMap((data) => [...data.notificationSubscriptions.values()]),
-    tokens: () => [...tenants.values()].flatMap((data) => [...data.notificationTokens.entries()]),
     now: clock,
   })
 
@@ -1221,53 +1223,6 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         if (service.source !== inherited?.source) {
           seedService(contextPath, service)
         }
-      }
-    }
-  }
-
-  /**
-   * The tokens of the open Notification 2.0 sockets, as stored now.
-   */
-  function openConsumers(): Array<[string, NotificationToken]> {
-    const stored = realtime.tokens
-    const open: Array<[string, NotificationToken]> = []
-    // also sockets still connecting (a client that reconnects right now)
-    for (const socket of [...realtime.sockets, ...realtime.connecting]) {
-      const value = tokenOf(socket)
-      const token = socket.readyState === SOCKET_STATE.CLOSED ? undefined : stored.get(value)
-      if (token) {
-        open.push([value, token])
-      }
-    }
-    return open
-  }
-
-  /**
-   * Stores the tokens of open sockets again after a reset (`consumers:
-   * 'keep'`) where the data has their subscription, drops the tokens of the
-   * same consumer they replaced, and moves the tenant's token sequence past
-   * them, so new tokens do not collide.
-   * @param kept - Tokens from `openConsumers()`
-   */
-  function keepConsumers(kept: Array<[string, NotificationToken]>): void {
-    const values = new Set(kept.map(([value]) => value))
-    for (const [value, token] of kept) {
-      const data = tenants.get(token.tenant)
-      if (!data || ![...data.notificationSubscriptions.values()].some((subscription) => subscription.subscription === token.subscription)) {
-        continue
-      }
-      // an older token of the same consumer without a socket was replaced
-      // (reconnect); a newer one may still be about to connect
-      const tokenNumber = (token: string) => Number(/^fake-token-(\d+)-/.exec(token)?.[1])
-      const number = tokenNumber(value)
-      for (const [other, stored] of [...data.notificationTokens]) {
-        if (!values.has(other) && stored.subscription === token.subscription && stored.subscriber === token.subscriber && tokenNumber(other) < number) {
-          data.notificationTokens.delete(other)
-        }
-      }
-      data.notificationTokens.set(value, token)
-      if (number >= (data.sequences.get('notificationToken') ?? 1)) {
-        data.sequences.set('notificationToken', number + 1)
       }
     }
   }
@@ -2544,7 +2499,6 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
       if (to !== undefined && !from) {
         throw new TypeError('fake-c8y: reset({ to }) needs a checkpoint of this world (world.checkpoint())')
       }
-      const kept = consumers === 'keep' ? openConsumers() : []
       generation++
       calls = []
       usage = new UsageLog()
@@ -2565,8 +2519,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
           options.clock!.set(forkStart)
         }
         rebuildFrom((from ?? base)!, state)
-        keepConsumers(kept)
-        realtime.resync()
+        realtime.resync(consumers !== 'keep')
         return
       }
       if (state) {
@@ -2587,8 +2540,7 @@ function buildWorld(options: WorldOptions, base: ForkBase | undefined): World {
         installService(contextPath, service)
         seedService(contextPath, service)
       }
-      keepConsumers(kept)
-      realtime.resync()
+      realtime.resync(consumers !== 'keep')
     },
 
     checkpoint() {
@@ -2861,7 +2813,7 @@ export { basicAuth } from './auth'
 export type { C8yCredentials } from './auth'
 export { interceptFetch } from './intercept'
 export type { InterceptFetchOptions, WorldSource } from './intercept'
-export { CONSUMER_REMOVED, Realtime, SOCKET_STATE } from './realtime'
+export { Realtime, SOCKET_STATE } from './realtime'
 export type { CloseConsumersOptions, NotificationFrame, NotificationSocket, NotificationSubscription, NotificationToken, RealtimeApi, RealtimeConsumer, RealtimeOptions, RealtimeSettledOptions, RealtimeSettledResult, RealtimeStatus } from './realtime'
 export { SettleTimeoutError } from './timers'
 export type * from './types'

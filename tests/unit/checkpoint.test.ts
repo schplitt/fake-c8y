@@ -1,11 +1,13 @@
 /**
  * `world.checkpoint()` and `world.reset({ to, consumers })`: going back to a
- * state taken later than the baseline, on the same world, optionally keeping
- * open Notification 2.0 consumers (also with tokens minted after the
- * checkpoint, as a client does on every reconnect).
+ * state taken later than the baseline, on the same world. By default a reset
+ * closes the Notification 2.0 consumers whose subscription the state reset to
+ * does not have; `consumers: 'keep'` closes none. Tokens are stateless, so a
+ * token minted after the checkpoint (as a client does on every reconnect)
+ * still connects.
  */
 import { describe, expect, it } from 'vitest'
-import { CONSUMER_REMOVED, createWorld } from '../../src'
+import { createWorld } from '../../src'
 import type { C8yResetOptions, World } from '../../src'
 import { createFakeWebSocket } from '../../src/realtime-entry'
 
@@ -33,8 +35,8 @@ function manualWorld() {
   return { world, run }
 }
 
-async function consumer(world: World, run: () => void, subscription: string) {
-  const token = (await call(world, 'POST', '/notification2/token', { subscription, subscriber: 's' })).body.token as string
+async function consumer(world: World, run: () => void, subscription: string, expiresInMinutes?: number) {
+  const token = (await call(world, 'POST', '/notification2/token', { subscription, subscriber: 's', ...(expiresInMinutes ? { expiresInMinutes } : {}) })).body.token as string
   const WebSocket = createFakeWebSocket(world.realtime)
   const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
   const received: string[] = []
@@ -181,7 +183,7 @@ describe('checkpoint', () => {
 })
 
 describe('reset({ to, consumers })', () => {
-  it('keeps an open consumer with a token minted after the checkpoint (reconnect) and moves the sequence past it', async () => {
+  it('keeps an open consumer with a token minted after the checkpoint (reconnect)', async () => {
     const { world, run } = manualWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
     const startup = world.checkpoint()
@@ -191,35 +193,51 @@ describe('reset({ to, consumers })', () => {
     await call(world, 'POST', '/inventory/managedObjects', { name: 'test 1' })
     world.reset({ to: startup, consumers: 'keep' })
     expect(before.state.closed).toBe(false)
-    expect(world.realtime.tokens.has(before.token)).toBe(true)
 
     // still delivered to after the reset
     await call(world, 'POST', '/inventory/managedObjects', { name: 'test 2' })
     run()
     expect(before.received.some((frame) => frame.includes('test 2'))).toBe(true)
 
-    // a new token does not collide with the kept one
+    // a new token of another subscriber does not collide with the kept one
     const next = (await call(world, 'POST', '/notification2/token', { subscription: 'startup', subscriber: 's2' })).body.token as string
     expect(next).not.toBe(before.token)
-    expect(world.realtime.tokens.has(before.token)).toBe(true)
 
     // and it stays across further resets
     world.reset({ to: startup, consumers: 'keep' })
     expect(before.state.closed).toBe(false)
   })
 
-  it('closes consumers of subscriptions created after the checkpoint, also with keep', async () => {
+  it('closes consumers of subscriptions created after the checkpoint by default, as a dropped connection', async () => {
     const { world, run } = manualWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
     const startup = world.checkpoint()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'test' })
     const kept = await consumer(world, run, 'startup')
     const dropped = await consumer(world, run, 'test')
-    world.reset({ to: startup, consumers: 'keep' })
+    world.reset({ to: startup })
     expect(kept.state.closed).toBe(false)
     expect(dropped.state.closed).toBe(true)
-    expect([dropped.state.code, dropped.state.reason]).toEqual([CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason])
+    expect([dropped.state.code, dropped.state.reason]).toEqual([1006, ''])
     expect((await call(world, 'GET', '/notification2/subscriptions')).body.subscriptions.map((item: { subscription: string }) => item.subscription)).toEqual(['startup'])
+  })
+
+  it('closes nothing with keep, also consumers of subscriptions created after the checkpoint', async () => {
+    const { world, run } = manualWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
+    const startup = world.checkpoint()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'test' })
+    const kept = await consumer(world, run, 'startup')
+    const orphan = await consumer(world, run, 'test')
+    world.reset({ to: startup, consumers: 'keep' })
+    expect(kept.state.closed).toBe(false)
+    expect(orphan.state.closed).toBe(false)
+    expect((await call(world, 'GET', '/notification2/subscriptions')).body.subscriptions.map((item: { subscription: string }) => item.subscription)).toEqual(['startup'])
+    // it gets frames again once its subscription exists
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'test' })
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'after reset' })
+    run()
+    expect(orphan.received.some((frame) => frame.includes('after reset'))).toBe(true)
   })
 
   it('keeps a consumer open with keep when its subscription was deleted since the checkpoint', async () => {
@@ -237,18 +255,23 @@ describe('reset({ to, consumers })', () => {
     expect(open.received).toHaveLength(1)
   })
 
-  it('closes a consumer whose subscription the checkpoint has not, though its token stays', async () => {
+  it('closes a consumer whose subscription the checkpoint has not, though its token stays valid', async () => {
     const { world, run } = manualWorld()
     const id = (await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })).body.id
     const open = await consumer(world, run, 'startup')
     expect((await call(world, 'DELETE', `/notification2/subscriptions/${id}`)).status).toBe(204)
     const startup = world.checkpoint()
-    expect(world.realtime.tokens.has(open.token)).toBe(true)
     world.reset({ to: startup })
-    expect([open.state.code, open.state.reason]).toEqual([CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason])
+    expect([open.state.code, open.state.reason]).toEqual([1006, ''])
+    // the token still connects; the socket waits for a subscription of that name
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const again = new WebSocket(`wss://example.test/notification2/consumer/?token=${open.token}`)
+    run()
+    expect(again.readyState).toBe(1)
   })
 
-  it('closes consumers whose token the checkpoint lacks by default', async () => {
+  it('keeps consumers whose subscription the checkpoint has by default, also with a token minted after it', async () => {
     const { world, run } = manualWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
     const early = await consumer(world, run, 'startup')
@@ -256,8 +279,7 @@ describe('reset({ to, consumers })', () => {
     const late = await consumer(world, run, 'startup')
     world.reset({ to: startup })
     expect(early.state.closed).toBe(false)
-    expect(late.state.closed).toBe(true)
-    expect(late.state.code).toBe(CONSUMER_REMOVED.code)
+    expect(late.state.closed).toBe(false)
   })
 
   it('drops undelivered frames but keeps delivering to the kept socket', async () => {
@@ -276,7 +298,7 @@ describe('reset({ to, consumers })', () => {
     expect(open.received.some((frame) => frame.includes('after'))).toBe(true)
   })
 
-  it('drops the checkpoint\'s token that a reconnect replaced', async () => {
+  it('keeps the socket of a reconnect, and the replaced token still connects', async () => {
     const { world, run } = manualWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
     const first = await consumer(world, run, 'startup')
@@ -284,12 +306,17 @@ describe('reset({ to, consumers })', () => {
     // reconnect: the old socket closes, a new token is minted
     first.socket.close()
     run()
-    const second = await consumer(world, run, 'startup')
+    // another expiry gives another token of the same subscriber
+    const second = await consumer(world, run, 'startup', 60)
+    expect(second.token).not.toBe(first.token)
     world.reset({ to: startup, consumers: 'keep' })
-    expect([...world.realtime.tokens.keys()]).toEqual([second.token])
-    // every stored token has a connected socket
-    const connected = new Set([...world.realtime.sockets].map((socket) => socket.token))
-    expect([...world.realtime.tokens.values()].every((token) => connected.has(token))).toBe(true)
+    expect(second.state.closed).toBe(false)
+    expect(world.realtime.consumers().map((item) => item.token)).toEqual([second.token])
+    // tokens are stateless: the replaced one is still valid
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const again = new WebSocket(`wss://example.test/notification2/consumer/?token=${first.token}`)
+    run()
+    expect(again.readyState).toBe(1)
   })
 
   it('gives consumers of one subscription different tokens, also after a reset', async () => {
@@ -314,16 +341,20 @@ describe('reset({ to, consumers })', () => {
     expect(socket.readyState).toBe(1)
   })
 
-  it('keeps a newer token of the same consumer that is not connected yet', async () => {
+  it('lets a newer token of the same consumer that is not connected yet connect after the reset', async () => {
     const { world, run } = manualWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'startup' })
     const connected = await consumer(world, run, 'startup')
     // a second client of the same subscriber minted its token but has not connected yet
-    const pending = (await call(world, 'POST', '/notification2/token', { subscription: 'startup', subscriber: 's' })).body.token as string
+    const pending = (await call(world, 'POST', '/notification2/token', { subscription: 'startup', subscriber: 's', expiresInMinutes: 60 })).body.token as string
+    expect(pending).not.toBe(connected.token)
     const startup = world.checkpoint()
     world.reset({ to: startup, consumers: 'keep' })
-    expect(world.realtime.tokens.has(connected.token)).toBe(true)
-    expect(world.realtime.tokens.has(pending)).toBe(true)
+    expect(connected.state.closed).toBe(false)
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${pending}`)
+    run()
+    expect(socket.readyState).toBe(1)
   })
 
   it('keeps consumers on a fork\'s plain reset', async () => {
@@ -344,8 +375,8 @@ describe('reset({ to, consumers })', () => {
     expect(open.received.some((frame) => frame.includes('after'))).toBe(true)
   })
 
-  it('does not hand out a restored token again after snapshot and restore', async () => {
-    const world = createWorld()
+  it('accepts a token minted before snapshot and restore, and gives another subscriber another token', async () => {
+    const { world, run } = manualWorld()
     await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 's' })
     const first = (await call(world, 'POST', '/notification2/token', { subscription: 's', subscriber: 'a' })).body.token as string
     const snapshot = world.snapshot()
@@ -353,7 +384,10 @@ describe('reset({ to, consumers })', () => {
     world.restore(snapshot)
     const next = (await call(world, 'POST', '/notification2/token', { subscription: 's', subscriber: 'b' })).body.token as string
     expect(next).not.toBe(first)
-    expect(world.realtime.tokens.get(first)?.subscriber).toBe('a')
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${first}`)
+    run()
+    expect(socket.token?.subscriber).toBe('a')
   })
 
   it('replays subscription ids the same after keeping a reconnected consumer', async () => {

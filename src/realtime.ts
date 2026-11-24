@@ -11,17 +11,20 @@
  * <JSON payload>
  * ```
  *
- * Subscriptions and tokens are tenant data (`TenantData.notificationSubscriptions`,
- * `TenantData.notificationTokens`): they fork, reset, snapshot, and diff with
- * the rest of the data. `Realtime` keeps what is not data: the consumer
- * sockets and the frames on their way. `world.reset()` and `world.restore()`
- * drop undelivered frames and close the sockets (open or connecting) whose token or
- * subscription is gone (with `CONSUMER_REMOVED`). `closeConsumers()` closes sockets from the server side
- * to test a client's reconnect path.
+ * Subscriptions are tenant data (`TenantData.notificationSubscriptions`):
+ * they fork, reset, snapshot, and diff with the rest of the data. Tokens are
+ * stateless (`./token`): a socket's token is valid by its checksum and
+ * expiry only. `Realtime` keeps what is not data: the consumer sockets and
+ * the frames on their way. `world.reset()` and `world.restore()` drop
+ * undelivered frames and close the sockets (open or connecting) whose
+ * subscription is gone, as a dropped connection (1006, empty reason).
+ * `closeConsumers()` closes sockets from the server side to test a client's
+ * reconnect path.
  * The consumer WebSocket is in `./websocket` (the `fake-c8y/realtime` entry).
  */
 import type { StoredDocument } from './store'
 import { scheduleReal, SettleTimeoutError, waitForQuiet } from './timers'
+import { parseToken } from './token'
 
 export type RealtimeApi = 'managedobjects' | 'measurements' | 'events' | 'alarms' | 'operations'
 
@@ -39,15 +42,22 @@ export interface NotificationSubscription {
   nonPersistent?: boolean
 }
 
+/**
+ * The claims of a Notification 2.0 token (`socket.token`).
+ */
 export interface NotificationToken {
   tenant: string
   subscription: string
   subscriber: string
   /**
-   * When the token expires (epoch milliseconds); a socket cannot connect with
-   * it from then on. Missing: it never expires (tokens of older snapshots).
+   * When the token expires (epoch milliseconds, whole seconds); a socket
+   * cannot connect with it from then on.
    */
-  expires?: number
+  expires: number
+  /**
+   * Minted with `shared: true`.
+   */
+  shared?: boolean
 }
 
 export interface NotificationFrame {
@@ -114,15 +124,6 @@ export interface NotificationSocket {
 export const SOCKET_STATE = { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 } as const
 
 /**
- * Close code and reason of a consumer socket whose token `world.reset()` or
- * `world.restore()` removed (also when its subscription is gone): the consumer
- * no longer exists, so a client should not reconnect with it. The platform
- * documents no close code for this; the code is fake-c8y's own, in the
- * application range (4000-4999), modeled on HTTP 410 Gone.
- */
-export const CONSUMER_REMOVED = { code: 4410, reason: 'notification token removed' } as const
-
-/**
  * Which consumer sockets `Realtime.closeConsumers()` closes, and how.
  */
 export interface CloseConsumersOptions {
@@ -172,11 +173,6 @@ export interface RealtimeOptions {
    * @default none
    */
   subscriptions?: () => Iterable<NotificationSubscription>
-  /**
-   * The stored tokens of all tenants, by token value (the world's tenant data).
-   * @default none
-   */
-  tokens?: () => Iterable<[string, NotificationToken]>
   /**
    * The current time in epoch milliseconds (expired tokens are refused on connect).
    * @default `Date.now`
@@ -263,7 +259,7 @@ export interface RealtimeSettledResult {
 
 /**
  * Notification 2.0 of one world: consumer sockets and frames on their way.
- * Subscriptions and tokens are read from the world's tenant data.
+ * Subscriptions are read from the world's tenant data.
  */
 export class Realtime {
   nextAck = 1
@@ -297,7 +293,6 @@ export class Realtime {
   private tasks = 0
   private readonly inflight: () => number
   private readonly storedSubscriptions: () => Iterable<NotificationSubscription>
-  private readonly storedTokens: () => Iterable<[string, NotificationToken]>
   private readonly now: () => number
   /**
    * frames scheduled for or delivered to a socket and not yet acknowledged,
@@ -329,7 +324,6 @@ export class Realtime {
     }
     this.inflight = options.inflight ?? (() => 0)
     this.storedSubscriptions = options.subscriptions ?? (() => [])
-    this.storedTokens = options.tokens ?? (() => [])
     this.now = options.now ?? Date.now
   }
 
@@ -340,22 +334,16 @@ export class Realtime {
     return [...this.storedSubscriptions()]
   }
 
-  /**
-   * The stored tokens of all tenants, by token value (a copy of the map).
-   */
-  get tokens(): Map<string, NotificationToken> {
-    return new Map(this.storedTokens())
-  }
-
   connect(socket: NotificationSocket): void {
     this.connecting.delete(socket)
     if (socket.readyState === SOCKET_STATE.CLOSED) {
       // the client closed it while connecting: its close event is on its way
       return
     }
-    const token = this.tokens.get(tokenOf(socket))
-    // an expired token is refused like an unknown one; an open socket stays open
-    if (!token || (typeof token.expires === 'number' && this.now() >= token.expires)) {
+    // a token that does not parse, fails its checksum, or has expired is
+    // refused; an open socket stays open when its token expires
+    const token = parseToken(tokenOf(socket), this.now())
+    if (!token) {
       socket.readyState = SOCKET_STATE.CLOSED
       socket.emit('error', new Error('Invalid notification token'))
       socket.emit('close', 1008, 'invalid token')
@@ -378,8 +366,7 @@ export class Realtime {
 
   /**
    * Removes a closed consumer socket. Its unacknowledged frames go back into
-   * the subscription's backlog (`requeue()`), unless its token is no longer
-   * stored (unsubscribe removed the consumer).
+   * the subscription's backlog (`requeue()`).
    * @param socket - The closed socket
    */
   disconnect(socket: NotificationSocket): void {
@@ -388,16 +375,8 @@ export class Realtime {
     this.sockets.delete(socket)
     this.unacked.delete(socket)
     this.outstanding.delete(socket)
-    const token = socket.token
-    if (!token || frames.length === 0) {
-      return
-    }
-    const key = tokenOf(socket)
-    for (const [stored] of this.storedTokens()) {
-      if (stored === key) {
-        this.requeue(token, frames)
-        return
-      }
+    if (socket.token) {
+      this.requeue(socket.token, frames)
     }
   }
 
@@ -596,20 +575,24 @@ export class Realtime {
   }
 
   /**
-   * Drops undelivered notifications and closes the sockets whose token or
-   * subscription is no longer stored (after the data was reset or restored),
-   * with `CONSUMER_REMOVED`, also the ones still connecting. The sockets that
-   * stay open count as connected; a connecting one that stays counts once it opens.
+   * Drops undelivered notifications (after the data was reset or restored)
+   * and, with `close`, closes the sockets whose subscription (tenant and
+   * name) is no longer stored, as a dropped connection (1006, empty reason),
+   * also the ones still connecting. The open sockets whose subscription is
+   * stored count as connected; a connecting one counts once it opens.
+   * @param close - `false` closes nothing (`reset({ consumers: 'keep' })`)
    */
-  resync(): void {
+  resync(close = true): void {
     this.dropPending()
-    const tokens = new Map(this.storedTokens())
     const subscriptions = new Set([...this.storedSubscriptions()].map((subscription) => this.key(subscription.tenant, subscription.subscription)))
     for (const socket of [...this.sockets, ...this.connecting]) {
-      const token = tokens.get(tokenOf(socket))
-      if (token === undefined || !subscriptions.has(this.key(token.tenant, token.subscription))) {
-        this.closeFromServer(socket, CONSUMER_REMOVED.code, CONSUMER_REMOVED.reason)
-      } else if (socket.readyState === SOCKET_STATE.OPEN) {
+      // a connecting socket has no claims yet: read them from its URL (an
+      // invalid token is refused when it connects)
+      const token = socket.token ?? parseToken(tokenOf(socket))
+      const stored = token !== undefined && subscriptions.has(this.key(token.tenant, token.subscription))
+      if (close && token !== undefined && !stored) {
+        this.closeFromServer(socket, 1006, '')
+      } else if (stored && socket.readyState === SOCKET_STATE.OPEN) {
         this.connected.add(this.key(token.tenant, token.subscription))
       }
     }
@@ -618,8 +601,8 @@ export class Realtime {
   /**
    * Closes open consumer sockets from the server side, as if the connection
    * dropped or the platform closed it, to test a client's reconnect path. The
-   * subscriptions and tokens stay stored, so the client can reconnect (with the
-   * same token or a new one). When no other consumer of the subscription stays
+   * subscriptions stay stored and the token stays valid, so the client can
+   * reconnect (with the same token or a new one). When no other consumer of the subscription stays
    * open and the subscription is persistent, the frames the socket had not
    * acknowledged (delivered or still scheduled) go back into the subscription's
    * backlog, and frames published meanwhile wait there too: the next consumer

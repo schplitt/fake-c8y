@@ -1,8 +1,8 @@
 import type { C8yRequest } from '../types'
 import type { TenantData } from '../store'
 import type { NotificationSubscription } from '../realtime'
-import { tokenOf } from '../realtime'
 import { nextSequence } from '../store'
+import { mintToken, parseToken } from '../token'
 import { parseIsoTime } from '../utils'
 import { apiError, checkQuery, paged, UnsupportedRequestError } from './http'
 import { moSelf } from './inventory'
@@ -234,43 +234,40 @@ export function notifications(call: C8yRequest, segments: string[], data: Tenant
     if (invalid) {
       return invalid
     }
-    // own sequence: tokens a reset keeps (`consumers: 'keep'`) do not move
-    // subscription ids. It starts where the shared one is, so tokens of an
-    // older snapshot (counted with `notification`) are not handed out again
-    if (!data.sequences.has('notificationToken')) {
-      data.sequences.set('notificationToken', data.sequences.get('notification') ?? 1)
-    }
-    // with the subscriber: the numbers start over after a reset, so two
-    // consumers of one subscription never get the same token
-    const token = `fake-token-${nextSequence(data, 'notificationToken')}-${body.subscription}-${body.subscriber}`
     // the platform's default lifetime is one day (1440 minutes); 0 means the default
     const expires = parseIsoTime(data.world.now()) + (Number(body.expiresInMinutes) || 1440) * 60_000
-    data.notificationTokens.set(token, { tenant, subscription: body.subscription, subscriber: body.subscriber, expires })
+    // stateless: nothing is stored, the token carries its claims
+    const token = mintToken({ tenant, subscription: String(body.subscription), subscriber: String(body.subscriber), expires, ...(body.shared === true ? { shared: true } : {}) })
     auditTokenCreated(data, String(body.subscription))
     return Response.json({ token })
   }
 
   if (resource === 'unsubscribe' && method === 'POST' && segments.length === 2) {
-    // verified: 422 without a token, 500 for an unknown token or one without
-    // a connected consumer
+    // verified: 422 without a token, 500 for a token that does not parse or
+    // one without a connected consumer. Inferred: the platform checks the
+    // token (checksum, expiry) first, so an expired token answers 500 too; a
+    // token of another tenant answers the same
     const token = call.query.token ?? ''
     if (!token) {
       return apiError(422, 'reliable-notification/Invalid Data', 'Missing token')
     }
-    const consumers = [...data.world.realtime.sockets].filter((socket) => tokenOf(socket) === token)
-    const stored = data.notificationTokens.get(token)
-    if (!stored || consumers.length === 0) {
+    // the consumer is matched by the token's claims, not by the token text
+    const parsed = parseToken(token, parseIsoTime(data.world.now()))
+    const claims = parsed?.tenant === tenant ? parsed : undefined
+    const consumers = [...data.world.realtime.sockets].filter((socket) => claims && socket.token?.tenant === claims.tenant && socket.token.subscription === claims.subscription && socket.token.subscriber === claims.subscriber)
+    if (!claims || consumers.length === 0) {
       return apiError(500, 'reliable-notification/Internal Server Error', 'Unsubscribing the consumer failed')
     }
-    const { subscriber, subscription } = stored
-    data.notificationTokens.delete(token)
+    const { subscriber, subscription } = claims
     auditUnsubscribed(data, subscriber, subscription)
+    // close() removes each socket (and requeues its frames) before the
+    // backlog is dropped below
     for (const socket of consumers) {
       socket.close()
     }
     // the platform destroys the consumer's backlog: nothing is kept until a
-    // consumer connects again
-    data.world.realtime.unsubscribed(stored.tenant, subscription)
+    // consumer connects again. The token stays valid.
+    data.world.realtime.unsubscribed(claims.tenant, subscription)
     return Response.json({ result: 'DONE' })
   }
 

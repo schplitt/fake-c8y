@@ -6,7 +6,7 @@
  * Ids come from one counter shared by all collections (`WorldContext.newId`);
  * timestamps come from the world's clock.
  */
-import type { NotificationSubscription, NotificationToken, Realtime, RealtimeApi } from './realtime'
+import type { NotificationSubscription, Realtime, RealtimeApi } from './realtime'
 import type { MeasurementStream, MeasurementTombstone } from './generators'
 import type { C8yJson } from './services'
 import type { Access } from './api/access'
@@ -208,7 +208,7 @@ export interface TenantData {
    * Next ids of the collections that count on their own, like on the
    * platform (`nextSequence()`): groups, inventory roles, their permissions,
    * inventory assignments, bulk operations, and Notification 2.0
-   * subscriptions and tokens.
+   * subscriptions.
    */
   sequences: Collection<number>
   /**
@@ -234,10 +234,6 @@ export interface TenantData {
    * Notification 2.0 subscriptions by id (ids from the `notification` sequence).
    */
   notificationSubscriptions: Collection<NotificationSubscription>
-  /**
-   * Notification 2.0 tokens by token value.
-   */
-  notificationTokens: Collection<NotificationToken>
   /**
    * State of service emulations (`world.service()`) by
    * `<service>/<store>/<key>` (`serviceStateKey()`), as JSON.
@@ -281,14 +277,14 @@ export type Relations = Readonly<Record<ChildKind, readonly string[]>>
 /**
  * The per-tenant sequences (next ids) in `TenantData.sequences`.
  */
-export type SequenceName = 'group' | 'inventoryRole' | 'permission' | 'assignment' | 'bulkOperation' | 'notification' | 'notificationToken' | 'application'
+export type SequenceName = 'group' | 'inventoryRole' | 'permission' | 'assignment' | 'bulkOperation' | 'notification' | 'application'
 
 /**
  * The collections of a tenant, in snapshot order.
  */
-export type TenantCollection = 'managedObjects' | 'children' | 'externalIds' | 'measurements' | 'events' | 'alarms' | 'operations' | 'binaries' | 'eventBinaries' | 'users' | 'groups' | 'roles' | 'inventoryRoles' | 'inventoryAssignments' | 'sequences' | 'bulkOperations' | 'newDeviceRequests' | 'options' | 'retentionRules' | 'auditRecords' | 'measurementGenerators' | 'measurementTombstones' | 'notificationSubscriptions' | 'notificationTokens' | 'serviceState' | 'applications' | 'applicationSubscriptions' | 'usageStatistics' | 'trustedCertificates'
+export type TenantCollection = 'managedObjects' | 'children' | 'externalIds' | 'measurements' | 'events' | 'alarms' | 'operations' | 'binaries' | 'eventBinaries' | 'users' | 'groups' | 'roles' | 'inventoryRoles' | 'inventoryAssignments' | 'sequences' | 'bulkOperations' | 'newDeviceRequests' | 'options' | 'retentionRules' | 'auditRecords' | 'measurementGenerators' | 'measurementTombstones' | 'notificationSubscriptions' | 'serviceState' | 'applications' | 'applicationSubscriptions' | 'usageStatistics' | 'trustedCertificates'
 
-export const TENANT_COLLECTIONS: readonly TenantCollection[] = ['managedObjects', 'children', 'externalIds', 'measurements', 'events', 'alarms', 'operations', 'binaries', 'eventBinaries', 'users', 'groups', 'roles', 'inventoryRoles', 'inventoryAssignments', 'sequences', 'bulkOperations', 'newDeviceRequests', 'options', 'retentionRules', 'auditRecords', 'measurementGenerators', 'measurementTombstones', 'notificationSubscriptions', 'notificationTokens', 'serviceState', 'applications', 'applicationSubscriptions', 'usageStatistics', 'trustedCertificates']
+export const TENANT_COLLECTIONS: readonly TenantCollection[] = ['managedObjects', 'children', 'externalIds', 'measurements', 'events', 'alarms', 'operations', 'binaries', 'eventBinaries', 'users', 'groups', 'roles', 'inventoryRoles', 'inventoryAssignments', 'sequences', 'bulkOperations', 'newDeviceRequests', 'options', 'retentionRules', 'auditRecords', 'measurementGenerators', 'measurementTombstones', 'notificationSubscriptions', 'serviceState', 'applications', 'applicationSubscriptions', 'usageStatistics', 'trustedCertificates']
 
 /**
  * Stored file content of a binary or an event attachment.
