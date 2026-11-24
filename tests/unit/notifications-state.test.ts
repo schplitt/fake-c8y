@@ -261,12 +261,12 @@ async function connectingSocket(world: World, subscription: string, subscriber: 
   return { socket, events }
 }
 
-async function open(world: World, run: () => void, subscription: string, subscriber: string, tenant?: string, expiresInMinutes?: number) {
+async function open(world: World, run: () => void, subscription: string, subscriber: string, tenant?: string, expiresInMinutes?: number, shared?: boolean) {
   const headers: Record<string, string> = { 'accept': 'application/json', 'content-type': 'application/json' }
   if (tenant) {
     headers.authorization = `Basic ${btoa(`${tenant}/service_${tenant}:p`)}`
   }
-  const response = await world.fetch(new Request(`${world.baseUrl}/notification2/token`, { method: 'POST', headers, body: JSON.stringify({ subscription, subscriber, ...(expiresInMinutes ? { expiresInMinutes } : {}) }) }))
+  const response = await world.fetch(new Request(`${world.baseUrl}/notification2/token`, { method: 'POST', headers, body: JSON.stringify({ subscription, subscriber, ...(expiresInMinutes ? { expiresInMinutes } : {}), ...(shared ? { shared } : {}) }) }))
   expect(response.status).toBe(200)
   const token = (await response.json() as { token: string }).token
   const WebSocket = createFakeWebSocket(world.realtime)
@@ -421,7 +421,7 @@ describe('closeConsumers()', () => {
     expect(again.received).toEqual([])
   })
 
-  it('does not requeue frames while another consumer of the subscription stays open', async () => {
+  it('keeps the frames of a subscriber while another subscriber of the subscription stays open', async () => {
     const { world, run } = await twoSubscriptions()
     const a = await open(world, run, 'one', 'a')
     const b = await open(world, run, 'one', 'b')
@@ -432,7 +432,7 @@ describe('closeConsumers()', () => {
     run()
     expect(b.received).toHaveLength(2)
     const again = await open(world, run, 'one', 'a')
-    expect(again.received).toEqual([])
+    expect(again.received.map((frame) => JSON.parse(frame.split('\n\n')[1]!).name)).toEqual(['delivered', 'while away'])
     expect(a.received).toHaveLength(1)
   })
 
@@ -690,7 +690,7 @@ describe('backlog before a first connect', () => {
     expect(world.realtime.status().backlog).toBe(1)
   })
 
-  it('keeps the backlog after an unsubscribe while another consumer is open', async () => {
+  it('drops only the backlog of the unsubscribed subscriber while another subscriber is open', async () => {
     const { world, run } = await persistent()
     const a = await open(world, run, 'sub', 'a')
     const b = await open(world, run, 'sub', 'b')
@@ -724,6 +724,67 @@ describe('backlog before a first connect', () => {
     await call(world, 'POST', '/inventory/managedObjects', { name: 'kept' })
     expect((await call(world, 'DELETE', `/notification2/subscriptions/${id}`)).status).toBe(204)
     expect(world.realtime.status().backlog).toBe(1)
+  })
+
+  describe('flushed with a synchronous schedule', () => {
+    /**
+     * A subscriber `a` with the backlog `1`, `2`, `3`, and a new socket for
+     * it whose connect (and flush) runs with a synchronous schedule while
+     * `connect()` runs, after its listeners are attached.
+     */
+    async function filled() {
+      const queue: Array<() => void> = []
+      let sync = false
+      const world = createWorld({ schedule: (callback) => sync ? callback() : queue.push(callback) })
+      const run = () => {
+        while (queue.length > 0) {
+          queue.shift()!()
+        }
+      }
+      await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+      const a = await open(world, run, 'sub', 'a')
+      a.socket.close()
+      run()
+      for (const n of ['1', '2', '3']) {
+        await call(world, 'POST', '/inventory/managedObjects', { name: n })
+      }
+      const token = (await call(world, 'POST', '/notification2/token', { subscription: 'sub', subscriber: 'a' })).body.token as string
+      const WebSocket = createFakeWebSocket(world.realtime)
+      const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
+      const connect = () => {
+        sync = true
+        run()
+        sync = false
+      }
+      return { world, run, socket, connect }
+    }
+
+    it('keeps the rest of the backlog when a message listener closes the socket', async () => {
+      const { world, run, socket, connect } = await filled()
+      const received: string[] = []
+      socket.on('message', (text: string) => {
+        received.push(name(text))
+        socket.close()
+      })
+      connect()
+      expect(received).toEqual(['1'])
+      expect(world.realtime.status().backlog).toBe(3)
+      const again = await open(world, run, 'sub', 'a')
+      expect(again.received.map(name)).toEqual(['1', '2', '3'])
+    })
+
+    it('delivers a frame published by a message listener after the flushed frames', async () => {
+      const { world, socket, connect } = await filled()
+      const received: string[] = []
+      socket.on('message', (text: string) => {
+        received.push(name(text))
+        if (received.length === 1) {
+          world.realtime.publish(world.tenant, 'managedobjects', 'CREATE', { id: '999', name: '4' }, undefined)
+        }
+      })
+      connect()
+      expect(received).toEqual(['1', '2', '3', '4'])
+    })
   })
 })
 
@@ -915,7 +976,11 @@ describe('token expiry', () => {
   it('never expires a token whose expiresInMinutes is too large, also after a JSON snapshot round trip', async () => {
     const { world, run } = await clockWorld()
     const value = await token(world, { expiresInMinutes: '9'.repeat(400) })
-    expect(connect(world, run, value).events).toEqual([['open']])
+    const first = connect(world, run, value)
+    expect(first.events).toEqual([['open']])
+    // a second open socket of the same subscriber would be refused (409)
+    first.socket.close()
+    run()
     world.restore(JSON.parse(JSON.stringify(world.snapshot())))
     expect(connect(world, run, value).events).toEqual([['open']])
   })
@@ -1198,5 +1263,207 @@ describe('refused connects', () => {
     await world.realtime.settled({ timeout: 1000 })
     expect(consumer.events).toEqual([['unexpected-response', {}, { statusCode: 401, statusMessage: 'Unauthorized' }]])
     expect(world.realtime.pending()).toBe(0)
+  })
+})
+
+describe('one backlog per subscriber', () => {
+  const name = (frame: string) => JSON.parse(frame.split('\n\n')[1]!).name
+  const sourceOf = (frame: string) => frame.split('\n')[1]!.split('/')[3]!
+
+  async function persistent() {
+    const { world, run } = manualWorld()
+    await call(world, 'POST', '/notification2/subscriptions', { context: 'tenant', subscription: 'sub' })
+    return { world, run }
+  }
+
+  async function mint(world: World, subscriber: string, shared?: boolean) {
+    return (await call(world, 'POST', '/notification2/token', { subscription: 'sub', subscriber, ...(shared ? { shared } : {}) })).body.token as string
+  }
+
+  it('gives each subscriber of one subscription every frame once', async () => {
+    const { world, run } = await persistent()
+    const a = await open(world, run, 'sub', 'a')
+    const b = await open(world, run, 'sub', 'b')
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'one' })
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'two' })
+    run()
+    expect(a.received.map(name)).toEqual(['one', 'two'])
+    expect(b.received.map(name)).toEqual(['one', 'two'])
+  })
+
+  it('starts the backlog of a subscriber at its own first connect', async () => {
+    const { world, run } = await persistent()
+    const a = await open(world, run, 'sub', 'a')
+    a.socket.close()
+    run()
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'for a' })
+    expect(world.realtime.status().backlog).toBe(1)
+    const b = await open(world, run, 'sub', 'b')
+    expect(b.received).toEqual([])
+    b.socket.close()
+    run()
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'for both' })
+    expect(world.realtime.status().backlog).toBe(3)
+    expect((await open(world, run, 'sub', 'a')).received.map(name)).toEqual(['for a', 'for both'])
+    expect((await open(world, run, 'sub', 'b')).received.map(name)).toEqual(['for both'])
+  })
+
+  it('refuses a second open socket of the same subscriber with 409, and takes a reconnect once it closed', async () => {
+    const { world, run } = await persistent()
+    const first = await open(world, run, 'sub', 'a')
+    const WebSocket = createFakeWebSocket(world.realtime, { flavor: 'ws' })
+    const second = new WebSocket(`wss://example.test/notification2/consumer/?token=${await mint(world, 'a')}`)
+    const responses: unknown[] = []
+    second.on('unexpected-response', (_request: unknown, response: unknown) => responses.push(response))
+    run()
+    expect(responses).toEqual([{ statusCode: 409, statusMessage: 'Conflict' }])
+    second.terminate()
+    run()
+    const TextSocket = createFakeWebSocket(world.realtime)
+    const third = new TextSocket(`wss://example.test/notification2/consumer/?token=${first.token}`)
+    const events: unknown[][] = []
+    third.on('error', (error: Error) => events.push(['error', error.message]))
+    third.on('close', (...args: unknown[]) => events.push(['close', ...args]))
+    run()
+    expect(events).toEqual([['error', 'Unexpected server response: 409'], ['close', 1006, '']])
+    expect(world.realtime.consumers()).toHaveLength(1)
+    first.socket.close()
+    const again = new TextSocket(`wss://example.test/notification2/consumer/?token=${first.token}`)
+    run()
+    expect(again.readyState).toBe(1)
+  })
+
+  it('refuses a shared and a non-shared socket of one subscriber together with 409', async () => {
+    const { world, run } = await persistent()
+    const WebSocket = createFakeWebSocket(world.realtime)
+    for (const [opened, next] of [[true, false], [false, true]]) {
+      const first = await open(world, run, 'sub', 'a', undefined, undefined, opened)
+      const second = new WebSocket(`wss://example.test/notification2/consumer/?token=${await mint(world, 'a', next)}`)
+      run()
+      expect(second.readyState).toBe(3)
+      first.socket.close()
+      run()
+    }
+  })
+
+  it('splits frames among the shared sockets of a subscriber by source, each frame once', async () => {
+    const { world, run } = await persistent()
+    const one = await open(world, run, 'sub', 'a', undefined, undefined, true)
+    const two = await open(world, run, 'sub', 'a', undefined, undefined, true)
+    const devices = [world.device(), world.device(), world.device()]
+    for (let round = 0; round < 3; round++) {
+      for (const device of devices) {
+        await call(world, 'POST', '/event/events', { source: { id: device }, type: 't', text: 'x', time: '2026-01-01T00:00:00.000Z' })
+      }
+    }
+    run()
+    const frames = [...one.received, ...two.received]
+    expect(frames.filter((frame) => frame.split('\n')[1]!.split('/')[2] === 'events')).toHaveLength(9)
+    expect(new Set(frames.map(ackId)).size).toBe(frames.length)
+    for (const device of devices) {
+      const sockets = [one, two].filter((socket) => socket.received.some((frame) => sourceOf(frame) === device))
+      expect(sockets).toHaveLength(1)
+    }
+  })
+
+  it('hands the unacknowledged frames of a closing shared socket to the other one', async () => {
+    const { world, run } = await persistent()
+    const one = await open(world, run, 'sub', 'a', undefined, undefined, true)
+    const two = await open(world, run, 'sub', 'a', undefined, undefined, true)
+    for (const name of ['A', 'B', 'C', 'D']) {
+      await call(world, 'POST', '/inventory/managedObjects', { name })
+    }
+    run()
+    expect(one.received.length + two.received.length).toBe(4)
+    const [closing, other] = one.received.length > 0 ? [one, two] : [two, one]
+    const before = other.received.length
+    closing.socket.close()
+    run()
+    expect(other.received.slice(before).map(ackId).sort()).toEqual(closing.received.map(ackId).sort())
+    expect(world.realtime.status().backlog).toBe(0)
+  })
+
+  it('keeps a backlog per subscriber across reset(), restore(), and forks', async () => {
+    const { world, run } = await persistent()
+    const start = world.checkpoint()
+    const snapshot = world.snapshot()
+    const connectOnce = async (subscriber: string) => {
+      const consumer = await open(world, run, 'sub', subscriber)
+      consumer.socket.close()
+      run()
+    }
+    await connectOnce('a')
+    await connectOnce('b')
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'both' })
+    expect(world.realtime.status().backlog).toBe(2)
+    world.reset({ to: start })
+    expect(world.realtime.status().backlog).toBe(0)
+    await connectOnce('a')
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'only a' })
+    expect(world.realtime.status().backlog).toBe(1)
+    world.restore(snapshot)
+    expect(world.realtime.status().backlog).toBe(0)
+    await connectOnce('b')
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'only b' })
+    expect(world.realtime.status().backlog).toBe(1)
+    const fork = world.fork()
+    await call(fork, 'POST', '/inventory/managedObjects', { name: 'on the fork' })
+    expect(fork.realtime.status().backlog).toBe(0)
+    expect(world.realtime.status().backlog).toBe(1)
+  })
+
+  it('drops only the unsubscribed subscriber\'s backlog', async () => {
+    const { world, run } = await persistent()
+    const a = await open(world, run, 'sub', 'a')
+    const b = await open(world, run, 'sub', 'b')
+    b.socket.close()
+    run()
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'kept for b' })
+    run()
+    expect(a.received.map(name)).toEqual(['kept for b'])
+    expect((await call(world, 'POST', `/notification2/unsubscribe?token=${a.token}`)).status).toBe(200)
+    run()
+    expect(world.realtime.status().backlog).toBe(1)
+    expect((await open(world, run, 'sub', 'b')).received.map(name)).toEqual(['kept for b'])
+    expect((await open(world, run, 'sub', 'a')).received).toEqual([])
+  })
+
+  it('delivers a frame an \'open\' listener publishes, after the subscriber\'s backlog', async () => {
+    const { world, run } = await persistent()
+    const first = await open(world, run, 'sub', 'a')
+    first.socket.close()
+    run()
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'waiting' })
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${first.token}`)
+    const received: string[] = []
+    socket.on('message', (text: string) => received.push(text))
+    socket.on('open', () => world.realtime.publish(world.tenant, 'managedobjects', 'CREATE', { id: '424242', name: 'in open' }, undefined))
+    run()
+    expect(received.map(name)).toEqual(['waiting', 'in open'])
+    expect(world.realtime.status().backlog).toBe(0)
+  })
+
+  it('treats a socket its \'open\' listener closes like an open then close: later frames go to the subscriber\'s backlog', async () => {
+    const { world, run } = await persistent()
+    const WebSocket = createFakeWebSocket(world.realtime)
+    const token = await mint(world, 'a')
+    const socket = new WebSocket(`wss://example.test/notification2/consumer/?token=${token}`)
+    socket.on('open', () => socket.close())
+    run()
+    expect(socket.readyState).toBe(3)
+    expect(world.realtime.consumers()).toEqual([])
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'kept' })
+    expect(world.realtime.status().backlog).toBe(1)
+    expect((await open(world, run, 'sub', 'a')).received.map(name)).toEqual(['kept'])
+  })
+
+  it('keeps delivering to open sockets after a direct dropPending()', async () => {
+    const { world, run } = await persistent()
+    const a = await open(world, run, 'sub', 'a')
+    world.realtime.dropPending()
+    await call(world, 'POST', '/inventory/managedObjects', { name: 'after drop' })
+    run()
+    expect(a.received.map(name)).toEqual(['after drop'])
   })
 })

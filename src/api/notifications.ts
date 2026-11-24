@@ -267,7 +267,7 @@ export function notifications(call: C8yRequest, segments: string[], data: Tenant
     }
     // the platform destroys the consumer's backlog: nothing is kept until a
     // consumer connects again. The token stays valid.
-    data.world.realtime.unsubscribed(claims.tenant, subscription)
+    data.world.realtime.unsubscribed(claims.tenant, subscription, subscriber)
     return Response.json({ result: 'DONE' })
   }
 

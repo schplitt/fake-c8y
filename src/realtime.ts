@@ -18,6 +18,8 @@
  * the frames on their way. `world.reset()` and `world.restore()` drop
  * undelivered frames and close the sockets (open or connecting) whose
  * subscription is gone, as a dropped connection (1006, empty reason).
+ * Every subscriber (tenant, subscription, and subscriber of the token) gets
+ * each frame once; the sockets of a shared token split them by source.
  * `closeConsumers()` closes sockets from the server side to test a client's
  * reconnect path.
  * The consumer WebSocket is in `./websocket` (the `fake-c8y/realtime` entry).
@@ -63,6 +65,10 @@ export interface NotificationToken {
 export interface NotificationFrame {
   ackId: string
   text: string
+  /**
+   * The source in the frame's second line (shared sockets split frames by it).
+   */
+  source?: string
 }
 
 /**
@@ -230,9 +236,10 @@ export interface RealtimeStatus {
    */
   unacknowledged: number
   /**
-   * Frames held for a persistent subscription without an open consumer. They
-   * are kept only once a consumer of the subscription has connected, like on
-   * the platform. Informational: `settled()` does not wait for them.
+   * Frames held for the subscribers of a persistent subscription that have no
+   * open socket, summed over all subscribers. A subscriber's frames are kept
+   * only once it has connected, like on the platform. Informational:
+   * `settled()` does not wait for them.
    */
   backlog: number
   /**
@@ -297,14 +304,26 @@ export class Realtime {
    */
   connecting: Set<NotificationSocket> = new Set()
   /**
-   * frames waiting for a consumer of a subscription name (persistent subscriptions)
+   * Frames waiting for a subscriber without an open socket (persistent
+   * subscriptions), one entry per subscriber. The keys are opaque.
    */
   backlog: Map<string, NotificationFrame[]> = new Map()
   /**
-   * subscriptions (by `key()`) a consumer has connected to: only they keep a
+   * per subscription (by `key()`): the subscribers that connected since the
+   * last reset or restore (open sockets always are); only they keep a
    * backlog, like on the platform
    */
-  private connected: Set<string> = new Set()
+  private connected: Map<string, Set<string>> = new Map()
+  /**
+   * the sources assigned to each open socket (frames of one source go to one
+   * socket of a subscriber)
+   */
+  private readonly sources: Map<NotificationSocket, Set<string>> = new Map()
+  /**
+   * the open sockets of each subscriber (by `key()`), in the order they
+   * opened; a subscriber without one has no entry
+   */
+  private readonly open: Map<string, NotificationSocket[]> = new Map()
   /**
    * delivered but not yet acknowledged frames, per socket
    */
@@ -375,34 +394,109 @@ export class Realtime {
     const given = values.length === 1 && values[0] !== '' ? values[0] : undefined
     const token = given === undefined ? undefined : parseToken(given, this.now())
     if (!token) {
-      const status = given === undefined ? 400 : 401
-      if (REFUSE in socket) {
-        (socket as RefusableSocket)[REFUSE](status)
-        return
-      }
-      // a socket of another class gets the `ws` package's events without an
-      // `unexpected-response` listener
-      abortConnect(this, socket, `Unexpected server response: ${status}`)
+      this.refuse(socket, given === undefined ? 400 : 401)
+      return
+    }
+    // 409: a subscriber has one open socket, or several when they all (and
+    // the new one) use a shared token; a closed socket frees its slot at once
+    const subscriber = this.key(token.tenant, token.subscription, token.subscriber)
+    const open = this.open.get(subscriber) ?? []
+    if (open.length > 0 && !(token.shared && open.every((other) => other.token?.shared))) {
+      this.refuse(socket, 409)
       return
     }
     socket.token = token
     socket.readyState = SOCKET_STATE.OPEN
     this.sockets.add(socket)
+    this.open.set(subscriber, [...open, socket])
     this.unacked.set(socket, new Set())
     this.outstanding.set(socket, new Map())
+    // connected before 'open': a frame an 'open' listener publishes queues
+    // behind the subscriber's backlog (flushed below, after the listeners),
+    // and a socket an 'open' listener closes counts as having connected
+    this.markConnected(token)
     socket.emit('open')
+    this.flush(subscriber)
+  }
+
+  private refuse(socket: NotificationSocket, status: number): void {
+    if (REFUSE in socket) {
+      (socket as RefusableSocket)[REFUSE](status)
+      return
+    }
+    // a socket of another class gets the `ws` package's events without an
+    // `unexpected-response` listener
+    abortConnect(this, socket, `Unexpected server response: ${status}`)
+  }
+
+  private markConnected(token: NotificationToken): void {
     const key = this.key(token.tenant, token.subscription)
-    this.connected.add(key)
-    const waiting = this.backlog.get(key) ?? []
-    this.backlog.delete(key)
-    for (const frame of waiting) {
-      this.deliver(socket, frame)
+    let subscribers = this.connected.get(key)
+    if (!subscribers) {
+      subscribers = new Set()
+      this.connected.set(key, subscribers)
+    }
+    subscribers.add(token.subscriber)
+  }
+
+  /**
+   * The open socket of a subscriber a frame goes to: its only one, else (a
+   * shared token) the one the frame's source is assigned to, else the one
+   * with the fewest assigned sources (ties: the first opened), which the
+   * source is then assigned to.
+   * @param subscriber - The subscriber's `key()`
+   * @param frame - The frame
+   */
+  private route(subscriber: string, frame: NotificationFrame): NotificationSocket | undefined {
+    const open = this.open.get(subscriber) ?? []
+    if (open.length <= 1) {
+      return open[0]
+    }
+    const source = frame.source ?? ''
+    let fewest: { socket: NotificationSocket, sources: Set<string> } | undefined
+    for (const socket of open) {
+      const sources = this.sources.get(socket) ?? new Set<string>()
+      if (sources.has(source)) {
+        return socket
+      }
+      if (!fewest || sources.size < fewest.sources.size) {
+        fewest = { socket, sources }
+      }
+    }
+    if (!fewest) {
+      return undefined
+    }
+    fewest.sources.add(source)
+    this.sources.set(fewest.socket, fewest.sources)
+    return fewest.socket
+  }
+
+  /**
+   * Delivers a subscriber's backlog (in ack order) while one of its sockets is
+   * open. Takes one frame at a time from the stored backlog, so a frame
+   * published during a delivery (a synchronous `schedule`) queues behind the
+   * rest, and a socket closed during a delivery leaves the rest stored.
+   * @param subscriber - The subscriber's `key()`
+   */
+  private flush(subscriber: string): void {
+    let waiting = this.backlog.get(subscriber)
+    while (waiting && this.open.has(subscriber)) {
+      // publish() pushes onto the stored array, requeue() replaces it
+      const frame = waiting.shift()
+      if (waiting.length === 0) {
+        this.backlog.delete(subscriber)
+      }
+      const socket = frame && this.route(subscriber, frame)
+      if (socket) {
+        this.deliver(socket, frame)
+      }
+      waiting = this.backlog.get(subscriber)
     }
   }
 
   /**
    * Removes a closed consumer socket. Its unacknowledged frames go back into
-   * the subscription's backlog (`requeue()`).
+   * its subscriber's backlog (`requeue()`).
    * @param socket - The closed socket
    */
   disconnect(socket: NotificationSocket): void {
@@ -411,26 +505,38 @@ export class Realtime {
     this.sockets.delete(socket)
     this.unacked.delete(socket)
     this.outstanding.delete(socket)
+    this.sources.delete(socket)
     if (socket.token) {
+      const subscriber = this.key(socket.token.tenant, socket.token.subscription, socket.token.subscriber)
+      const open = (this.open.get(subscriber) ?? []).filter((other) => other !== socket)
+      if (open.length > 0) {
+        this.open.set(subscriber, open)
+      } else {
+        this.open.delete(subscriber)
+      }
       this.requeue(socket.token, frames)
     }
   }
 
   /**
-   * After an unsubscribe closed its consumer's sockets: drops the
-   * subscription's backlog and forgets that a consumer connected, like the
-   * platform. Does nothing while another consumer of the subscription is
-   * still open, so that consumer keeps its backlog once it closes.
+   * After an unsubscribe closed a subscriber's sockets: drops the
+   * subscriber's backlog and forgets that it connected, like the platform.
+   * Does nothing while a socket of the subscriber is still open.
    * @param tenant - The subscription's tenant
    * @param subscription - The subscription name
+   * @param subscriber - The subscriber
    */
-  unsubscribed(tenant: string, subscription: string): void {
-    if ([...this.sockets].some((socket) => socket.token?.tenant === tenant && socket.token.subscription === subscription)) {
+  unsubscribed(tenant: string, subscription: string, subscriber: string): void {
+    const key = this.key(tenant, subscription, subscriber)
+    if (this.open.has(key)) {
       return
     }
-    const key = this.key(tenant, subscription)
     this.backlog.delete(key)
-    this.connected.delete(key)
+    const subscribers = this.connected.get(this.key(tenant, subscription))
+    subscribers?.delete(subscriber)
+    if (subscribers?.size === 0) {
+      this.connected.delete(this.key(tenant, subscription))
+    }
   }
 
   acknowledge(socket: NotificationSocket, ackId: string): void {
@@ -438,8 +544,8 @@ export class Realtime {
     this.outstanding.get(socket)?.delete(ackId)
   }
 
-  key(tenant: string, subscription: string): string {
-    return `${tenant}\u0000${subscription}`
+  key(tenant: string, subscription: string, subscriber?: string): string {
+    return subscriber === undefined ? `${tenant}\u0000${subscription}` : `${tenant}\u0000${subscription}\u0000${subscriber}`
   }
 
   deliver(socket: NotificationSocket, frame: NotificationFrame): void {
@@ -493,19 +599,26 @@ export class Realtime {
       const payload = action === 'DELETE'
         ? `com.cumulocity.notification.service.RealtimeDeletedObject$1@${(this.nextAck * 2654435761 >>> 0).toString(16)}`
         : JSON.stringify(copyFragments(document, subscription.fragmentsToCopy))
+      const source = String(sourceId ?? document.id)
       const frame: NotificationFrame = {
         ackId,
-        text: `${ackId}\n/${tenant}/${api}/${sourceId ?? document.id}\n${action}\n\n${payload}`,
+        text: `${ackId}\n/${tenant}/${api}/${source}\n${action}\n\n${payload}`,
+        source,
       }
-      const consumers = [...this.sockets].filter((socket) => socket.token?.tenant === tenant && socket.token.subscription === name)
-      if (consumers.length > 0) {
-        for (const socket of consumers) {
+      // every subscriber that connected gets the frame once: on an open
+      // socket, else in its backlog (persistent subscriptions)
+      for (const subscriber of this.connected.get(this.key(tenant, name)) ?? []) {
+        // a backlog with an open socket waits for connect()'s flush: the
+        // frame queues behind it
+        const key = this.key(tenant, name, subscriber)
+        const waiting = this.backlog.get(key)
+        const socket = waiting ? undefined : this.route(key, frame)
+        if (socket) {
           this.deliver(socket, frame)
-        }
-      } else {
-        const key = this.key(tenant, name)
-        if (!subscription.nonPersistent && this.connected.has(key)) {
-          this.backlog.set(key, [...(this.backlog.get(key) ?? []), frame])
+        } else if (waiting) {
+          waiting.push(frame)
+        } else if (!subscription.nonPersistent) {
+          this.backlog.set(key, [frame])
         }
       }
     }
@@ -595,18 +708,25 @@ export class Realtime {
 
   /**
    * Drops undelivered notifications, also the ones already scheduled (data
-   * reset between tests), and forgets which subscriptions had a consumer.
+   * reset between tests), and forgets which subscribers had connected,
+   * except the subscribers of open sockets: those keep receiving.
    */
   dropPending(): void {
     this.generation++
     this.tasks = 0
     this.backlog.clear()
     this.connected.clear()
+    this.sources.clear()
     for (const acks of this.unacked.values()) {
       acks.clear()
     }
     for (const frames of this.outstanding.values()) {
       frames.clear()
+    }
+    for (const socket of this.sockets) {
+      if (socket.token) {
+        this.markConnected(socket.token)
+      }
     }
   }
 
@@ -614,8 +734,8 @@ export class Realtime {
    * Drops undelivered notifications (after the data was reset or restored)
    * and, with `close`, closes the sockets whose subscription (tenant and
    * name) is no longer stored, as a dropped connection (1006, empty reason),
-   * also the ones still connecting. The open sockets whose subscription is
-   * stored count as connected; a connecting one counts once it opens.
+   * also the ones still connecting. The subscriber of every open socket that
+   * stays counts as connected; a connecting one counts once it opens.
    * @param close - `false` closes nothing (`reset({ consumers: 'keep' })`)
    */
   resync(close = true): void {
@@ -627,9 +747,10 @@ export class Realtime {
       const token = socket.token ?? parseToken(tokenOf(socket))
       const stored = token !== undefined && subscriptions.has(this.key(token.tenant, token.subscription))
       if (close && token !== undefined && !stored) {
+        // dropPending() marked its subscriber; its subscription is gone, so
+        // every socket of it closes here and none of its subscribers stays
         this.closeFromServer(socket, 1006, '')
-      } else if (stored && socket.readyState === SOCKET_STATE.OPEN) {
-        this.connected.add(this.key(token.tenant, token.subscription))
+        this.connected.delete(this.key(token.tenant, token.subscription))
       }
     }
   }
@@ -638,13 +759,13 @@ export class Realtime {
    * Closes open consumer sockets from the server side, as if the connection
    * dropped or the platform closed it, to test a client's reconnect path. The
    * subscriptions stay stored and the token stays valid, so the client can
-   * reconnect (with the same token or a new one). When no other consumer of the subscription stays
-   * open and the subscription is persistent, the frames the socket had not
-   * acknowledged (delivered or still scheduled) go back into the subscription's
-   * backlog, and frames published meanwhile wait there too: the next consumer
-   * of the subscription that connects gets them. Otherwise they are lost for
-   * this consumer. The platform's redelivery is not verified. The `close`
-   * event is emitted synchronously.
+   * reconnect (with the same token or a new one). When the subscription is
+   * persistent, the frames the socket had not acknowledged (delivered or
+   * still scheduled) go back into its subscriber's backlog: to another open
+   * socket of the subscriber (a shared token) at once, else they wait with
+   * the frames published meanwhile until a socket of the subscriber
+   * connects. Otherwise they are lost. The platform's redelivery is not
+   * verified. The `close` event is emitted synchronously.
    * @param options - Which sockets (all open ones by default), code, and reason
    * @returns How many sockets were closed
    * @example
@@ -671,22 +792,24 @@ export class Realtime {
 
   /**
    * Puts the unacknowledged frames of a closed consumer back into its
-   * subscription's backlog (in ack order, before the frames published since),
-   * when the subscription is persistent and has no other open consumer.
+   * subscriber's backlog (in ack order, before the frames published since)
+   * when the subscription is persistent, then hands them to another open
+   * socket of the subscriber, if there is one (`flush()`).
    * @param token - The closed consumer's token
    * @param frames - Its unacknowledged frames
    */
   private requeue(token: NotificationToken, frames: NotificationFrame[]): void {
-    if (frames.length === 0 || [...this.sockets].some((socket) => socket.token?.tenant === token.tenant && socket.token.subscription === token.subscription)) {
+    if (frames.length === 0) {
       return
     }
     const persistent = [...this.storedSubscriptions()].some((subscription) => subscription.tenant === token.tenant && subscription.subscription === token.subscription && !subscription.nonPersistent)
     if (!persistent) {
       return
     }
-    const key = this.key(token.tenant, token.subscription)
+    const key = this.key(token.tenant, token.subscription, token.subscriber)
     const byAck = new Map([...frames, ...(this.backlog.get(key) ?? [])].map((frame) => [frame.ackId, frame]))
     this.backlog.set(key, [...byAck.values()].sort((a, b) => Number(a.ackId) - Number(b.ackId)))
+    this.flush(key)
   }
 
   private closeFromServer(socket: NotificationSocket, code: number, reason: string): void {
@@ -705,6 +828,7 @@ export class Realtime {
       socket.emit('close', 1000, '')
     }
     this.sockets.clear()
+    this.open.clear()
     this.connecting.clear()
     this.unacked.clear()
     this.outstanding.clear()

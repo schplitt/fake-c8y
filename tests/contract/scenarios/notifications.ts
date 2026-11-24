@@ -1,6 +1,6 @@
 import { expect } from 'vitest'
 import type { Client } from '@c8y/client'
-import type { ContractContext, ContractScenario } from '../helpers'
+import type { ContractContext, ContractScenario, RawSocket } from '../helpers'
 import { eventually, time } from '../helpers'
 
 async function api(client: Client, method: string, path: string, body?: unknown) {
@@ -247,6 +247,74 @@ export const notificationsScenarios: ContractScenario[] = [
       const unsubscribed = await api(client, 'POST', `/notification2/unsubscribe?token=${consumer.token}`)
       expect(unsubscribed.status).toBe(200)
       expect(unsubscribed.body).toEqual({ result: 'DONE' })
+      expect((await api(client, 'DELETE', `/notification2/subscriptions/${created.body.id}`)).status).toBe(204)
+    },
+  },
+  {
+    name: 'notification2: a second socket of the same subscriber is refused with 409',
+    async run({ client, unique, socket }) {
+      const { data: device } = await client.inventory.create({ name: `nc-${unique}`, c8y_IsDevice: {} })
+      const name = `conflict${unique}`
+      const created = await api(client, 'POST', '/notification2/subscriptions', { context: 'mo', subscription: name, source: { id: device.id }, subscriptionFilter: { apis: ['measurements'] } })
+      expect(created.status).toBe(201)
+      const mint = async () => {
+        const minted = await api(client, 'POST', '/notification2/token', { subscription: name, subscriber: `c${unique}` })
+        expect(minted.status).toBe(200)
+        return minted.body.token as string
+      }
+      const first = await socket(await mint())
+      expect(first.opened).toBe(true)
+
+      const second = await socket(await mint())
+      expect(second.opened).toBe(false)
+      expect(second.refused).toBe(409)
+      expect(second.closes).toEqual([[1006, '']])
+      expect(first.closes).toEqual([])
+
+      const unsubscribed = await api(client, 'POST', `/notification2/unsubscribe?token=${first.token}`)
+      expect(unsubscribed.status).toBe(200)
+      expect((await api(client, 'DELETE', `/notification2/subscriptions/${created.body.id}`)).status).toBe(204)
+    },
+  },
+  {
+    name: 'notification2: two subscribers of one subscription each get the frame',
+    async run({ client, unique, tenant, socket, settle }) {
+      const { data: device } = await client.inventory.create({ name: `ns-${unique}`, c8y_IsDevice: {} })
+      const name = `two${unique}`
+      const created = await api(client, 'POST', '/notification2/subscriptions', { context: 'mo', subscription: name, source: { id: device.id }, subscriptionFilter: { apis: ['measurements'] } })
+      expect(created.status).toBe(201)
+      const consumers: RawSocket[] = []
+      for (const subscriber of [`a${unique}`, `b${unique}`]) {
+        const minted = await api(client, 'POST', '/notification2/token', { subscription: name, subscriber })
+        expect(minted.status).toBe(200)
+        const consumer = await socket(minted.body.token)
+        expect(consumer.opened).toBe(true)
+        consumers.push(consumer)
+      }
+      // give the consumers a moment to attach before the data change
+      await settle(2000)
+
+      const measurement = await api(client, 'POST', '/measurement/measurements', { source: { id: device.id }, type: 'c8y_Temperature', time: new Date().toISOString(), c8y_Temperature: { T: { value: 21, unit: 'C' } } })
+      expect(measurement.status).toBe(201)
+      await eventually(async () => {
+        for (const consumer of consumers) {
+          expect(consumer.messages).toHaveLength(1)
+        }
+      }, 15_000)
+      // no second copy arrives later
+      await settle(1500)
+      for (const consumer of consumers) {
+        expect(consumer.messages).toHaveLength(1)
+      }
+      for (const consumer of consumers) {
+        const [ackId, description] = consumer.messages[0]!.replace(/\r\n/g, '\n').split('\n')
+        expect(description).toBe(`/${tenant}/measurements/${device.id}`)
+        consumer.send(ackId!)
+      }
+
+      for (const consumer of consumers) {
+        expect((await api(client, 'POST', `/notification2/unsubscribe?token=${consumer.token}`)).status).toBe(200)
+      }
       expect((await api(client, 'DELETE', `/notification2/subscriptions/${created.body.id}`)).status).toBe(204)
     },
   },
