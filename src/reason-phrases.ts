@@ -68,6 +68,14 @@ const REASON_PHRASES: Readonly<Record<number, string>> = {
   511: 'Network Authentication Required',
 }
 
+/**
+ * The standard reason phrase of an HTTP status, if it has one.
+ * @param status - An HTTP status
+ */
+export function reasonPhrase(status: number): string | undefined {
+  return REASON_PHRASES[status]
+}
+
 // Statuses whose response cannot have a body.
 const NULL_BODY = new Set([101, 103, 204, 205, 304])
 
@@ -80,7 +88,7 @@ const NULL_BODY = new Set([101, 103, 204, 205, 304])
  * @param response - A response
  */
 export async function withReasonPhrase(response: Response): Promise<Response> {
-  const phrase = REASON_PHRASES[response.status]
+  const phrase = reasonPhrase(response.status)
   if (response.statusText || phrase === undefined) {
     return response
   }

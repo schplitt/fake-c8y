@@ -251,6 +251,32 @@ export const notificationsScenarios: ContractScenario[] = [
     },
   },
   {
+    name: 'notification2: a socket with a bad token is refused with 401',
+    async run({ client, unique, socket }) {
+      // nothing connects, so the token's subscription need not exist
+      const minted = await api(client, 'POST', '/notification2/token', { subscription: `bad${unique}`, subscriber: `c${unique}` })
+      expect(minted.status).toBe(200)
+      const parts = (minted.body.token as string).split('.')
+      const sum = parts.at(-1)!
+      const tampered = [...parts.slice(0, -1), `${sum[0] === 'A' ? 'B' : 'A'}${sum.slice(1)}`].join('.')
+      for (const token of ['garbage', tampered]) {
+        const consumer = await socket(token)
+        expect(consumer.opened).toBe(false)
+        expect(consumer.refused).toBe(401)
+        expect(consumer.closes).toEqual([[1006, '']])
+      }
+    },
+  },
+  {
+    name: 'notification2: a socket with an empty token is refused with 400',
+    async run({ socket }) {
+      const consumer = await socket('')
+      expect(consumer.opened).toBe(false)
+      expect(consumer.refused).toBe(400)
+      expect(consumer.closes).toEqual([[1006, '']])
+    },
+  },
+  {
     name: 'realtime: notifications for measurements, alarms, and managed objects',
     async run({ client, unique, realtime }) {
       const { data: device } = await client.inventory.create({ name: `rt-${unique}`, c8y_IsDevice: {} })
