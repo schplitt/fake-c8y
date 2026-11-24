@@ -379,7 +379,7 @@ Sockets belong to one world, so use `createFakeWebSocket(fork.realtime)` for a f
 
 A persistent subscription keeps frames for later only once a consumer of it has connected, like on the platform. Frames published before the first connect are dropped. `reset()` and `restore()` forget that a consumer connected, and a fork starts without it. Sockets that stay open across a reset or restore still count as connected.
 
-A token expires `expiresInMinutes` after it was created (default 1440, one day), by the world's clock. A socket that is already open stays open and keeps receiving. A reconnect needs a new token: a connect with an expired token fails like one with an unknown token (`error`, then close `1008`). The platform's exact answer there is not verified. To move time in a test, create the world with a `clock` and call `world.advance()`, or pass a `now` function you control.
+A token expires `expiresInMinutes` after it was created (default 1440, one day; 0 also means the default), by the world's clock. A negative `expiresInMinutes` or a subscriber or subscription name that is not alphanumeric answers 422. A socket that is already open stays open and keeps receiving. A reconnect needs a new token: a connect with an expired token fails like one with an unknown token (`error`, then close `1008`). The platform's exact answer there is not verified. To move time in a test, create the world with a `clock` and call `world.advance()`, or pass a `now` function you control.
 
 ```ts
 import { createClock, createWorld } from 'fake-c8y'

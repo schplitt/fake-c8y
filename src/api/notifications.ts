@@ -119,7 +119,8 @@ function checkSubscription(data: TenantData, body: Record<string, any>): Respons
 const TOKEN_TYPES = ['notification', 'tenant']
 
 /**
- * Checks a token request like the platform (verified).
+ * Checks a token request like the platform (verified, except the message
+ * for a subscription name that is not alphanumeric).
  * @param body - Request body
  */
 function checkToken(body: Record<string, any>): Response | undefined {
@@ -135,7 +136,11 @@ function checkToken(body: Record<string, any>): Response | undefined {
   if (!NAME.test(String(body.subscriber))) {
     return apiError(422, 'reliable-notification/Invalid Data', `Invalid value for subscriber argument. : Subscriber argument <'${String(body.subscriber)}'> cannot be blank and has to be alphanumeric!`)
   }
-  if (minutes !== undefined && minutes !== null && Number(minutes) < 1) {
+  // the message text is a guess that copies the subscriber check above
+  if (!NAME.test(String(body.subscription))) {
+    return apiError(422, 'reliable-notification/Invalid Data', `Invalid value for subscription argument. : Subscription argument <'${String(body.subscription)}'> cannot be blank and has to be alphanumeric!`)
+  }
+  if (minutes !== undefined && minutes !== null && Number(minutes) < 0) {
     return apiError(422, 'reliable-notification/Invalid Data', 'Invalid value for expiresInMinutes argument!')
   }
   if (body.type !== undefined && body.type !== null && !TOKEN_TYPES.includes(String(body.type))) {
@@ -238,8 +243,8 @@ export function notifications(call: C8yRequest, segments: string[], data: Tenant
     // with the subscriber: the numbers start over after a reset, so two
     // consumers of one subscription never get the same token
     const token = `fake-token-${nextSequence(data, 'notificationToken')}-${body.subscription}-${body.subscriber}`
-    // the platform's default lifetime is one day (1440 minutes)
-    const expires = parseIsoTime(data.world.now()) + Number(body.expiresInMinutes ?? 1440) * 60_000
+    // the platform's default lifetime is one day (1440 minutes); 0 means the default
+    const expires = parseIsoTime(data.world.now()) + (Number(body.expiresInMinutes) || 1440) * 60_000
     data.notificationTokens.set(token, { tenant, subscription: body.subscription, subscriber: body.subscriber, expires })
     auditTokenCreated(data, String(body.subscription))
     return Response.json({ token })
