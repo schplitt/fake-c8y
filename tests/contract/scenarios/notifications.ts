@@ -206,6 +206,7 @@ export const notificationsScenarios: ContractScenario[] = [
   },
   {
     name: 'notification2: a raw consumer socket receives a frame, and an ack keeps it open',
+    verifies: ['unsubscribe-statuses'],
     async run({ client, unique, tenant, socket, settle }) {
       const { data: device } = await client.inventory.create({ name: `nr-${unique}`, c8y_IsDevice: {} })
       const name = `raw${unique}`
@@ -263,6 +264,7 @@ export const notificationsScenarios: ContractScenario[] = [
   },
   {
     name: 'notification2: a second socket of the same subscriber is refused with 409',
+    verifies: ['notification-subscriber-conflict'],
     async run({ client, unique, socket }) {
       const { data: device } = await client.inventory.create({ name: `nc-${unique}`, c8y_IsDevice: {} })
       const name = `conflict${unique}`
@@ -289,6 +291,7 @@ export const notificationsScenarios: ContractScenario[] = [
   },
   {
     name: 'notification2: two subscribers of one subscription each get the frame',
+    verifies: ['notification-subscribers-each'],
     async run({ client, unique, tenant, socket, settle }) {
       const { data: device } = await client.inventory.create({ name: `ns-${unique}`, c8y_IsDevice: {} })
       const name = `two${unique}`
@@ -331,6 +334,7 @@ export const notificationsScenarios: ContractScenario[] = [
   },
   {
     name: 'notification2: a socket with a bad token is refused with 401',
+    verifies: ['notification-connect-refusal'],
     async run({ client, unique, socket }) {
       // nothing connects, so the token's subscription need not exist
       const minted = await api(client, 'POST', '/notification2/token', { subscription: `bad${unique}`, subscriber: `c${unique}` })
@@ -348,6 +352,7 @@ export const notificationsScenarios: ContractScenario[] = [
   },
   {
     name: 'notification2: a socket with an empty token is refused with 400',
+    verifies: ['notification-connect-refusal'],
     async run({ socket }) {
       const consumer = await socket('')
       expect(consumer.opened).toBe(false)

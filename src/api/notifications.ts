@@ -260,8 +260,7 @@ export function notifications(call: C8yRequest, segments: string[], data: Tenant
     const { subscriber, subscription } = claims
     auditUnsubscribed(data, subscriber, subscription)
     // the platform drops the subscriber's backlog and closes no socket: the
-    // socket keeps receiving (inferred: it re-creates the subscriber), and
-    // the token stays valid
+    // socket keeps receiving and the token stays valid (verified)
     data.world.realtime.unsubscribed(claims.tenant, subscription, subscriber)
     return Response.json({ result: 'DONE' })
   }
