@@ -183,7 +183,10 @@ export const C8Y_ENDPOINTS = {
     query: [],
   },
   'DELETE /measurement/measurements/{id}': {
-    query: [],
+    query: [
+      'source',
+      'time',
+    ],
   },
   'GET /event/events': {
     query: [

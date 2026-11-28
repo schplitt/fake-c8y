@@ -282,7 +282,14 @@
     },
     "POST /measurement/measurements": {},
     "GET /measurement/measurements/{id}": {},
-    "DELETE /measurement/measurements/{id}": {},
+    "DELETE /measurement/measurements/{id}": {
+      "source": {
+        "type": "string"
+      },
+      "time": {
+        "type": "string"
+      }
+    },
     "GET /event/events": {
       "createdFrom": {
         "type": "string"
@@ -7843,6 +7850,22 @@
     },
     "DELETE /measurement/measurements/{id}": {
       "204": {},
+      "400": {
+        "application/vnd.com.nsn.cumulocity.error+json": {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "info": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "401": {
         "application/vnd.com.nsn.cumulocity.error+json": {
           "type": "object",
@@ -32748,29 +32771,7 @@
                     "format": "date-time"
                   },
                   "type": {
-                    "type": "string",
-                    "enum": [
-                      "Alarm",
-                      "Application",
-                      "BulkOperation",
-                      "CepModule",
-                      "Connector",
-                      "Event",
-                      "Group",
-                      "Inventory",
-                      "InventoryRole",
-                      "Operation",
-                      "Option",
-                      "Report",
-                      "SingleSignOn",
-                      "SmartRule",
-                      "SYSTEM",
-                      "Tenant",
-                      "TenantAuthConfig",
-                      "TrustedCertificates",
-                      "User",
-                      "UserAuthentication"
-                    ]
+                    "type": "string"
                   },
                   "user": {
                     "type": "string"
@@ -32943,29 +32944,7 @@
               "format": "date-time"
             },
             "type": {
-              "type": "string",
-              "enum": [
-                "Alarm",
-                "Application",
-                "BulkOperation",
-                "CepModule",
-                "Connector",
-                "Event",
-                "Group",
-                "Inventory",
-                "InventoryRole",
-                "Operation",
-                "Option",
-                "Report",
-                "SingleSignOn",
-                "SmartRule",
-                "SYSTEM",
-                "Tenant",
-                "TenantAuthConfig",
-                "TrustedCertificates",
-                "User",
-                "UserAuthentication"
-              ]
+              "type": "string"
             },
             "user": {
               "type": "string"
@@ -33135,29 +33114,7 @@
               "format": "date-time"
             },
             "type": {
-              "type": "string",
-              "enum": [
-                "Alarm",
-                "Application",
-                "BulkOperation",
-                "CepModule",
-                "Connector",
-                "Event",
-                "Group",
-                "Inventory",
-                "InventoryRole",
-                "Operation",
-                "Option",
-                "Report",
-                "SingleSignOn",
-                "SmartRule",
-                "SYSTEM",
-                "Tenant",
-                "TenantAuthConfig",
-                "TrustedCertificates",
-                "User",
-                "UserAuthentication"
-              ]
+              "type": "string"
             },
             "user": {
               "type": "string"
